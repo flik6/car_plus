@@ -1044,24 +1044,39 @@
       }
 
       orbit.deckProgress = p;
+      smoothDeckProgress = p;
       orbit.velTheta = 0;
       orbit.velPhi = 0;
 
       if (p > 0.001) {
         orbit.topDownLocked = true;
         orbit.dragging = false;
-        orbit.targetTheta = lerp(orbit.deckStartTheta, orbit.deckEndTheta, p);
-        orbit.targetPhi = lerp(orbit.deckStartPhi, 0.05, p);
+        var nextTheta = lerp(orbit.deckStartTheta, orbit.deckEndTheta, p);
+        var nextPhi = lerp(orbit.deckStartPhi, 0.05, p);
+        orbit.theta = nextTheta;
+        orbit.targetTheta = nextTheta;
+        orbit.phi = nextPhi;
+        orbit.targetPhi = nextPhi;
       } else {
         orbit.topDownLocked = false;
         if (prev > 0.001) {
-          var curMod = ((orbit.theta % twoPi) + twoPi) % twoPi;
-          var backDelta = DEFAULT_THETA - curMod;
-          if (backDelta > Math.PI) backDelta -= twoPi;
-          if (backDelta < -Math.PI) backDelta += twoPi;
-          orbit.targetTheta = orbit.theta + backDelta;
-          orbit.targetPhi = DEFAULT_PHI;
+          orbit.theta = orbit.deckStartTheta;
+          orbit.targetTheta = orbit.deckStartTheta;
+          orbit.phi = orbit.deckStartPhi;
+          orbit.targetPhi = orbit.deckStartPhi;
         }
+      }
+
+      applyCameraViewOffset();
+      if (camera) {
+        var vr = lerp(collapsedVisibleRatio, 1.0, smoothDeckProgress);
+        var exactR = computeDynamicRadius(orbit.phi, camera.aspect, vr);
+        orbit.radius = exactR;
+        orbit.targetRadius = exactR;
+      }
+      updateCameraPosition();
+      if (renderActive && renderer && scene && camera) {
+        renderer.render(scene, camera);
       }
     },
     setTopDownFocus: function (enabled) {

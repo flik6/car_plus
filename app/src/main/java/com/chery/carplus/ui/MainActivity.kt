@@ -2721,52 +2721,46 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val p = progress.coerceIn(0f, 1f)
         deckExpandProgress = p
 
-        // Drive 3D camera smoothly at 60fps with ZERO WebView resize, plus subtle upward spatial parallax
+        // Drive 3D camera in exact 1:1 frame lockstep with the sliding sheet (zero secondary lag)
         carVisual?.setDeckProgress(p)
-        carHeroContainerView?.translationY = -dpF(8f) * p
+        carHeroContainerView?.translationY = 0f
 
         val stageH = homeStageFrame?.height?.takeIf { it > 0 }
             ?: (resources.displayMetrics.heightPixels - dp(120))
         val slideDistance = (stageH - dp(248)).coerceAtLeast(dp(360)).toFloat()
 
-        // Lower sheet yields space smoothly with gentle depth recession
+        // Pure solid physical drawer slide: lower sheet stays opaque (alpha = 1f) and glides smoothly down/up
         lowerOverlayContainer?.let { lower ->
-            lower.visibility = if (p >= 0.995f) View.GONE else View.VISIBLE
+            lower.visibility = if (p >= 0.998f) View.GONE else View.VISIBLE
             lower.translationY = slideDistance * p
-            val lowerScale = 1f - 0.035f * p
-            lower.scaleX = lowerScale
-            lower.scaleY = lowerScale
-            lower.alpha = (1f - p * 1.55f).coerceIn(0f, 1f)
+            lower.scaleX = 1f
+            lower.scaleY = 1f
+            lower.alpha = 1f
         }
 
-        // Control deck grows organically out of the vehicle's gravity center via staggered row cascade
+        // Control deck sits cleanly behind the opaque lower sheet (alpha = 1f, zero cross-fade ghosting)
+        // and rises subtly into place as the lower sheet glides out of the way
         quickDeckContainer?.let { deck ->
-            deck.visibility = if (p <= 0.04f) View.GONE else View.VISIBLE
-            val deckP = ((p - 0.08f) / 0.92f).coerceIn(0f, 1f)
-            deck.alpha = deckP
-            deck.translationY = (1f - deckP) * dpF(16f)
+            deck.visibility = if (p <= 0.002f) View.GONE else View.VISIBLE
+            deck.alpha = 1f
+            deck.translationY = (1f - p) * dpF(28f)
 
             quickDeckRowViews.forEachIndexed { rowIdx, row ->
-                val phaseStart = (0.08f + rowIdx * 0.11f).coerceAtMost(0.45f)
-                val localP = ((p - phaseStart) / 0.60f).coerceIn(0f, 1f)
-                val inv = 1f - localP
-                val eased = 1f - inv * inv * inv
-                row.alpha = eased
-                row.translationY = (1f - eased) * dpF(26f + rowIdx * 10f)
-                val rowScale = 0.92f + 0.08f * eased
-                row.scaleX = rowScale
-                row.scaleY = rowScale
+                row.alpha = 1f
+                row.translationY = (1f - p) * dpF(rowIdx * 8f)
+                row.scaleX = 1f
+                row.scaleY = 1f
             }
         }
 
-        // Corner TPMS badges bloom radially around the top-down vehicle
+        // Corner TPMS badges appear cleanly once the car settles near top-down view
         tpmsOverlayContainer?.let { tpms ->
-            tpms.visibility = if (p <= 0.12f) View.GONE else View.VISIBLE
-            val tpmsP = ((p - 0.18f) / 0.82f).coerceIn(0f, 1f)
+            tpms.visibility = if (p <= 0.55f) View.GONE else View.VISIBLE
+            val tpmsP = ((p - 0.55f) / 0.45f).coerceIn(0f, 1f)
             val inv = 1f - tpmsP
             val eased = 1f - inv * inv * inv
             tpms.alpha = eased
-            val tpmsScale = 0.90f + 0.10f * eased
+            val tpmsScale = 0.94f + 0.06f * eased
             tpms.scaleX = tpmsScale
             tpms.scaleY = tpmsScale
         }
@@ -2790,8 +2784,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return
         }
 
+        val spanFraction = abs(end - start).coerceIn(0.25f, 1f)
+        val totalDurationMs = (420f * spanFraction).roundToInt().coerceIn(220, 420).toLong()
+
         deckExpandAnimator = ValueAnimator.ofFloat(start, end).apply {
-            duration = if (targetExpanded) 400L else 330L
+            duration = totalDurationMs
             interpolator = MotionSpec.EASE_OUT_EXPO
             addUpdateListener { anim ->
                 applyDeckExpandProgress(anim.animatedValue as Float)
