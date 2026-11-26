@@ -78,7 +78,7 @@
 5. **`UnderlineInput`（`AppComponents.createUnderlineInput`）**：无方框极简底线输入框（底部 `1dp` 细线，聚焦高亮 `#3D9BFF`）。
 6. **`WheelDateTimePicker` / `DateTimePickerField`（`WheelDateTimePicker.kt` & `AppComponents.createDateTimePickerField` / `createDateTimeRangePickerField`）**：统一暗色滚轮底部抽屉选择器（`#1C1D21` 表面、居中高亮条、5 行渐隐字阶、`LIGHT_TICK` 滚轮触觉反馈），完整支持 **年月（`YEAR_MONTH`）、年月日（`DATE`）、年月日时（`DATE_HOUR`）、年月日时分（`DATE_TIME`）、年月日时分秒（`DATE_TIME_SECONDS`）、时分（`TIME_HM`）、时分秒（`TIME_HMS`）及日期/日期时间区间（`DATE_RANGE` / `DATE_TIME_RANGE`）**，彻底取代系统弹窗与手动输入。
 7. **`AnchoredDropdown`（`AppComponents.showAnchoredDropdown`）**：紧贴触发锚点展开，`scale 0.92 -> 1.0`、`180ms EASE_OUT_EXPO`。
-8. **`ControlIconButton`（`AppComponents.createControlIconButton`）**：无边框 `28dp` 车控矢量图标按钮（常态无框、编辑态浮现选中标记与简短标签）。
+8. **`ControlIconButton`（`AppComponents.createControlIconButton`）**：无边框 `28dp` 车控矢量图标按钮；展开车控列表态下方始终展示清晰简短中文标签（激活态 `#3D9BFF`），编辑态叠加选中圆点标记。
 9. **`AppActionButton`（`AppComponents.createActionButton`）**：统一 `PRIMARY` / `SECONDARY` / `DANGER_TEXT` 三态按钮。
 10. **`ConfirmDialog`（`AppComponents.showConfirmDialog`）**：居中缩放 `0.94 -> 1.0`、`220ms`，最多 2 个操作按钮。
 11. **`AppBottomSheet`**：底部上滑 `260ms`、下滑退出 `170ms`、顶部 `38×4dp` 拖拽手柄、支持下拉关闭、**无“关闭”文字按钮**。
@@ -178,9 +178,9 @@
 
 ### 11.1 首页视觉锚点
 
-- 车型标题优先展示中文车型名称（优先 `typeDesc` / `standardName` 并对 `M1E` 等内部平台代号做中文名称映射），未设置车牌时在车牌位置展示可点击的「设置车牌」引导胶囊直达车辆详情编辑态。
+- 车型标题优先展示中文车型名称（优先 `typeDesc` / `standardName` 并对 `M1E` 等内部平台代号做中文名称映射）。
 - 蓝牙图标置于车型标题（及下拉箭头）**右侧**，采用统一 `BLUETOOTH_ICON`（蓝牙就绪高亮 `ACCENT_LIGHT #3D9BFF`，其余 `TEXT_SECONDARY #8E9299`），点击主动触发蓝牙扫描连接，内置 `3s` 防抖避免重复点击。
-- 首页左侧信息顺序固定为：车型（可下拉切换）+ 蓝牙连接按钮 → 能源/车牌 → **唯一主状态**。右侧仅保留消息与设置。
+- 首页左侧信息顺序固定为：车型（可下拉切换）+ 蓝牙连接按钮 → 纯净能源条与百分比 → **唯一主状态**。右侧仅保留消息与设置。车牌（或未设车牌时的「设置车牌」引导）统一收束至页面底部居中签名页脚（里程指标上方），保持左上角极简留白。
 
 ### 11.2 主状态合并规则
 

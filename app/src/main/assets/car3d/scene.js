@@ -23,6 +23,54 @@
   var lastViewOffsetW = 0;
   var lastViewOffsetH = 0;
 
+  // Entrance drive-in animation: car drives in from screen-right to center, then rotates to hero 3/4 pose
+  var entrance = {
+    active: false,
+    elapsed: 0,
+    driveDuration: 1.05,
+    turnStart: 0.78,
+    turnDuration: 0.78,
+    startDist: 8.2,
+    startYaw: DEFAULT_THETA - Math.PI / 2,
+    rightX: Math.cos(DEFAULT_THETA),
+    rightZ: -Math.sin(DEFAULT_THETA),
+    headGlow: 0
+  };
+
+  function startEntranceAnimation() {
+    if (!currentContainer || hasCustomDemoAngle) return;
+    orbit.deckProgress = 0;
+    orbit.topDownLocked = false;
+    orbit.dragging = false;
+    orbit.velTheta = 0;
+    orbit.velPhi = 0;
+    orbit.theta = DEFAULT_THETA;
+    orbit.targetTheta = DEFAULT_THETA;
+    orbit.phi = DEFAULT_PHI;
+    orbit.targetPhi = DEFAULT_PHI;
+    updateCameraPosition();
+
+    entrance.active = true;
+    entrance.elapsed = 0;
+    entrance.startYaw = DEFAULT_THETA - Math.PI / 2;
+    entrance.rightX = Math.cos(DEFAULT_THETA);
+    entrance.rightZ = -Math.sin(DEFAULT_THETA);
+    entrance.headGlow = 0.55;
+
+    currentContainer.position.set(entrance.rightX * entrance.startDist, 0, entrance.rightZ * entrance.startDist);
+    currentContainer.rotation.set(0, entrance.startYaw, 0);
+  }
+
+  function finishEntranceImmediately() {
+    if (!entrance.active) return;
+    entrance.active = false;
+    entrance.headGlow = 0;
+    if (currentContainer) {
+      currentContainer.position.set(0, 0, 0);
+      currentContainer.rotation.set(0, 0, 0);
+    }
+  }
+
   var state = {
     modelKey: 'arrizo8',
     vehicleLocked: true,
@@ -349,7 +397,7 @@
         }
 
         // Front pure cool-white (#F0F7FF) headlamp/DRL emissive + tight lens bar
-        var headRest = st.engineRunning ? 0.18 : 0.0;
+        var headRest = Math.max(st.engineRunning ? 0.18 : 0.0, entrance.headGlow * 0.45);
         var headLevel = Math.min(1.0, headRest + anim.flashLevel);
         for (var hm = 0; hm < headMats.length; hm++) {
           if (headMats[hm].emissive) {
@@ -357,7 +405,7 @@
             headMats[hm].emissiveIntensity = headLevel * 1.45;
           }
         }
-        var headBarOp = anim.flashLevel * 0.92 + (st.engineRunning ? 0.22 : 0.0);
+        var headBarOp = anim.flashLevel * 0.92 + Math.max(st.engineRunning ? 0.22 : 0.0, entrance.headGlow * 0.48);
         for (var hbIdx = 0; hbIdx < headBarSprites.length; hbIdx++) {
           headBarSprites[hbIdx].material.opacity = clamp(headBarOp, 0, 0.95);
         }
@@ -483,14 +531,9 @@
         currentEffects = createInteractiveOverlays(container, model);
         resize();
 
-        // Restrained entrance arrival glide into hero 3/4 angle
+        // Dynamic drive-in from screen-right to center, then rotate smoothly to default 3/4 hero angle
         if (!hasCustomDemoAngle) {
-          orbit.velTheta = 0;
-          orbit.velPhi = 0;
-          orbit.theta = DEFAULT_THETA + 0.24;
-          orbit.targetTheta = DEFAULT_THETA;
-          orbit.targetPhi = DEFAULT_PHI;
-          updateCameraPosition();
+          startEntranceAnimation();
         }
 
         notifyAndroidReady();
@@ -633,6 +676,7 @@
       orbit.targetTheta += dTheta;
       orbit.targetPhi = clampPhi(orbit.targetPhi + dPhi);
       if (orbit.movedDist >= 8) {
+        finishEntranceImmediately();
         notifyAndroidFirstDrag();
       }
 
@@ -689,6 +733,7 @@
       orbit.targetTheta += dTheta;
       orbit.targetPhi = clampPhi(orbit.targetPhi + dPhi);
       if (orbit.movedDist >= 8) {
+        finishEntranceImmediately();
         notifyAndroidFirstDrag();
       }
 
@@ -823,6 +868,39 @@
     orbit.radius += (orbit.targetRadius - orbit.radius) * damp;
     updateCameraPosition();
 
+    // Update vehicle drive-in + showroom rotate entrance animation
+    if (entrance.active && currentContainer) {
+      entrance.elapsed += dt;
+      var totalDur = entrance.turnStart + entrance.turnDuration;
+
+      // Phase 1: drive from screen-right (+R * startDist) smoothly to center (0, 0, 0)
+      var driveU = clamp(entrance.elapsed / entrance.driveDuration, 0, 1);
+      var driveEase = 1.0 - Math.pow(1.0 - driveU, 3.2);
+      var remDist = entrance.startDist * (1.0 - driveEase);
+      currentContainer.position.set(entrance.rightX * remDist, 0, entrance.rightZ * remDist);
+
+      // Subtle suspension brake settle pitch near stop
+      var brakePitch = driveU < 1.0 ? Math.sin(driveU * Math.PI) * (1.0 - driveU) * 0.016 : 0;
+
+      // Phase 2: smoothly rotate yaw from side-profile facing left to default 3/4 hero angle (0)
+      var turnU = clamp((entrance.elapsed - entrance.turnStart) / entrance.turnDuration, 0, 1);
+      var turnEase = turnU < 0.5
+        ? 4 * turnU * turnU * turnU
+        : 1 - Math.pow(-2 * turnU + 2, 3) / 2;
+      var curYaw = lerp(entrance.startYaw, 0.0, turnEase);
+      currentContainer.rotation.set(brakePitch, curYaw, 0);
+
+      // Soft headlamp DRL glow while driving in, gently fading out once parked
+      entrance.headGlow = turnU < 0.85 ? 0.55 * (1.0 - turnU * 0.7) : 0.16 * (1.0 - (turnU - 0.85) / 0.15);
+
+      if (entrance.elapsed >= totalDur) {
+        entrance.active = false;
+        entrance.headGlow = 0;
+        currentContainer.position.set(0, 0, 0);
+        currentContainer.rotation.set(0, 0, 0);
+      }
+    }
+
     if (currentEffects && typeof currentEffects.update === 'function') {
       currentEffects.update(dt, elapsed, state);
     }
@@ -950,6 +1028,7 @@
       }
     },
     setDeckProgress: function (progress) {
+      if (progress > 0.01) finishEntranceImmediately();
       var p = clamp(typeof progress === 'number' ? progress : 0, 0, 1);
       var prev = orbit.deckProgress;
       var twoPi = Math.PI * 2;
@@ -999,6 +1078,11 @@
       if (renderActive && rafId === null && renderer) {
         lastTime = performance.now();
         animate(lastTime);
+      }
+    },
+    playEntranceAnimation: function () {
+      if (!hasCustomDemoAngle) {
+        startEntranceAnimation();
       }
     },
     resize: resize

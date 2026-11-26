@@ -229,6 +229,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var provisioningJob: Job? = null
     private var provisioningActive = false
     private var lastManualBleTapMs = 0L
+    private var wasBackgrounded = false
     private var smsCountdownJob: Job? = null
     private var telemetryJob: Job? = null
     private var periodicRefreshJob: Job? = null
@@ -485,6 +486,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         super.onResume()
         carVisual?.onHostResume()
         if (currentScreen == Screen.HOME) {
+            if (wasBackgrounded && !quickDeckExpanded) {
+                carVisual?.playEntranceAnimation()
+            }
+            wasBackgrounded = false
             startProximityWhenPermitted()
             startPeriodicHomeRefresh()
             refreshTelemetry(silent = true)
@@ -495,6 +500,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         stopPeriodicHomeRefresh()
         carVisual?.onHostPause()
         super.onPause()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        wasBackgrounded = true
     }
 
     override fun onDestroy() {
@@ -733,61 +743,54 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun showWelcomeScreen() {
         stopStatusAutoHide()
-        configureSystemBars(BG_DARK)
-        contentFrame.setBackgroundColor(BG_DARK)
+        configureSystemBars(BG_HOME)
+        contentFrame.setBackgroundColor(BG_HOME)
 
         val root = FrameLayout(this).apply {
-            setBackgroundColor(BG_DARK)
+            setBackgroundColor(BG_HOME)
         }
         presentScreen(Screen.WELCOME, root)
 
-        // Centered brand logo hero matching the new CHERY App Logo
-        val brandHero = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
+        // Centered oversized monochrome CHERY vector emblem only (no CarPlus text)
+        val screenW = resources.displayMetrics.widthPixels
+        val logoW = (screenW * 0.68f).roundToInt().coerceIn(dp(200), dp(264))
+        val logoH = (logoW / 3.213f).roundToInt().coerceAtLeast(dp(64))
         val logoView = ImageView(this).apply {
-            setImageResource(R.drawable.ic_app_logo)
+            setImageResource(R.drawable.ic_chery_adaptive_mark)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = "CarPlus Logo"
+            contentDescription = "CHERY Logo"
         }
-        brandHero.addView(logoView, LinearLayout.LayoutParams(dp(84), dp(84)))
-        brandHero.addView(
-            text("CarPlus", 24f, TEXT_PRIMARY, Typeface.BOLD).apply {
-                gravity = Gravity.CENTER
-            },
-            lp(top = dp(16))
-        )
         root.addView(
-            brandHero,
-            FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply {
-                topMargin = (resources.displayMetrics.heightPixels * 0.28f).roundToInt()
+            logoView,
+            FrameLayout.LayoutParams(logoW, logoH, Gravity.CENTER_HORIZONTAL or Gravity.TOP).apply {
+                topMargin = (resources.displayMetrics.heightPixels * 0.31f).roundToInt()
             }
         )
 
         val bottomStack = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28), 0, dp(28), dp(42))
+            setPadding(dp(24), 0, dp(24), dp(42))
         }
         root.addView(
             bottomStack,
             FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM)
         )
 
-        val loginCta = primaryActionButton("登录") {
+        val loginCta = AppComponents.createActionButton(this, "登录", ButtonStyle.PRIMARY) {
             showLoginFormScreen(startWithSms = false)
         }
         bottomStack.addView(loginCta, lp(height = dp(48)))
 
-        val createAccountBtn = text("创建账户", 15f, TEXT_PRIMARY).apply {
+        val createAccountBtn = text("创建账户", 14.5f, ThemeTokens.TEXT_SUB).apply {
             gravity = Gravity.CENTER
-            minHeight = dp(44)
+            minHeight = dp(48)
             isClickable = true
             isFocusable = true
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.96f, haptic = false)
             setOnClickListener { showCreateAccountDialog() }
         }
-        bottomStack.addView(createAccountBtn, lp(top = dp(20)))
+        bottomStack.addView(createAccountBtn, lp(top = dp(12)))
     }
 
     private fun showCreateAccountDialog() {
@@ -842,129 +845,150 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun showLoginFormScreen(startWithSms: Boolean) {
         stopStatusAutoHide()
-        configureSystemBars(BG_DARK)
-        contentFrame.setBackgroundColor(BG_DARK)
+        configureSystemBars(BG_HOME)
+        contentFrame.setBackgroundColor(BG_HOME)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(BG_HOME)
+        }
+        root.addView(
+            AppComponents.createTopBar(
+                context = this,
+                title = "",
+                onBack = { showWelcomeScreen() }
+            ),
+            lp()
+        )
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
-            setBackgroundColor(BG_DARK)
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setBackgroundColor(BG_HOME)
         }
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(16), dp(24), dp(36))
+            setPadding(dp(24), dp(8), dp(24), dp(36))
         }
         scroll.addView(page, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        presentScreen(Screen.LOGIN_FORM, scroll)
+        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        presentScreen(Screen.LOGIN_FORM, root)
 
-        // Top bar with clean back chevron
-        val backRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        page.addView(backRow)
-        val backBtn = AppIconView(this, AppIconType.BACK_ARROW, TEXT_PRIMARY).apply {
-            setPadding(dp(4), dp(6), dp(12), dp(6))
-            isClickable = true
-            isFocusable = true
-            contentDescription = "返回"
-            setOnClickListener { showWelcomeScreen() }
-        }
-        backRow.addView(backBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
+        page.addView(text("登录", 26f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD))
+        page.addView(
+            text("登录后自动同步车辆与数字钥匙", 13f, ThemeTokens.TEXT_SUB),
+            lp(top = dp(6))
+        )
 
-        page.addView(text("登录", 28f, TEXT_PRIMARY, Typeface.BOLD).apply {
-            layoutParams = lp(top = dp(16))
-        })
-        page.addView(text("登录车控账号以自动同步车辆与蓝牙数字钥匙", 13f, TEXT_SECONDARY).apply {
-            layoutParams = lp(top = dp(8))
-        })
-
-        // Clean dark segmented mode switcher
-        val segmented = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            background = rounded(CARD_MODAL, 8f)
-            setPadding(dp(3), dp(3), dp(3), dp(3))
+        // Unified sliding segmented switcher matching DESIGN_SYSTEM.md v2.6
+        passwordTab = null
+        smsTab = null
+        val segmented = MotionSpec.createSlidingSegmentedBar(
+            context = this,
+            labels = listOf("密码登录", "验证码登录"),
+            initial = if (startWithSms) 1 else 0,
+            bgColor = ThemeTokens.BG_SURFACE,
+            pillColor = ThemeTokens.BTN_SECONDARY,
+            activeTextColor = ThemeTokens.TEXT_PRIMARY,
+            inactiveTextColor = ThemeTokens.TEXT_SUB
+        ) { idx ->
+            setLoginMode(idx == 1)
         }
         page.addView(segmented, lp(top = dp(26)))
 
-        passwordTab = text("账号密码登录", 14f, TEXT_PRIMARY, Typeface.BOLD).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, dp(10))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { setLoginMode(false) }
-        }
-        smsTab = text("短信验证码登录", 14f, TEXT_SECONDARY).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, dp(10))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { setLoginMode(true) }
-        }
-        segmented.addView(passwordTab, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        segmented.addView(smsTab, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-
-        page.addView(fieldLabel("手机号"), lp(top = dp(24), bottom = dp(8)))
-        loginMobileInput = styledInput("请输入手机号", InputType.TYPE_CLASS_PHONE).apply {
-            imeOptions = EditorInfo.IME_ACTION_NEXT
-        }
-        page.addView(loginMobileInput, lp(height = dp(50)))
+        // Borderless underline inputs matching Design System v2.6
+        page.addView(text("手机号", 12.5f, ThemeTokens.TEXT_SUB), lp(top = dp(28)))
+        val (mobileBox, mobileEdit) = AppComponents.createUnderlineInput(
+            context = this,
+            hint = "请输入 11 位手机号",
+            inputType = InputType.TYPE_CLASS_PHONE,
+            maxLength = 11
+        )
+        mobileEdit.imeOptions = EditorInfo.IME_ACTION_NEXT
+        loginMobileInput = mobileEdit
+        page.addView(mobileBox, lp(top = dp(2)))
 
         loginPasswordBlock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(fieldLabel("密码"), lp(top = dp(18), bottom = dp(8)))
-            loginPasswordInput = styledInput(
-                "请输入登录密码",
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+            addView(text("密码", 12.5f, ThemeTokens.TEXT_SUB), lp(top = dp(22)))
+            val (pwdBox, pwdEdit) = AppComponents.createUnderlineInput(
+                context = this@MainActivity,
+                hint = "请输入登录密码",
+                inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_VARIATION_PASSWORD or
                     InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            ).apply {
-                transformationMethod = PasswordTransformationMethod.getInstance()
-                imeOptions = EditorInfo.IME_ACTION_DONE
-            }
-            addView(loginPasswordInput, lp(height = dp(50)))
+            )
+            pwdEdit.transformationMethod = PasswordTransformationMethod.getInstance()
+            pwdEdit.imeOptions = EditorInfo.IME_ACTION_DONE
+            loginPasswordInput = pwdEdit
+            addView(pwdBox, lp(top = dp(2)))
         }
         page.addView(loginPasswordBlock, lp())
 
         loginSmsBlock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            addView(fieldLabel("短信验证码"), lp(top = dp(18), bottom = dp(8)))
+            addView(text("短信验证码", 12.5f, ThemeTokens.TEXT_SUB), lp(top = dp(22)))
+            val smsUnderline = View(this@MainActivity).apply {
+                setBackgroundColor(ThemeTokens.DIVIDER)
+            }
             val row = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            loginSmsInput = styledInput("请输入验证码", InputType.TYPE_CLASS_NUMBER).apply {
+            val smsEdit = EditText(this@MainActivity).apply {
+                hint = "请输入验证码"
+                setHintTextColor(Color.parseColor("#5C606A"))
+                setTextColor(ThemeTokens.TEXT_PRIMARY)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                setBackgroundColor(Color.TRANSPARENT)
+                setPadding(0, dp(10), 0, dp(10))
+                inputType = InputType.TYPE_CLASS_NUMBER
+                isSingleLine = true
+                filters = arrayOf(android.text.InputFilter.LengthFilter(6))
                 imeOptions = EditorInfo.IME_ACTION_DONE
+                setOnFocusChangeListener { _, hasFocus ->
+                    smsUnderline.setBackgroundColor(
+                        if (hasFocus) ThemeTokens.ACCENT_ACTIVE else ThemeTokens.DIVIDER
+                    )
+                }
             }
-            row.addView(loginSmsInput, LinearLayout.LayoutParams(0, dp(50), 1f))
-            smsCodeButton = text("获取验证码", 13f, TEXT_PRIMARY, Typeface.BOLD).apply {
+            loginSmsInput = smsEdit
+            row.addView(smsEdit, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            smsCodeButton = text("获取验证码", 13.5f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD).apply {
                 gravity = Gravity.CENTER
-                background = rounded(BTN_SECONDARY, 6f)
+                minHeight = dp(44)
+                setPadding(dp(12), dp(8), dp(2), dp(8))
                 isClickable = true
                 isFocusable = true
+                MotionSpec.attachPressPhysics(this, pressedScale = 0.94f, haptic = false)
                 setOnClickListener { sendLoginSmsCode() }
             }
-            row.addView(smsCodeButton, LinearLayout.LayoutParams(dp(110), dp(50)).apply {
-                marginStart = dp(10)
-            })
-            addView(row, lp())
+            row.addView(smsCodeButton, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            addView(row, lp(top = dp(2)))
+            addView(smsUnderline, lp(height = dpF(0.8f).roundToInt().coerceAtLeast(1)))
         }
         page.addView(loginSmsBlock, lp())
 
-        loginErrorView = text("", 13f, ERROR_RED).apply {
+        loginErrorView = text("", 13f, ThemeTokens.DANGER).apply {
             visibility = View.GONE
             layoutParams = lp(top = dp(14))
         }
         page.addView(loginErrorView)
 
-        loginButton = primaryActionButton("登录") { submitLogin() }
-        page.addView(loginButton, lp(top = dp(26), height = dp(48)))
+        loginButton = AppComponents.createActionButton(this, "登录", ButtonStyle.PRIMARY) {
+            submitLogin()
+        }
+        page.addView(loginButton, lp(top = dp(28), height = dp(48)))
 
-        val forgotBtn = text("忘记密码？短信重置登录密码", 13.5f, TEXT_SECONDARY).apply {
+        val forgotBtn = text("忘记密码？短信重置登录密码", 13.5f, ThemeTokens.TEXT_SUB).apply {
             gravity = Gravity.CENTER
-            setPadding(0, dp(14), 0, dp(8))
+            minHeight = dp(48)
+            setPadding(0, dp(10), 0, dp(8))
             isClickable = true
             isFocusable = true
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.96f, haptic = false)
             setOnClickListener {
                 featureSheets.showResetPasswordBySmsModal(
                     loginMobileInput?.text?.toString()?.trim().orEmpty()
@@ -1852,7 +1876,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             marginStart = dp(4)
         })
 
-        // Row 2: Fuel progress bar + tappable % <-> km toggle + license plate badge (or setup guide)
+        // Row 2: Pure minimal energy bar + tappable % <-> km toggle (license plate moved to quiet Home footer)
         val energyRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1880,28 +1904,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         energyToggleBox.addView(energyTextView)
         energyRow.addView(energyToggleBox)
-
-        plateBadgeView = text("", 11f, Color.rgb(218, 222, 232), Typeface.BOLD).apply {
-            background = rounded(Color.rgb(38, 41, 48), 5f, Color.rgb(66, 70, 82), 0.7f)
-            setPadding(dp(7), dp(2), dp(7), dp(2))
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            visibility = View.GONE
-            isClickable = true
-            isFocusable = true
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.94f, haptic = false)
-            setOnClickListener {
-                val curPlate = firstNonBlank(
-                    activeTelemetry?.licensePlate.orEmpty(),
-                    uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
-                )
-                managementScreens.openVehicleDetailScreen(startInEditMode = curPlate.isBlank())
-            }
-            layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                marginStart = dp(6)
-            }
-        }
-        energyRow.addView(plateBadgeView)
 
         // Row 3: one honest primary motion state (parked / started / lock only as a fallback).
         val statusRow = LinearLayout(this).apply {
@@ -2850,7 +2852,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         gridHost.removeAllViews()
         quickDeckRowViews.clear()
-        val tileHeight = if (quickDeckEditMode) dp(74) else dp(64)
+        val tileHeight = dp(76)
         QuickActionId.values().toList().chunked(4).forEachIndexed { rowIdx, chunk ->
             val rowView = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -2864,13 +2866,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 } else {
                     action.icon
                 }
+                val tileLabel = if (action == QuickActionId.LOCK && isStateActive && !quickDeckEditMode) {
+                    "已解锁"
+                } else {
+                    action.label
+                }
 
                 val btn = AppComponents.createControlIconButton(
                     context = this,
                     iconType = iconType,
                     sizeDp = 28,
                     active = !quickDeckEditMode && isStateActive,
-                    label = if (quickDeckEditMode) action.label else null,
+                    label = tileLabel,
                     showCheckDot = quickDeckEditMode && isPinned,
                     dimmed = quickDeckEditMode && !isPinned
                 ).apply {
@@ -3153,15 +3160,42 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun buildHomeFooter(page: LinearLayout) {
+        val footerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(22), dp(22), dp(22), dp(10))
+        }
+
+        // Clean Tesla-style centered plate signature above the odometer footer (keeps top energy row spotless)
+        plateBadgeView = text("", 12.5f, FOOTER_TEXT).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(4), dp(12), dp(4))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.96f, haptic = false)
+            setOnClickListener {
+                val curPlate = firstNonBlank(
+                    activeTelemetry?.licensePlate.orEmpty(),
+                    uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
+                )
+                managementScreens.openVehicleDetailScreen(startInEditMode = curPlate.isBlank())
+            }
+        }
+        footerBox.addView(plateBadgeView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+
         homeFooterView = text("", 12.5f, FOOTER_TEXT).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             setLineSpacing(0f, 1.4f)
-            setPadding(dp(22), dp(22), dp(22), dp(10))
+            setPadding(dp(12), dp(2), dp(12), dp(4))
             isClickable = true
             isFocusable = true
             setOnClickListener { handleHomeFooterTap() }
         }
-        page.addView(homeFooterView, lp())
+        footerBox.addView(homeFooterView, lp())
+        page.addView(footerBox, lp())
     }
 
     private fun formatHomeFooterMetric(telemetry: VehicleTelemetry?, index: Int): String = when (index % 3) {
@@ -3456,15 +3490,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         vehicleNameView?.text = modelName
         val hasBound = currentProfile?.vin?.isNotBlank() == true || profileStore.getActiveProfile().vin.isNotBlank()
         plateBadgeView?.apply {
+            background = null
             if (plateNo.isNotBlank()) {
                 text = plateNo
-                setTextColor(Color.rgb(218, 222, 232))
-                background = rounded(Color.rgb(38, 41, 48), 5f, Color.rgb(66, 70, 82), 0.7f)
+                setTextColor(ThemeTokens.TEXT_SUB)
+                typeface = Typeface.create("sans-serif", Typeface.NORMAL)
                 visibility = View.VISIBLE
             } else if (hasBound) {
                 text = "设置车牌"
                 setTextColor(ThemeTokens.ACCENT_LIGHT)
-                background = rounded(Color.argb(34, 61, 155, 255), 5f, Color.argb(90, 61, 155, 255), 0.7f)
+                typeface = Typeface.create("sans-serif", Typeface.NORMAL)
                 visibility = View.VISIBLE
             } else {
                 visibility = View.GONE

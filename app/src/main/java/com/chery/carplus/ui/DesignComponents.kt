@@ -729,11 +729,12 @@ object AppComponents {
         if (!label.isNullOrBlank()) {
             val labelTv = TextView(context).apply {
                 text = label
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setTextColor(ThemeTokens.TEXT_SUB)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setTextColor(if (active) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_BODY)
                 gravity = Gravity.CENTER
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
+                includeFontPadding = false
                 tag = "control_label"
             }
             root.addView(
@@ -742,7 +743,7 @@ object AppComponents {
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    topMargin = dp(context, 4f)
+                    topMargin = dp(context, 5f)
                 }
             )
         }

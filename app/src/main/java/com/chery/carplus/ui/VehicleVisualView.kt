@@ -154,22 +154,14 @@ class VehicleVisualView @JvmOverloads constructor(
         }
         addView(webView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
-        // 0ms cold-start aligned hero placeholder layered over WebView until first WebGL frame renders
+        // Keep seamless dark stage clear so the 3D drive-in entrance animation plays unobstructed
         placeholderView = ImageView(context).apply {
             setBackgroundColor(bgColor)
-            scaleType = ImageView.ScaleType.FIT_CENTER
+            visibility = View.GONE
             isClickable = false
             isFocusable = false
-            val bmp = runCatching {
-                context.assets.open("car3d/placeholder.png").use { BitmapFactory.decodeStream(it) }
-            }.getOrNull()
-            if (bmp != null) {
-                setImageBitmap(bmp)
-            } else {
-                visibility = View.GONE
-                placeholderHidden = true
-            }
         }
+        placeholderHidden = true
         addView(placeholderView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
         // Subtle bottom-right 360° hint pill
@@ -231,6 +223,12 @@ class VehicleVisualView @JvmOverloads constructor(
         deckProgress = 0f
         if (isDestroyed || !sceneReady) return
         evalJs("window.Car3D && window.Car3D.resetCamera();")
+    }
+
+    fun playEntranceAnimation() {
+        deckProgress = 0f
+        if (isDestroyed || !sceneReady) return
+        evalJs("window.Car3D && window.Car3D.playEntranceAnimation && window.Car3D.playEntranceAnimation();")
     }
 
     fun setCollapsedVisibleRatio(ratio: Float) {
