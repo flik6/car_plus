@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>CarPlus Map</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #14161b;
+      background-image:
+        linear-gradient(to right, rgba(255,255,255,0.032) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255,255,255,0.032) 1px, transparent 1px);
+      background-size: 32px 32px;
+      touch-action: none;
+      font-family: -apple-system, sans-serif;
+    }
+    #tileCanvas, #overlayCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #tileCanvas {
+      filter: invert(92%) hue-rotate(180deg) brightness(86%) contrast(94%) saturate(72%);
+      -webkit-filter: invert(92%) hue-rotate(180deg) brightness(86%) contrast(94%) saturate(72%);
+      pointer-events: none;
+    }
+    #overlayCanvas {
+      background: transparent;
+    }
+    .hud-btn {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      width: 36px;
+      height: 36px;
+      border-radius: 18px;
+      background: rgba(24, 26, 32, 0.90);
+      border: 1px solid rgba(255,255,255,0.14);
+      color: #f1f5f9;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .zoom-box {
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .z-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      background: rgba(24, 26, 32, 0.88);
+      border: 1px solid rgba(255,255,255,0.14);
+      color: #e2e8f0;
+      font-size: 16px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    #badge {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      background: rgba(20, 22, 27, 0.86);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: #cbd5e1;
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 12px;
+      max-width: 72%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="tileCanvas"></canvas>
+  <canvas id="overlayCanvas"></canvas>
+  <div id="badge">当前车辆位置</div>
+  <div class="zoom-box">
+    <div class="z-btn" id="btnZoomIn">+</div>
+    <div class="z-btn" id="btnZoomOut">−</div>
+  </div>
+  <div class="hud-btn" id="btnRecenter" title="回到实时位置">◎</div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var tileCanvas = document.getElementById('tileCanvas');
+      var tileCtx = tileCanvas.getContext('2d');
+      var overlayCanvas = document.getElementById('overlayCanvas');
+      var overlayCtx = overlayCanvas.getContext('2d');
+      var badge = document.getElementById('badge');
+
+      var TILE_SIZE = 256;
+      var ROUTE_PLAYBACK_MS = 1200;
+      var AMBIENT_LOOP_MS = 3200;
+      var tileCache = Object.create(null);
+
+      // Map state (Chery zyhl cloud already returns GCJ-02 coordinates aligned 1:1 with Amap tiles)
+      var view = {
+        lat: 30.2903,
+        lon: 120.1001,
+        zoom: 15.0
+      };
+      var vehiclePos = null;       // { lat, lon }
+      var liveLocationLabel = '当前车辆位置';
+      var routePoints = [];        // [ { lat, lon }, ... ]
+      var routeCumDist = [];       // normalized 0..1 cumulative distances along routePoints
+      var routeAnimStartMs = 0;
+      var routeAnimRafId = null;
+      var geofencePicker = {
+        active: false,
+        radiusMeters: 500
+      };
+
+      function metersPerPixel(lat, z) {
+        return 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, z);
+      }
+
+      function targetVisualRadiusPx(w, h) {
+        return Math.max(44, Math.min(w, h) * 0.34);
+      }
+
+      function zoomForRadius(lat, radiusMeters, w, h) {
+        var mpp = Math.max(0.05, radiusMeters / targetVisualRadiusPx(w, h));
+        var z = Math.log2(156543.03392 * Math.cos(lat * Math.PI / 180) / mpp);
+        return Math.max(6.0, Math.min(18.0, z));
+      }
+
+      function radiusFromZoom(lat, z, w, h) {
+        var raw = metersPerPixel(lat, z) * targetVisualRadiusPx(w, h);
+        var clamped = Math.max(100, Math.min(20000, raw));
+        var step = clamped < 1000 ? 50 : 100;
+        return Math.max(100, Math.min(20000, Math.round(clamped / step) * step));
+      }
+
+      function formatRadiusBadge(m) {
+        if (m >= 1000) {
+          var km = m / 1000;
+          return '半径 ' + (m % 1000 === 0 ? km.toFixed(0) : km.toFixed(1)) + 'km';
+        }
+        return '半径 ' + Math.round(m) + 'm';
+      }
+
+      function notifyGeofenceChanged() {
+        if (!geofencePicker.active) return;
+        badge.textContent = formatRadiusBadge(geofencePicker.radiusMeters);
+        try {
+          if (window.CarMapBridge && typeof window.CarMapBridge.onGeofenceChanged === 'function') {
+            window.CarMapBridge.onGeofenceChanged(view.lat, view.lon, geofencePicker.radiusMeters);
+          }
+        } catch (e) {
+          // ignore in desktop preview
+        }
+      }
+
+      function easeOutCubic(t) {
+        var u = 1 - Math.max(0, Math.min(1, t));
+        return 1 - u * u * u;
+      }
+
+      function notifyRouteMode(isViewingRoute) {
+        try {
+          if (window.CarMapBridge && typeof window.CarMapBridge.onRouteModeChanged === 'function') {
+            window.CarMapBridge.onRouteModeChanged(!!isViewingRoute);
+          }
+        } catch (e) {
+          // ignore in desktop preview
+        }
+      }
+
+      // Web Mercator projection
+      function lonToWorldX(lon, z) {
+        return (lon + 180) / 360 * Math.pow(2, z) * TILE_SIZE;
+      }
+      function latToWorldY(lat, z) {
+        var sin = Math.sin(lat * Math.PI / 180);
+        var y = 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
+        return y * Math.pow(2, z) * TILE_SIZE;
+      }
+      function worldXToLon(wx, z) {
+        return wx / (Math.pow(2, z) * TILE_SIZE) * 360 - 180;
+      }
+      function worldYToLat(wy, z) {
+        var n = Math.PI - 2 * Math.PI * wy / (Math.pow(2, z) * TILE_SIZE);
+        return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+      }
+
+      function getTile(z, x, y) {
+        var max = Math.pow(2, z);
+        if (y < 0 || y >= max) return null;
+        var wx = ((x % max) + max) % max;
+        var key = z + '/' + wx + '/' + y;
+        if (tileCache[key]) return tileCache[key];
+
+        var entry = { img: new Image(), loaded: false, failed: false };
+        // Standard Amap road tile with readable Chinese street names and landmarks
+        var sub = (wx + y) % 4 + 1;
+        entry.img.onload = function () {
+          entry.loaded = true;
+          requestDraw();
+        };
+        entry.img.onerror = function () {
+          if (!entry.retried) {
+            entry.retried = true;
+            entry.img.src = 'https://tile.openstreetmap.org/' + z + '/' + wx + '/' + y + '.png';
+          } else {
+            entry.failed = true;
+          }
+        };
+        entry.img.src = 'https://webrd0' + sub + '.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=' + wx + '&y=' + y + '&z=' + z;
+        tileCache[key] = entry;
+        return entry;
+      }
+
+      function buildRouteMetrics(pts) {
+        routeCumDist = [0];
+        var total = 0;
+        for (var i = 1; i < pts.length; i++) {
+          var dx = pts[i].lon - pts[i - 1].lon;
+          var dy = pts[i].lat - pts[i - 1].lat;
+          total += Math.sqrt(dx * dx + dy * dy);
+          routeCumDist.push(total);
+        }
+        if (total > 0) {
+          for (var j = 0; j < routeCumDist.length; j++) {
+            routeCumDist[j] /= total;
+          }
+        } else {
+          for (var k = 0; k < routeCumDist.length; k++) {
+            routeCumDist[k] = pts.length > 1 ? k / (pts.length - 1) : 1;
+          }
+        }
+      }
+
+      function samplePointAtProgress(progress) {
+        if (routePoints.length === 0) return null;
+        if (routePoints.length === 1 || progress <= 0) return routePoints[0];
+        if (progress >= 1) return routePoints[routePoints.length - 1];
+        for (var i = 1; i < routeCumDist.length; i++) {
+          if (routeCumDist[i] >= progress) {
+            var span = Math.max(1e-6, routeCumDist[i] - routeCumDist[i - 1]);
+            var localT = (progress - routeCumDist[i - 1]) / span;
+            var a = routePoints[i - 1];
+            var b = routePoints[i];
+            return {
+              lat: a.lat + (b.lat - a.lat) * localT,
+              lon: a.lon + (b.lon - a.lon) * localT
+            };
+          }
+        }
+        return routePoints[routePoints.length - 1];
+      }
+
+      function stopRouteLoop() {
+        if (routeAnimRafId !== null) {
+          cancelAnimationFrame(routeAnimRafId);
+          routeAnimRafId = null;
+        }
+      }
+
+      function startRouteLoop() {
+        stopRouteLoop();
+        routeAnimStartMs = performance.now();
+        function tick() {
+          if (routePoints.length < 2) {
+            routeAnimRafId = null;
+            return;
+          }
+          draw();
+          routeAnimRafId = requestAnimationFrame(tick);
+        }
+        routeAnimRafId = requestAnimationFrame(tick);
+      }
+
+      var drawQueued = false;
+      function requestDraw() {
+        if (drawQueued) return;
+        drawQueued = true;
+        requestAnimationFrame(function () {
+          drawQueued = false;
+          draw();
+        });
+      }
+
+      function resize() {
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        var w = window.innerWidth || 340;
+        var h = window.innerHeight || 240;
+        var pw = Math.round(w * dpr);
+        var ph = Math.round(h * dpr);
+        tileCanvas.width = pw;
+        tileCanvas.height = ph;
+        tileCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        overlayCanvas.width = pw;
+        overlayCanvas.height = ph;
+        overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        draw();
+      }
+
+      function draw() {
+        var w = window.innerWidth || 340;
+        var h = window.innerHeight || 240;
+
+        tileCtx.clearRect(0, 0, w, h);
+        overlayCtx.clearRect(0, 0, w, h);
+
+        var z = view.zoom;
+        var tileZ = Math.max(3, Math.min(18, Math.round(z)));
+        var scale = Math.pow(2, z - tileZ);
+        var scaledTile = TILE_SIZE * scale;
+
+        var centerWX = lonToWorldX(view.lon, tileZ);
+        var centerWY = latToWorldY(view.lat, tileZ);
+
+        var halfW = w / 2;
+        var halfH = h / 2;
+
+        var minTX = Math.floor((centerWX - halfW / scale) / TILE_SIZE);
+        var maxTX = Math.floor((centerWX + halfW / scale) / TILE_SIZE);
+        var minTY = Math.floor((centerWY - halfH / scale) / TILE_SIZE);
+        var maxTY = Math.floor((centerWY + halfH / scale) / TILE_SIZE);
+
+        // Layer 1 (#tileCanvas): GPU-filtered minimal-label dark map tiles
+        for (var tx = minTX; tx <= maxTX; tx++) {
+          for (var ty = minTY; ty <= maxTY; ty++) {
+            var tile = getTile(tileZ, tx, ty);
+            if (tile && tile.loaded) {
+              var sx = halfW + (tx * TILE_SIZE - centerWX) * scale;
+              var sy = halfH + (ty * TILE_SIZE - centerWY) * scale;
+              tileCtx.drawImage(tile.img, sx, sy, scaledTile + 0.6, scaledTile + 0.6);
+            }
+          }
+        }
+
+        function project(lat, lon) {
+          var wx = lonToWorldX(lon, tileZ);
+          var wy = latToWorldY(lat, tileZ);
+          return {
+            x: halfW + (wx - centerWX) * scale,
+            y: halfH + (wy - centerWY) * scale
+          };
+        }
+
+        // Layer 2 (#overlayCanvas): progressive animated route playback + ambient pulse + pins
+        if (routePoints.length >= 2) {
+          var elapsedMs = Math.max(0, performance.now() - routeAnimStartMs);
+          var drawT = easeOutCubic(elapsedMs / ROUTE_PLAYBACK_MS);
+          var isComplete = elapsedMs >= ROUTE_PLAYBACK_MS;
+
+          overlayCtx.save();
+          overlayCtx.lineCap = 'round';
+          overlayCtx.lineJoin = 'round';
+          overlayCtx.beginPath();
+
+          var firstP = project(routePoints[0].lat, routePoints[0].lon);
+          overlayCtx.moveTo(firstP.x, firstP.y);
+
+          var headGeo = routePoints[0];
+          for (var i = 1; i < routePoints.length; i++) {
+            var segEnd = routeCumDist[i];
+            if (segEnd <= drawT) {
+              var pt = project(routePoints[i].lat, routePoints[i].lon);
+              overlayCtx.lineTo(pt.x, pt.y);
+              headGeo = routePoints[i];
+            } else {
+              headGeo = samplePointAtProgress(drawT);
+              if (headGeo) {
+                var hp = project(headGeo.lat, headGeo.lon);
+                overlayCtx.lineTo(hp.x, hp.y);
+              }
+              break;
+            }
+          }
+
+          // Outer glow + crisp core polyline
+          overlayCtx.strokeStyle = 'rgba(75, 131, 255, 0.34)';
+          overlayCtx.lineWidth = 10;
+          overlayCtx.stroke();
+
+          overlayCtx.strokeStyle = '#4b83ff';
+          overlayCtx.lineWidth = 4;
+          overlayCtx.stroke();
+          overlayCtx.restore();
+
+          // Start pin (always visible) & End pin (fades in as route arrives)
+          var startP = project(routePoints[0].lat, routePoints[0].lon);
+          drawPin(startP.x, startP.y, '#22c55e', '起');
+
+          if (isComplete) {
+            var endP = project(routePoints[routePoints.length - 1].lat, routePoints[routePoints.length - 1].lon);
+            drawPin(endP.x, endP.y, '#ef4444', '终');
+
+            // Gentle ambient travel pulse gliding along completed route
+            var ambientT = ((elapsedMs - ROUTE_PLAYBACK_MS) % AMBIENT_LOOP_MS) / AMBIENT_LOOP_MS;
+            var pulseGeo = samplePointAtProgress(ambientT);
+            if (pulseGeo) {
+              var pp = project(pulseGeo.lat, pulseGeo.lon);
+              drawRouteBeacon(pp.x, pp.y, 0.78);
+            }
+          } else if (headGeo) {
+            // Active moving beacon gliding along the drawing tip
+            var tipP = project(headGeo.lat, headGeo.lon);
+            drawRouteBeacon(tipP.x, tipP.y, 1.0);
+          }
+        }
+
+        if (vehiclePos) {
+          var vp = project(vehiclePos.lat, vehiclePos.lon);
+          drawVehicleMarker(vp.x, vp.y);
+        }
+
+        // Layer 3: Visual circle geofence picker centered on screen
+        if (geofencePicker.active) {
+          var mpp = Math.max(0.05, metersPerPixel(view.lat, view.zoom));
+          var circlePx = Math.max(24, Math.min(Math.min(w, h) * 0.46, geofencePicker.radiusMeters / mpp));
+
+          overlayCtx.save();
+          // Semi-transparent #3D9BFF geofence zone fill
+          overlayCtx.beginPath();
+          overlayCtx.arc(halfW, halfH, circlePx, 0, Math.PI * 2);
+          overlayCtx.fillStyle = 'rgba(61, 155, 255, 0.16)';
+          overlayCtx.fill();
+
+          // Soft outer glow + crisp #3D9BFF perimeter stroke
+          overlayCtx.lineWidth = 6;
+          overlayCtx.strokeStyle = 'rgba(61, 155, 255, 0.24)';
+          overlayCtx.stroke();
+
+          overlayCtx.lineWidth = 2;
+          overlayCtx.strokeStyle = '#3d9bff';
+          overlayCtx.stroke();
+
+          // Center pin
+          overlayCtx.beginPath();
+          overlayCtx.arc(halfW, halfH, 7, 0, Math.PI * 2);
+          overlayCtx.fillStyle = '#3d9bff';
+          overlayCtx.fill();
+          overlayCtx.lineWidth = 2;
+          overlayCtx.strokeStyle = '#ffffff';
+          overlayCtx.stroke();
+          overlayCtx.restore();
+        }
+      }
+
+      function drawRouteBeacon(x, y, intensity) {
+        overlayCtx.save();
+        var halo = overlayCtx.createRadialGradient(x, y, 1, x, y, 16);
+        halo.addColorStop(0.0, 'rgba(191, 219, 254, ' + (0.95 * intensity) + ')');
+        halo.addColorStop(0.4, 'rgba(75, 131, 255, ' + (0.55 * intensity) + ')');
+        halo.addColorStop(1.0, 'rgba(75, 131, 255, 0.0)');
+        overlayCtx.fillStyle = halo;
+        overlayCtx.beginPath();
+        overlayCtx.arc(x, y, 16, 0, Math.PI * 2);
+        overlayCtx.fill();
+
+        overlayCtx.beginPath();
+        overlayCtx.arc(x, y, 4.5, 0, Math.PI * 2);
+        overlayCtx.fillStyle = '#ffffff';
+        overlayCtx.fill();
+        overlayCtx.restore();
+      }
+
+      function drawVehicleMarker(x, y) {
+        overlayCtx.save();
+        overlayCtx.translate(x, y);
+
+        overlayCtx.beginPath();
+        overlayCtx.arc(0, 0, 22, 0, Math.PI * 2);
+        overlayCtx.fillStyle = 'rgba(62, 106, 225, 0.24)';
+        overlayCtx.fill();
+
+        overlayCtx.beginPath();
+        overlayCtx.arc(0, 0, 13.5, 0, Math.PI * 2);
+        overlayCtx.fillStyle = '#3e6ae1';
+        overlayCtx.fill();
+        overlayCtx.lineWidth = 2;
+        overlayCtx.strokeStyle = '#ffffff';
+        overlayCtx.stroke();
+
+        // Crisp front-view car silhouette inside badge
+        overlayCtx.fillStyle = '#ffffff';
+        overlayCtx.beginPath();
+        overlayCtx.moveTo(-6.2, -0.5);
+        overlayCtx.lineTo(-4.6, -5.0);
+        overlayCtx.quadraticCurveTo(-4.2, -5.8, -3.2, -5.8);
+        overlayCtx.lineTo(3.2, -5.8);
+        overlayCtx.quadraticCurveTo(4.2, -5.8, 4.6, -5.0);
+        overlayCtx.lineTo(6.2, -0.5);
+        overlayCtx.quadraticCurveTo(7.4, -0.2, 7.4, 1.0);
+        overlayCtx.lineTo(7.4, 4.0);
+        overlayCtx.quadraticCurveTo(7.4, 4.8, 6.5, 4.8);
+        overlayCtx.lineTo(-6.5, 4.8);
+        overlayCtx.quadraticCurveTo(-7.4, 4.8, -7.4, 4.0);
+        overlayCtx.lineTo(-7.4, 1.0);
+        overlayCtx.quadraticCurveTo(-7.4, -0.2, -6.2, -0.5);
+        overlayCtx.closePath();
+        overlayCtx.fill();
+
+        overlayCtx.fillRect(-6.2, 4.6, 2.5, 1.8);
+        overlayCtx.fillRect(3.7, 4.6, 2.5, 1.8);
+
+        overlayCtx.fillStyle = '#3e6ae1';
+        overlayCtx.beginPath();
+        overlayCtx.moveTo(-4.6, -0.8);
+        overlayCtx.lineTo(-3.6, -4.2);
+        overlayCtx.lineTo(3.6, -4.2);
+        overlayCtx.lineTo(4.6, -0.8);
+        overlayCtx.closePath();
+        overlayCtx.fill();
+
+        overlayCtx.fillStyle = '#dbeafe';
+        overlayCtx.beginPath();
+        overlayCtx.arc(-4.6, 1.9, 1.15, 0, Math.PI * 2);
+        overlayCtx.arc(4.6, 1.9, 1.15, 0, Math.PI * 2);
+        overlayCtx.fill();
+
+        overlayCtx.restore();
+      }
+
+      function drawPin(x, y, color, label) {
+        overlayCtx.save();
+        overlayCtx.beginPath();
+        overlayCtx.arc(x, y, 10, 0, Math.PI * 2);
+        overlayCtx.fillStyle = color;
+        overlayCtx.fill();
+        overlayCtx.lineWidth = 2;
+        overlayCtx.strokeStyle = '#ffffff';
+        overlayCtx.stroke();
+        overlayCtx.fillStyle = '#ffffff';
+        overlayCtx.font = 'bold 10px sans-serif';
+        overlayCtx.textAlign = 'center';
+        overlayCtx.textBaseline = 'middle';
+        overlayCtx.fillText(label, x, y + 0.5);
+        overlayCtx.restore();
+      }
+
+      function fitBounds(pts) {
+        if (!pts || pts.length === 0) return;
+        if (pts.length === 1) {
+          view.lat = pts[0].lat;
+          view.lon = pts[0].lon;
+          view.zoom = 15.5;
+          requestDraw();
+          return;
+        }
+        var minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+        for (var i = 0; i < pts.length; i++) {
+          if (pts[i].lat < minLat) minLat = pts[i].lat;
+          if (pts[i].lat > maxLat) maxLat = pts[i].lat;
+          if (pts[i].lon < minLon) minLon = pts[i].lon;
+          if (pts[i].lon > maxLon) maxLon = pts[i].lon;
+        }
+        view.lat = (minLat + maxLat) / 2;
+        view.lon = (minLon + maxLon) / 2;
+
+        var w = Math.max(120, (window.innerWidth || 340) - 68);
+        var h = Math.max(100, (window.innerHeight || 240) - 68);
+        var bestZ = 16;
+        for (var z = 17; z >= 4; z -= 0.5) {
+          var dx = Math.abs(lonToWorldX(maxLon, z) - lonToWorldX(minLon, z));
+          var dy = Math.abs(latToWorldY(minLat, z) - latToWorldY(maxLat, z));
+          if (dx <= w && dy <= h) {
+            bestZ = z;
+            break;
+          }
+        }
+        view.zoom = Math.max(4, Math.min(16.5, bestZ));
+        requestDraw();
+      }
+
+      function returnToLiveLocationImpl() {
+        stopRouteLoop();
+        routePoints = [];
+        routeCumDist = [];
+        if (vehiclePos) {
+          view.lat = vehiclePos.lat;
+          view.lon = vehiclePos.lon;
+          view.zoom = 15.5;
+        }
+        badge.textContent = liveLocationLabel || '当前车辆位置';
+        notifyRouteMode(false);
+        requestDraw();
+      }
+
+      // Pan & pinch interaction on top overlay canvas
+      var drag = { active: false, lx: 0, ly: 0, pinching: false, pdist: 0 };
+      overlayCanvas.addEventListener('touchstart', function (e) {
+        if (e.touches.length === 1) {
+          drag.active = true; drag.pinching = false;
+          drag.lx = e.touches[0].clientX; drag.ly = e.touches[0].clientY;
+        } else if (e.touches.length === 2) {
+          drag.active = false; drag.pinching = true;
+          var dx = e.touches[0].clientX - e.touches[1].clientX;
+          var dy = e.touches[0].clientY - e.touches[1].clientY;
+          drag.pdist = Math.sqrt(dx * dx + dy * dy);
+        }
+      }, { passive: true });
+
+      overlayCanvas.addEventListener('touchmove', function (e) {
+        if (drag.active && e.touches.length === 1) {
+          var cx = e.touches[0].clientX, cy = e.touches[0].clientY;
+          var dx = cx - drag.lx, dy = cy - drag.ly;
+          drag.lx = cx; drag.ly = cy;
+          var wx = lonToWorldX(view.lon, view.zoom) - dx;
+          var wy = latToWorldY(view.lat, view.zoom) - dy;
+          view.lon = worldXToLon(wx, view.zoom);
+          view.lat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
+          if (geofencePicker.active) {
+            notifyGeofenceChanged();
+          }
+          requestDraw();
+        } else if (drag.pinching && e.touches.length === 2) {
+          var pdx = e.touches[0].clientX - e.touches[1].clientX;
+          var pdy = e.touches[0].clientY - e.touches[1].clientY;
+          var dist = Math.sqrt(pdx * pdx + pdy * pdy);
+          var ratio = dist / Math.max(1, drag.pdist);
+          drag.pdist = dist;
+          view.zoom = Math.max(4, Math.min(18, view.zoom + Math.log2(ratio)));
+          if (geofencePicker.active) {
+            geofencePicker.radiusMeters = radiusFromZoom(
+              view.lat,
+              view.zoom,
+              window.innerWidth || 340,
+              window.innerHeight || 240
+            );
+            notifyGeofenceChanged();
+          }
+          requestDraw();
+        }
+      }, { passive: true });
+
+      overlayCanvas.addEventListener('touchend', function () {
+        drag.active = false; drag.pinching = false;
+      }, { passive: true });
+
+      document.getElementById('btnZoomIn').addEventListener('click', function () {
+        view.zoom = Math.min(18, view.zoom + 1);
+        if (geofencePicker.active) {
+          geofencePicker.radiusMeters = radiusFromZoom(
+            view.lat,
+            view.zoom,
+            window.innerWidth || 340,
+            window.innerHeight || 240
+          );
+          notifyGeofenceChanged();
+        }
+        requestDraw();
+      });
+      document.getElementById('btnZoomOut').addEventListener('click', function () {
+        view.zoom = Math.max(4, view.zoom - 1);
+        if (geofencePicker.active) {
+          geofencePicker.radiusMeters = radiusFromZoom(
+            view.lat,
+            view.zoom,
+            window.innerWidth || 340,
+            window.innerHeight || 240
+          );
+          notifyGeofenceChanged();
+        }
+        requestDraw();
+      });
+      document.getElementById('btnRecenter').addEventListener('click', function () {
+        if (geofencePicker.active) {
+          if (vehiclePos) {
+            view.lat = vehiclePos.lat;
+            view.lon = vehiclePos.lon;
+            notifyGeofenceChanged();
+            requestDraw();
+          }
+        } else {
+          returnToLiveLocationImpl();
+        }
+      });
+
+      window.addEventListener('resize', resize);
+
+      // Public API called from Android Kotlin (coordinates are already GCJ-02 from Chery zyhl cloud)
+      window.CarMap = {
+        setVehicleLocation: function (lat, lon, label) {
+          if (typeof lat !== 'number' || typeof lon !== 'number' || (lat === 0 && lon === 0)) return;
+          stopRouteLoop();
+          vehiclePos = { lat: lat, lon: lon };
+          liveLocationLabel = label || '当前车辆位置';
+          routePoints = [];
+          routeCumDist = [];
+          view.lat = lat;
+          view.lon = lon;
+          view.zoom = 15.5;
+          badge.textContent = liveLocationLabel;
+          notifyRouteMode(false);
+          requestDraw();
+        },
+        showTripRoute: function (points, label) {
+          if (!Array.isArray(points) || points.length === 0) return;
+          var validPts = [];
+          for (var i = 0; i < points.length; i++) {
+            var pt = points[i];
+            if (typeof pt.lat === 'number' && typeof pt.lon === 'number' && (pt.lat !== 0 || pt.lon !== 0)) {
+              validPts.push({ lat: pt.lat, lon: pt.lon });
+            }
+          }
+          if (validPts.length === 0) return;
+          routePoints = validPts;
+          buildRouteMetrics(validPts);
+          badge.textContent = label || ('行驶轨迹 · ' + validPts.length + ' 点');
+          fitBounds(validPts);
+          notifyRouteMode(true);
+          startRouteLoop();
+        },
+        returnToLiveLocation: function () {
+          geofencePicker.active = false;
+          returnToLiveLocationImpl();
+        },
+        setGeofencePicker: function (lat, lon, radiusMeters) {
+          stopRouteLoop();
+          routePoints = [];
+          routeCumDist = [];
+          geofencePicker.active = true;
+          var r = typeof radiusMeters === 'number' && isFinite(radiusMeters)
+            ? Math.max(100, Math.min(20000, Math.round(radiusMeters)))
+            : 500;
+          geofencePicker.radiusMeters = r;
+          if (typeof lat === 'number' && typeof lon === 'number' && (lat !== 0 || lon !== 0)) {
+            view.lat = lat;
+            view.lon = lon;
+            if (!vehiclePos) {
+              vehiclePos = { lat: lat, lon: lon };
+            }
+          }
+          view.zoom = zoomForRadius(
+            view.lat,
+            r,
+            window.innerWidth || 340,
+            window.innerHeight || 240
+          );
+          notifyGeofenceChanged();
+          requestDraw();
+        },
+        setGeofenceRadius: function (radiusMeters) {
+          if (typeof radiusMeters !== 'number' || !isFinite(radiusMeters)) return;
+          var r = Math.max(100, Math.min(20000, Math.round(radiusMeters)));
+          geofencePicker.active = true;
+          geofencePicker.radiusMeters = r;
+          view.zoom = zoomForRadius(
+            view.lat,
+            r,
+            window.innerWidth || 340,
+            window.innerHeight || 240
+          );
+          badge.textContent = formatRadiusBadge(r);
+          requestDraw();
+        }
+      };
+
+      resize();
+    })();
+  </script>
+</body>
+</html>
