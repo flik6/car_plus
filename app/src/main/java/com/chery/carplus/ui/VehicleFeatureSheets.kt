@@ -1575,7 +1575,10 @@ internal class VehicleFeatureSheets(
      * overlay navigation (zero 3D reload). Returns `(rootView, destroyCallback)`.
      */
     @SuppressLint("SetJavaScriptEnabled")
-    fun buildLocationSubpageView(onBack: () -> Unit): Pair<View, () -> Unit> {
+    fun buildLocationSubpageView(
+        onBack: () -> Unit,
+        registerAddressUpdate: ((String) -> Unit) -> (() -> Unit) = { { } }
+    ): Pair<View, () -> Unit> {
         val profile = profileProvider()
         var mapWebView: WebView? = null
         var mapReady = false
@@ -1739,13 +1742,36 @@ internal class VehicleFeatureSheets(
             setPadding(dp(20), dp(12), dp(20), dp(12))
         }
         val addrCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        val approxAddr = liveAddressLabelProvider().ifBlank { "当前车辆位置" }
-        val distLabel = liveDistanceLabelProvider().trim()
-        addrCol.addView(text(approxAddr, 15f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 })
-        if (distLabel.isNotBlank()) {
-            addrCol.addView(text(distLabel, 12.5f, TEXT_SUB).apply { maxLines = 1 }, lp(top = dp(2)))
+        val locationTelemetry = telemetryProvider()
+        val hasVehicleLocation = locationTelemetry?.latitude != null &&
+            locationTelemetry.longitude != null &&
+            (locationTelemetry.latitude != 0.0 || locationTelemetry.longitude != 0.0)
+        val approxAddr = when {
+            !hasVehicleLocation -> "车辆位置暂不可用"
+            liveAddressLabelProvider().isBlank() -> "街道信息暂不可用"
+            else -> liveAddressLabelProvider()
         }
+        val distLabel = if (hasVehicleLocation) {
+            liveDistanceLabelProvider().trim().ifBlank { "距离暂不可用" }
+        } else {
+            "距离暂不可用"
+        }
+        val addressView = text(approxAddr, 15f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 }
+        val distanceView = text(distLabel, 12.5f, TEXT_SUB).apply { maxLines = 1 }
+        addrCol.addView(addressView)
+        addrCol.addView(distanceView, lp(top = dp(2)))
         navBar.addView(addrCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(12) })
+        val unregisterAddressUpdate = registerAddressUpdate { resolved ->
+            val current = telemetryProvider()
+            val lat = current?.latitude
+            val lon = current?.longitude
+            addressView.text = if (lat == null || lon == null || (lat == 0.0 && lon == 0.0)) {
+                "车辆位置暂不可用"
+            } else {
+                resolved.ifBlank { "街道信息暂不可用" }
+            }
+            distanceView.text = liveDistanceLabelProvider().ifBlank { "距离暂不可用" }
+        }
 
         val navBtn = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1763,7 +1789,7 @@ internal class VehicleFeatureSheets(
                 if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
                     showNavigationAppPicker(lat, lon, liveAddressLabelProvider().ifBlank { "我的车辆" })
                 } else {
-                    toast("暂无车辆定位坐标")
+                    toast("暂无可导航的车辆位置")
                 }
             }
         }
@@ -1802,6 +1828,7 @@ internal class VehicleFeatureSheets(
         )
 
         val destroyCallback: () -> Unit = {
+            unregisterAddressUpdate()
             if (!mapDestroyed) {
                 mapDestroyed = true
                 mapReady = false
@@ -2159,13 +2186,8 @@ internal class VehicleFeatureSheets(
         val resolvedPlate = plateNoProvider().ifBlank { t?.licensePlate.orEmpty() }
         val rows = buildList {
             if (resolvedPlate.isNotBlank()) add("车牌号码" to resolvedPlate)
-            add(
-                "实时坐标" to if (hasCoords) {
-                    String.format(Locale.US, "%.5f°N, %.5f°E", t!!.latitude, t.longitude)
-                } else {
-                    "暂无坐标上报"
-                }
-            )
+            add("车辆位置" to if (hasCoords) liveAddressLabelProvider().ifBlank { "街道信息暂不可用" } else "位置暂不可用")
+            add("直线距离" to if (hasCoords) liveDistanceLabelProvider().ifBlank { "距离暂不可用" } else "距离暂不可用")
             add("车辆在线 / 定位状态" to locationStatus)
             t?.time?.takeIf { it.isNotBlank() }?.let { add("定位时间" to it) }
         }
@@ -2450,22 +2472,6 @@ internal class VehicleFeatureSheets(
             )
             pairs.forEachIndexed { idx, (k, v) ->
                 box.addView(kvRow(k, v), lp(top = if (idx == 0) dp(8) else dp(2)))
-            }
-            if (trip.points.isNotEmpty()) {
-                val first = trip.points.first()
-                val last = trip.points.last()
-                box.addView(
-                    text(
-                        String.format(
-                            Locale.US,
-                            "起点坐标：%.5f, %.5f\n终点坐标：%.5f, %.5f",
-                            first.lat, first.lon, last.lat, last.lon
-                        ),
-                        12f,
-                        TEXT_SUB
-                    ),
-                    lp(top = dp(10))
-                )
             }
             box.addView(primaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(18), height = dp(44)))
         }

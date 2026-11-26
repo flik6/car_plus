@@ -22,6 +22,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.text.TextUtils
+import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -241,6 +242,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var securitySubpageStatusText: TextView? = null
     private var locationOverlayView: View? = null
     private var locationOverlayDestroy: (() -> Unit)? = null
+    private val locationAddressObservers = linkedSetOf<(String) -> Unit>()
+    private var refreshVehicleInfo: (() -> Unit)? = null
     private var messagesOverlayView: View? = null
     private val subpageOverlayStack = ArrayDeque<Pair<View, (() -> Unit)?>>()
     private var settingsScreen: SettingsScreen? = null
@@ -317,6 +320,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var cloudTripTrackEnabled: Boolean? = null
     private var lastGeocodedKey = ""
     private var lastGeocodedAddress: String? = null
+    private var lastGeocodeSettled = false
     private var lastBackExitPromptMs = 0L
     private var lastCarTapTelemetryAtMs = 0L
     private var footerMetricIndex = 0
@@ -341,8 +345,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             scope = lifecycleScope,
             httpClient = httpClient,
             profileProvider = { profileStore.getActiveProfile() },
-            activeModelNameProvider = { uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty() },
-            activePlateNoProvider = { uiPrefs.getString(KEY_PLATE_NO, "").orEmpty() },
             onPushOverlaySubpage = { view, onDestroy -> pushSubpageOverlay(view, onDestroy) },
             onPopOverlaySubpage = { popSubpageOverlay() },
             onSelectVehicleSummary = { summary -> activateVehicleFromSummary(summary) },
@@ -397,10 +399,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 val lat = activeTelemetry?.latitude
                 val lon = activeTelemetry?.longitude
                 if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-                    formatDistanceToVehicle(lat, lon).orEmpty()
-                } else ""
+                    formatDistanceToVehicle(lat, lon) ?: "距离暂不可用"
+                } else {
+                    "距离暂不可用"
+                }
             },
-            liveAddressLabelProvider = { lastGeocodedAddress.orEmpty() },
+            liveAddressLabelProvider = { currentStreetLabel() },
             onVehiclesChanged = { handleVehiclesChanged() }
         )
 
@@ -909,8 +913,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             addView(fieldLabel("密码"), lp(top = dp(18), bottom = dp(8)))
             loginPasswordInput = styledInput(
                 "请输入登录密码",
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            ).apply { imeOptions = EditorInfo.IME_ACTION_DONE }
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                    InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            ).apply {
+                transformationMethod = PasswordTransformationMethod.getInstance()
+                imeOptions = EditorInfo.IME_ACTION_DONE
+            }
             addView(loginPasswordInput, lp(height = dp(50)))
         }
         page.addView(loginPasswordBlock, lp())
@@ -1121,6 +1129,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 val saved = withContext(Dispatchers.IO) {
                     profileStore.saveProfile(profile, activate = true)
                 }
+                managementScreens.rememberVehicleSummaries(vehicles, saved.accessToken)
                 if (primary != null) {
                     uiPrefs.edit()
                         .putString(KEY_MODEL_NAME, vehicleModelName(primary))
@@ -1332,6 +1341,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         bleConnected = bleController.isSessionReady()
         bleNearby = bleController.isVehicleNearby
         activeTelemetry = null
+        geocodeJob?.cancel()
+        lastGeocodedKey = ""
+        lastGeocodedAddress = null
+        lastGeocodeSettled = false
 
         val profile = profileStore.getActiveProfile().also { currentProfile = it }
         if (profile.controlPin.isNotBlank()) sessionVehiclePin = profile.controlPin
@@ -1517,6 +1530,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     httpClient.fetchVehicleList(profile.accessToken)
                 }
             }.getOrNull() ?: return@launch
+            val current = profileStore.getActiveProfile()
+            if (current.accessToken != profile.accessToken ||
+                !current.vin.equals(profile.vin, ignoreCase = true)) return@launch
+            managementScreens.rememberVehicleSummaries(vehicles, profile.accessToken)
+            refreshVehicleInfo?.invoke()
             val matched = vehicles.firstOrNull { it.vin.equals(profile.vin, ignoreCase = true) }
                 ?: vehicles.firstOrNull()
             matched?.isTracksOpen?.let { cloudTripTrackEnabled = it }
@@ -1767,10 +1785,36 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         homeHeaderView = header
         page.addView(header)
 
+        // Stable top-left display-only Bluetooth channel icon. The vehicle identity and
+        // short states stay in the same left rail so they never compete with the icon.
+        val identityRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+        }
+        header.addView(identityRow, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+
+        val channelBadgeWrap = FrameLayout(this).apply {
+            isClickable = false
+            isFocusable = false
+        }
+        channelBadgeIcon = AppIconView(this, AppIconType.BLUETOOTH_ICON, TEXT_SECONDARY).apply {
+            contentDescription = "蓝牙通道未连接，当前使用远程网络"
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        }
+        channelBadgeWrap.addView(
+            channelBadgeIcon,
+            FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER)
+        )
+        identityRow.addView(channelBadgeWrap, LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+            topMargin = dp(2)
+        })
+
         val leftCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        header.addView(leftCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        identityRow.addView(leftCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+            marginStart = dp(2)
+        })
 
         // Row 1: Vehicle Title + downward chevron (anchored dropdown popover switcher)
         val titleRow = LinearLayout(this).apply {
@@ -1846,31 +1890,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         energyRow.addView(plateBadgeView)
 
-        // Row 3: Parking & Lock status + clickable BLE / Cloud channel icon badge (32dp touch target)
+        // Row 3: one honest primary motion state (parked / started / lock only as a fallback).
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         leftCol.addView(statusRow, lp(top = dp(3)))
 
-        parkingStatusView = text("已驻车", 13f, TEXT_SECONDARY)
+        parkingStatusView = text("状态待同步", 13f, TEXT_SECONDARY)
         statusRow.addView(parkingStatusView)
-
-        val channelBadgeWrap = FrameLayout(this).apply {
-            isClickable = true
-            isFocusable = true
-            contentDescription = "点击连接或查看蓝牙数字钥匙通道"
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.86f)
-            setOnClickListener { onChannelBadgeTapped() }
-        }
-        channelBadgeIcon = AppIconView(this, AppIconType.CLOUD_NET_ICON, TEXT_SECONDARY)
-        channelBadgeWrap.addView(
-            channelBadgeIcon,
-            FrameLayout.LayoutParams(dp(14), dp(14), Gravity.CENTER)
-        )
-        statusRow.addView(channelBadgeWrap, LinearLayout.LayoutParams(dp(32), dp(32)).apply {
-            marginStart = dp(2)
-        })
 
         // Right icons: Message + Settings Menu
         val rightIcons = LinearLayout(this).apply {
@@ -2129,8 +2157,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun showVehicleInfoSubpageScreen() {
         val profile = profileStore.getActiveProfile()
         val t = activeTelemetry
-        val modelName = uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "我的座驾" }
-        val plateNo = uiPrefs.getString(KEY_PLATE_NO, "").orEmpty().ifBlank { "未设置" }
+        val vehicle = managementScreens.cachedVehicleSummary(profile.vin)
+        val modelName = vehicle?.let { vehicleModelName(it) }
+            ?: uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "我的座驾" }
+        val plateNo = vehicle?.plateNo?.takeIf { it.isNotBlank() }
+            ?: uiPrefs.getString(KEY_PLATE_NO, "").orEmpty().ifBlank { "未设置" }
         val odoStr = t?.odometerKm?.takeIf { it > 0.0 }?.let { "${String.format(Locale.US, "%,d", it.roundToInt())} km" }
             ?: t?.odometer?.takeIf { it.isNotBlank() }?.let { "$it km" }
             ?: "--"
@@ -2150,7 +2181,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 title = "车辆信息",
                 onBack = { popSubpageOverlay() },
                 rightText = "编辑",
-                onRightClick = { managementScreens.openEditVehicleScreen() }
+                onRightClick = {
+                    managementScreens.openEditVehicleScreen(onUpdated = { refreshVehicleInfo?.invoke() })
+                }
             ),
             lp()
         )
@@ -2167,31 +2200,56 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         content.addView(AppComponents.createSectionHeader(this, "基本信息"), lp())
-        val specs = listOf(
+        val basicSpecs = listOf(
             "车型名称" to modelName,
             "车牌号" to plateNo,
-            "车辆识别码 (VIN)" to maskedVin(profile.vin),
             "总里程" to odoStr,
             "四轮胎压" to tyreStr,
             "蓄电池电压" to voltStr,
             "蓝牙钥匙名称" to bleNameStr
         )
-        specs.forEachIndexed { idx, (label, value) ->
-            content.addView(
-                AppComponents.createListRow(
-                    context = this,
-                    icon = null,
-                    title = label,
-                    trailingText = value,
-                    showChevron = false,
-                    onClick = null
-                ),
-                lp()
-            )
-            if (idx < specs.lastIndex) {
-                content.addView(AppComponents.createHairline(this, startInsetDp = 20))
+        fun addSpecRows(parent: LinearLayout, specs: List<Pair<String, String>>) {
+            specs.forEachIndexed { idx, (label, value) ->
+                parent.addView(
+                    AppComponents.createListRow(
+                        context = this,
+                        icon = null,
+                        title = label,
+                        trailingText = value,
+                        showChevron = false,
+                        onClick = null
+                    ),
+                    lp()
+                )
+                if (idx < specs.lastIndex) {
+                    parent.addView(AppComponents.createHairline(this, startInsetDp = 20))
+                }
             }
         }
+        addSpecRows(content, basicSpecs)
+
+        content.addView(AppComponents.createSectionHeader(this, "车辆资料"), lp())
+        val identityRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(identityRows, lp())
+        val refreshIdentityRows: () -> Unit = {
+            val current = profileStore.getActiveProfile()
+            if (current.accessToken == profile.accessToken && current.vin.equals(profile.vin, ignoreCase = true)) {
+                val summary = managementScreens.cachedVehicleSummary(profile.vin)
+                identityRows.removeAllViews()
+                addSpecRows(
+                    identityRows,
+                    listOf(
+                        "车架号" to SensitiveUiText.identifier(profile.vin),
+                        "发动机号" to SensitiveUiText.identifier(summary?.engineNumber),
+                        "ICCID" to SensitiveUiText.identifier(summary?.iccid),
+                        "SN 码" to SensitiveUiText.identifier(summary?.sn),
+                        "车主姓名" to SensitiveUiText.personName(summary?.hostName),
+                        "购车时间" to SensitiveUiText.year(summary?.purchaseTime)
+                    )
+                )
+            }
+        }
+        refreshIdentityRows()
 
         content.addView(AppComponents.createSectionHeader(this, "车辆管理与系统"), lp())
         content.addView(
@@ -2215,7 +2273,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             lp()
         )
 
-        pushSubpageOverlay(root)
+        refreshVehicleInfo = refreshIdentityRows
+        pushSubpageOverlay(root) {
+            if (refreshVehicleInfo === refreshIdentityRows) refreshVehicleInfo = null
+        }
     }
 
     private fun showLocationSubpageScreen() {
@@ -2227,9 +2288,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         locationOverlayDestroy?.invoke()
         locationOverlayView?.let { contentFrame.removeView(it) }
 
-        val (locationView, destroyCb) = featureSheets.buildLocationSubpageView {
-            returnFromLocationToHome()
-        }
+        val (locationView, destroyCb) = featureSheets.buildLocationSubpageView(
+            onBack = { returnFromLocationToHome() },
+            registerAddressUpdate = { observer ->
+                locationAddressObservers += observer
+                val unregister: () -> Unit = { locationAddressObservers -= observer }
+                unregister
+            }
+        )
         currentScreen = Screen.LOCATION
         locationOverlayView = locationView
         locationOverlayDestroy = destroyCb
@@ -3035,7 +3101,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val locRow = createMenuRowWithRefs(
             icon = AppIconType.LOCATION_ARROW,
             title = "地点",
-            initialSubtitle = "查看地图与历史行程",
+            initialSubtitle = "位置信息待同步",
             withStatusDot = false
         ) { showLocationSubpageScreen() }
         locationRowSubtitle = locRow.second
@@ -3390,13 +3456,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         energyTextView?.text = formatEnergyDisplay(telemetry)
 
         val locked = telemetry?.doorLocked
-        val driveLabel = if (telemetry?.engineRunning == true) "已启动" else "已驻车"
-        val lockLabel = when (locked) {
-            true -> " · 已锁止"
-            false -> " · 已解锁"
-            null -> ""
+        val primaryMotionState = when {
+            telemetry?.engineRunning == true -> "已启动"
+            telemetry?.engineRunning == false -> "已驻车"
+            locked == true -> "已锁止"
+            locked == false -> "已解锁"
+            else -> "状态待同步"
         }
-        parkingStatusView?.text = "$driveLabel$lockLabel"
+        parkingStatusView?.text = primaryMotionState
+        parkingStatusView?.contentDescription = "车辆主状态：$primaryMotionState"
 
         val effectiveLocked = locked ?: true
         val physicalDoorsOpen = arePhysicalDoorsOpen(telemetry)
@@ -3451,6 +3519,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 securityRowSubtitle?.text = "手机钥匙已连接 (BLE 直连)$rssi"
                 channelBadgeIcon?.apply {
                     iconType = AppIconType.BLUETOOTH_ICON
+                    contentDescription = "蓝牙通道已连接"
                     MotionSpec.animateIconTint(this, ACCENT_BLUE)
                 }
             }
@@ -3459,14 +3528,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 securityRowSubtitle?.text = "发现附近车辆 · 正在连接手机钥匙..."
                 channelBadgeIcon?.apply {
                     iconType = AppIconType.BLUETOOTH_ICON
-                    MotionSpec.animateIconTint(this, Color.rgb(251, 191, 36))
+                    contentDescription = "蓝牙通道正在连接，当前使用远程网络"
+                    MotionSpec.animateIconTint(this, TEXT_SECONDARY)
                 }
             }
             else -> {
                 securityDotView?.state = StatusDotView.State.DISCONNECTED
                 securityRowSubtitle?.text = "手机钥匙已断开连接 · 远程网络控制"
                 channelBadgeIcon?.apply {
-                    iconType = AppIconType.CLOUD_NET_ICON
+                    iconType = AppIconType.BLUETOOTH_ICON
+                    contentDescription = "蓝牙通道未连接，当前使用远程网络"
                     MotionSpec.animateIconTint(this, TEXT_SECONDARY)
                 }
             }
@@ -3478,23 +3549,36 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val lat = telemetry?.latitude
         val lon = telemetry?.longitude
         if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-            val distPrefix = formatDistanceToVehicle(lat, lon)
-            val key = String.format(Locale.US, "%.3f,%.3f", lat, lon)
-            val addr = if (key == lastGeocodedKey && !lastGeocodedAddress.isNullOrBlank()) {
-                lastGeocodedAddress!!
-            } else {
-                triggerHomeReverseGeocode(lat, lon, key)
-                String.format(Locale.US, "%.4f°N, %.4f°E", lat, lon)
+            val key = streetLookupKey(lat, lon)
+            val address = when {
+                key == lastGeocodedKey && !lastGeocodedAddress.isNullOrBlank() -> lastGeocodedAddress!!
+                key == lastGeocodedKey && lastGeocodeSettled -> "街道信息暂不可用"
+                else -> {
+                    triggerHomeReverseGeocode(lat, lon, key)
+                    "街道信息待获取"
+                }
             }
-            return if (!distPrefix.isNullOrBlank()) "$distPrefix · $addr" else addr
+            val distance = formatDistanceToVehicle(lat, lon) ?: "距离暂不可用"
+            return "$address · $distance"
         }
-        return "查看地图与历史行程"
+        return "车辆位置暂不可用"
+    }
+
+    private fun streetLookupKey(lat: Double, lon: Double): String =
+        String.format(Locale.US, "%s:%.3f,%.3f", currentProfile?.vin.orEmpty(), lat, lon)
+
+    private fun currentStreetLabel(): String {
+        val lat = activeTelemetry?.latitude ?: return ""
+        val lon = activeTelemetry?.longitude ?: return ""
+        if (lat == 0.0 && lon == 0.0) return ""
+        return lastGeocodedAddress.orEmpty().takeIf { streetLookupKey(lat, lon) == lastGeocodedKey }.orEmpty()
     }
 
     private fun triggerHomeReverseGeocode(lat: Double, lon: Double, key: String) {
-        if (key == lastGeocodedKey && geocodeJob?.isActive == true) return
+        if (key == lastGeocodedKey) return
         lastGeocodedKey = key
         lastGeocodedAddress = null
+        lastGeocodeSettled = false
         geocodeJob?.cancel()
         geocodeJob = lifecycleScope.launch {
             val addr = runCatching {
@@ -3504,9 +3588,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }.getOrNull()
             if (isActive && key == lastGeocodedKey && !addr.isNullOrBlank()) {
                 lastGeocodedAddress = addr
+            }
+            if (isActive && key == lastGeocodedKey) {
+                lastGeocodeSettled = true
+                locationAddressObservers.toList().forEach { observer ->
+                    observer(currentStreetLabel())
+                }
                 if (currentScreen == Screen.HOME) {
-                    val distPrefix = formatDistanceToVehicle(lat, lon)
-                    locationRowSubtitle?.text = if (!distPrefix.isNullOrBlank()) "$distPrefix · $addr" else addr
+                    locationRowSubtitle?.text = formatLocationSubtitle(activeTelemetry)
                 }
             }
         }
@@ -3517,9 +3606,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val distM = haversineDistanceMeters(phoneGcj.first, phoneGcj.second, vehicleGcjLat, vehicleGcjLon)
         if (distM.isNaN() || distM.isInfinite() || distM < 0.0) return null
         return when {
-            distM < 30.0 -> "就在附近"
-            distM < 1000.0 -> "距您 ${distM.roundToInt()}m"
-            else -> String.format(Locale.US, "距您 %.1fkm", distM / 1000.0)
+            distM < 1000.0 -> "直线距离 ${distM.roundToInt()} 米"
+            else -> String.format(Locale.US, "直线距离 %.1f 公里", distM / 1000.0)
         }
     }
 
@@ -5234,14 +5322,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun formatTemp(celsius: Double): String =
         String.format(Locale.US, "%.1f°C", celsius)
 
-    private fun maskedVin(vin: String): String {
-        val normalized = vin.trim().uppercase(Locale.US)
-        return when {
-            normalized.length >= 10 -> normalized.take(3) + "***" + normalized.takeLast(4)
-            normalized.isBlank() -> "VIN 待同步"
-            else -> normalized
-        }
-    }
+    private fun maskedVin(vin: String): String = SensitiveUiText.identifier(vin)
 
     private fun maskMobile(mobile: String): String = when {
         mobile.length >= 7 -> mobile.take(3) + "****" + mobile.takeLast(4)

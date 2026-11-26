@@ -19,13 +19,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.lifecycle.LifecycleCoroutineScope
-import com.chery.carplus.R
 import com.chery.carplus.cloud.AuthorizationOperationRecordItem
 import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CherySessionExpiredException
@@ -57,8 +55,6 @@ internal class VehicleManagementScreens(
     private val scope: LifecycleCoroutineScope,
     private val httpClient: CheryHttpClient,
     private val profileProvider: () -> VehicleProfile,
-    private val activeModelNameProvider: () -> String,
-    private val activePlateNoProvider: () -> String = { "" },
     private val onPushOverlaySubpage: (view: View, onDestroy: (() -> Unit)?) -> Unit,
     private val onPopOverlaySubpage: () -> Unit,
     private val onSelectVehicleSummary: (VehicleSummary) -> Unit,
@@ -68,37 +64,41 @@ internal class VehicleManagementScreens(
 ) {
 
     private var activeDialog: Dialog? = null
+    private val cachedVehiclesByVin = mutableMapOf<String, VehicleSummary>()
+    private var cachedVehicleSession = ""
+
+    fun cachedVehicleSummary(vin: String): VehicleSummary? {
+        if (cachedVehicleSession != profileProvider().accessToken) return null
+        return cachedVehiclesByVin[vin.trim().uppercase(Locale.US)]
+    }
+
+    fun rememberVehicleSummaries(vehicles: List<VehicleSummary>, session: String) {
+        if (session.isBlank() || session != profileProvider().accessToken) return
+        if (session != cachedVehicleSession) {
+            cachedVehiclesByVin.clear()
+            cachedVehicleSession = session
+        }
+        vehicles.filter { it.vin.isNotBlank() }.forEach { vehicle ->
+            cachedVehiclesByVin[vehicle.vin.trim().uppercase(Locale.US)] = vehicle
+        }
+    }
 
     fun dismissAll() {
         runCatching { activeDialog?.dismiss() }
         activeDialog = null
+        cachedVehiclesByVin.clear()
+        cachedVehicleSession = ""
     }
 
     // =========================================================================
     // 1. 「驾驶员」一级界面 (TopBar: 驾驶员) -> 二级界面「驾驶员详情」/「添加驾驶员」
     // =========================================================================
 
-    fun openRemoteAuthManagementScreen(
-        targetVinOverride: String? = null,
-        targetModelOverride: String? = null,
-        targetPlateOverride: String? = null
-    ) = openDriversScreen(targetVinOverride, targetModelOverride, targetPlateOverride)
+    fun openRemoteAuthManagementScreen() = openDriversScreen()
 
-    fun openDriversScreen(
-        targetVinOverride: String? = null,
-        targetModelOverride: String? = null,
-        targetPlateOverride: String? = null
-    ) {
+    fun openDriversScreen() {
         val profile = profileProvider()
-        val targetVin = targetVinOverride?.trim()?.uppercase(Locale.US)
-            ?.takeIf { it.isNotBlank() }
-            ?: profile.vin.trim().uppercase(Locale.US)
-        val targetModel = targetModelOverride?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: activeModelNameProvider().ifBlank { "我的座驾" }
-        val targetPlate = targetPlateOverride?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: if (targetVin.equals(profile.vin.trim(), ignoreCase = true)) activePlateNoProvider().trim() else ""
+        val targetVin = profile.vin.trim().uppercase(Locale.US)
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -129,58 +129,6 @@ internal class VehicleManagementScreens(
         scroll.addView(body, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        // Compact vehicle & driver count summary header card
-        val summaryBadge = TextView(context).apply {
-            text = "同步中"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(ThemeTokens.ACCENT_LIGHT)
-            background = rounded(ACCENT_TINT_BG, 8f)
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-        }
-        val overviewCard = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-        }
-        val iconFrame = FrameLayout(context).apply {
-            background = rounded(TILE_BG, 12f)
-            addView(
-                AppIconView(context, AppIconType.KEY_ROUND, ThemeTokens.TEXT_PRIMARY),
-                FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER)
-            )
-        }
-        overviewCard.addView(iconFrame, LinearLayout.LayoutParams(dp(40), dp(40)))
-
-        val overviewTextCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        overviewTextCol.addView(
-            text(targetModel, 16f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-            }
-        )
-        val subLine = listOfNotNull(
-            targetPlate.takeIf { it.isNotBlank() },
-            maskVin(targetVin).takeIf { it.isNotBlank() }
-        ).joinToString(" · ").ifBlank { "当前车辆驾驶员管理" }
-        overviewTextCol.addView(
-            text(subLine, 12.5f, ThemeTokens.TEXT_SUB).apply {
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-            },
-            lp(top = dp(3))
-        )
-        overviewCard.addView(
-            overviewTextCol,
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                marginStart = dp(12)
-                marginEnd = dp(10)
-            }
-        )
-        overviewCard.addView(summaryBadge, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        body.addView(overviewCard, lp(bottom = dp(14)))
-
         val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         body.addView(listHost, lp())
 
@@ -190,7 +138,6 @@ internal class VehicleManagementScreens(
             listHost.addView(loadingHint("正在加载驾驶员列表..."))
             val current = profileProvider()
             if (targetVin.isBlank() || current.accessToken.isBlank()) {
-                summaryBadge.text = "未绑定"
                 listHost.removeAllViews()
                 listHost.addView(buildEmptyDriversGuideCard(hasVehicle = false))
             } else {
@@ -205,12 +152,6 @@ internal class VehicleManagementScreens(
                     }
                     listHost.removeAllViews()
                     result.onSuccess { items ->
-                        val activeCount = items.count { it.enabled }
-                        summaryBadge.text = if (items.isEmpty()) {
-                            "0 位驾驶员"
-                        } else {
-                            "启用 $activeCount / ${items.size}"
-                        }
                         if (items.isEmpty()) {
                             listHost.addView(buildEmptyDriversGuideCard(hasVehicle = true))
                         } else {
@@ -219,7 +160,6 @@ internal class VehicleManagementScreens(
                                     buildDriverSummaryCard(
                                         item = item,
                                         vin = targetVin,
-                                        modelName = targetModel,
                                         onChanged = reloadList
                                     ),
                                     lp(top = if (idx == 0) 0 else dp(12))
@@ -228,7 +168,6 @@ internal class VehicleManagementScreens(
                         }
                     }.onFailure { err ->
                         if (err is CherySessionExpiredException) return@onFailure
-                        summaryBadge.text = "加载异常"
                         listHost.addView(errorBanner("驾驶员列表加载失败：${err.message.orEmpty().take(90)}"))
                         listHost.addView(
                             AppComponents.createActionButton(context, "重新加载", ButtonStyle.SECONDARY) {
@@ -264,7 +203,6 @@ internal class VehicleManagementScreens(
     private fun buildDriverSummaryCard(
         item: VehicleAuthorizationItem,
         vin: String,
-        modelName: String,
         onChanged: () -> Unit
     ): LinearLayout {
         val granteeName = item.receiverAccountName.ifBlank { item.receiverMobile.ifBlank { "驾驶员" } }
@@ -281,7 +219,6 @@ internal class VehicleManagementScreens(
                 openDriverDetailScreen(
                     item = item,
                     vin = vin,
-                    modelName = modelName,
                     onChanged = onChanged
                 )
             }
@@ -360,7 +297,6 @@ internal class VehicleManagementScreens(
     private fun openDriverDetailScreen(
         item: VehicleAuthorizationItem,
         vin: String,
-        modelName: String,
         onChanged: () -> Unit
     ) {
         var currentEnabled = item.enabled
@@ -438,10 +374,7 @@ internal class VehicleManagementScreens(
         )
         statusCard.addView(identityHeader, lp())
 
-        val metaSub = listOfNotNull(
-            modelName.takeIf { it.isNotBlank() },
-            item.receiverMobile.takeIf { it.isNotBlank() }
-        ).joinToString(" · ")
+        val metaSub = item.receiverMobile.takeIf { it.isNotBlank() }?.let { "手机号 $it" } ?: "驾驶员授权"
         statusCard.addView(text(metaSub, 13f, ThemeTokens.TEXT_SUB), lp(top = dp(6)))
 
         statusCard.addView(
@@ -1167,6 +1100,7 @@ internal class VehicleManagementScreens(
                     }
                     res.onSuccess { list ->
                         loadedVehicles = list.filter { it.vin.isNotBlank() }
+                        rememberVehicleSummaries(loadedVehicles, active.accessToken)
                         loadedVehicles.forEach { v ->
                             if (v.simStatus.isNotBlank()) {
                                 simStatusByVin.putIfAbsent(v.vin.uppercase(Locale.US), v.simStatus)
@@ -1224,9 +1158,9 @@ internal class VehicleManagementScreens(
     }
 
     /**
-     * Level-1 Vehicle Management Card: ONE rich, restrained card per vehicle displaying ONLY
-     * model name, status badges (certified/default), license plate plaque, VIN, and detail chevron.
-     * Tapping pushes Level-2 「车辆详情」.
+     * Level-1 Vehicle Management Card: one restrained summary card per vehicle.
+     * It intentionally exposes only model, plate and one status; detail and privacy-masked
+     * identifiers belong to the Level-2 screen.
      */
     private fun buildVehicleSummaryCard(
         vehicle: VehicleSummary,
@@ -1235,6 +1169,13 @@ internal class VehicleManagementScreens(
         val activeVin = profileProvider().vin.trim().uppercase(Locale.US)
         val isCurrentActive = vehicle.vin.equals(activeVin, ignoreCase = true)
         val modelTitle = vehicle.modelName.ifBlank { "我的座驾" }
+        val (statusText, statusFg, statusBg) = when {
+            isCurrentActive -> Triple("当前控车", ThemeTokens.ACCENT_LIGHT, ACCENT_TINT_BG)
+            vehicle.isSelected -> Triple("默认车辆", ThemeTokens.TEXT_PRIMARY, ThemeTokens.ACCENT_BLUE)
+            !vehicle.isBoundVehicle -> Triple("被授权", ThemeTokens.ACCENT_LIGHT, ACCENT_TINT_BG)
+            vehicle.simStatus.isNotBlank() -> simStatusAppearance(vehicle.simStatus)
+            else -> Triple("已绑定", ThemeTokens.TEXT_SUB, MUTED_TINT_BG)
+        }
 
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -1243,9 +1184,11 @@ internal class VehicleManagementScreens(
             } else {
                 rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
             }
-            setPadding(dp(18), dp(18), dp(18), dp(16))
+            minimumHeight = dp(92)
+            setPadding(dp(18), dp(15), dp(16), dp(15))
             isClickable = true
             isFocusable = true
+            contentDescription = "$modelTitle，${vehicle.plateNo.ifBlank { "未设置车牌号" }}，$statusText"
             MotionSpec.attachPressPhysics(this, pressedScale = 0.98f)
             setOnClickListener {
                 openVehicleDetailScreen(
@@ -1256,149 +1199,46 @@ internal class VehicleManagementScreens(
             }
         }
 
-        // Row 1: Model Name + Status Badges (left) | Right Chevron
+        // Row 1: Model + one status + the single detail entry affordance.
         val topRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val titleCluster = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        titleCluster.addView(
+        topRow.addView(
             text(modelTitle, 19.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
-            }
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
-        if (vehicle.isBoundVehicle) {
-            val (simText, simFg, simBg) = simStatusAppearance(vehicle.simStatus)
-            titleCluster.addView(
-                TextView(context).apply {
-                    text = simText
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(simFg)
-                    background = rounded(simBg, 7f)
-                    setPadding(dp(8), dp(2), dp(8), dp(2))
-                },
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) }
-            )
-        } else {
-            titleCluster.addView(
-                TextView(context).apply {
-                    text = "被授权"
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(ThemeTokens.ACCENT_LIGHT)
-                    background = rounded(ACCENT_TINT_BG, 7f)
-                    setPadding(dp(8), dp(2), dp(8), dp(2))
-                },
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) }
-            )
-        }
-        if (vehicle.isSelected) {
-            titleCluster.addView(
-                TextView(context).apply {
-                    text = "默认车辆"
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    setTypeface(null, Typeface.BOLD)
-                    setTextColor(ThemeTokens.TEXT_PRIMARY)
-                    background = rounded(ThemeTokens.ACCENT_BLUE, 7f)
-                    setPadding(dp(8), dp(2), dp(8), dp(2))
-                },
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(6) }
-            )
-        }
-        topRow.addView(titleCluster, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        topRow.addView(
+            TextView(context).apply {
+                text = statusText
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(statusFg)
+                background = rounded(statusBg, 7f)
+                setPadding(dp(8), dp(2), dp(8), dp(2))
+            },
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) }
+        )
         topRow.addView(
             AppIconView(context, AppIconType.CHEVRON_RIGHT, Color.parseColor("#676C78")),
             LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(6) }
         )
         card.addView(topRow, lp())
 
-        // Row 2: Compact Studio Emblem + Metallic Plate Plaque + Active Status
-        val studioRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = rounded(HERO_BANNER_BG, 14f, Color.parseColor("#2A2E3A"), 0.7f)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-        }
-        val emblemBox = FrameLayout(context).apply {
-            background = rounded(Color.parseColor("#1D2028"), 11f)
-            addView(
-                ImageView(context).apply {
-                    setImageResource(R.drawable.ic_app_logo)
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                    contentDescription = "CarPlus Logo"
-                },
-                FrameLayout.LayoutParams(dp(38), dp(38), Gravity.CENTER)
-            )
-        }
-        studioRow.addView(emblemBox, LinearLayout.LayoutParams(dp(48), dp(48)))
-
-        val plateCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        plateCol.addView(
-            TextView(context).apply {
-                text = vehicle.plateNo.ifBlank { "未设置车牌号" }
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
-                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                setTextColor(if (vehicle.plateNo.isNotBlank()) ThemeTokens.TEXT_PRIMARY else ThemeTokens.TEXT_SUB)
-                background = rounded(
-                    Color.parseColor("#252934"),
-                    7f,
-                    if (vehicle.plateNo.isNotBlank()) Color.parseColor("#475166") else CARD_BORDER,
-                    0.9f
-                )
-                setPadding(dp(11), dp(4), dp(11), dp(4))
+        card.addView(
+            text(
+                vehicle.plateNo.ifBlank { "未设置车牌号" },
+                13.5f,
+                if (vehicle.plateNo.isNotBlank()) ThemeTokens.TEXT_BODY else ThemeTokens.TEXT_SUB
+            ).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             },
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+            lp(top = dp(8))
         )
-        val dotRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        dotRow.addView(
-            View(context).apply {
-                background = ovalDrawable(if (isCurrentActive) SUCCESS_GREEN else ThemeTokens.TEXT_SUB)
-            },
-            LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(6) }
-        )
-        dotRow.addView(
-            text(
-                if (isCurrentActive) "当前控车中" else "轻触查看详情与管理",
-                12f,
-                if (isCurrentActive) SUCCESS_GREEN else ThemeTokens.TEXT_SUB
-            )
-        )
-        plateCol.addView(dotRow, lp(top = dp(6)))
-        studioRow.addView(
-            plateCol,
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(12) }
-        )
-        card.addView(studioRow, lp(top = dp(14)))
-
-        // Row 3: Clean VIN line + subtle detail cue
-        val vinRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        vinRow.addView(text("车架号", 12f, ThemeTokens.TEXT_SUB))
-        vinRow.addView(
-            TextView(context).apply {
-                text = vehicle.vin
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-                setTextColor(ThemeTokens.TEXT_BODY)
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.MIDDLE
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(10) }
-        )
-        vinRow.addView(text("查看详情", 12f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD))
-        card.addView(vinRow, lp(top = dp(12)))
 
         return card
     }
@@ -1454,6 +1294,7 @@ internal class VehicleManagementScreens(
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         fun renderDetail(vehicle: VehicleSummary) {
+            rememberVehicleSummaries(listOf(vehicle), activeProfile.accessToken)
             body.removeAllViews()
             val activeVin = profileProvider().vin.trim().uppercase(Locale.US)
             val isCurrentActive = vehicle.vin.equals(activeVin, ignoreCase = true)
@@ -1573,63 +1414,62 @@ internal class VehicleManagementScreens(
                         LinearLayout.LayoutParams(0, dp(38), 1f)
                     )
                 }
-                if (vehicle.isBoundVehicle) {
+                if (vehicle.isBoundVehicle && isCurrentActive) {
                     quickRow.addView(
                         cardActionChip("驾驶员", accent = false) {
-                            openDriversScreen(
-                                targetVinOverride = vehicle.vin,
-                                targetModelOverride = modelTitle,
-                                targetPlateOverride = platePreview.text.toString().takeUnless { it == "未设置车牌号" }
-                            )
+                            openDriversScreen()
                         },
-                        LinearLayout.LayoutParams(0, dp(38), 1f).apply {
-                            if (!isCurrentActive) marginStart = dp(10)
-                        }
+                        LinearLayout.LayoutParams(0, dp(38), 1f)
                     )
                 }
                 headerCard.addView(quickRow, lp(top = dp(14)))
             }
             body.addView(headerCard, lp())
 
-            // Card 2: Hardware & Real-Name Archive (2x2 Grid, tap to copy)
-            val hwCard = LinearLayout(context).apply {
+            // Card 2: Privacy-masked identity groups. No default plaintext and no plaintext copy.
+            val identityCard = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
                 setPadding(dp(16), dp(16), dp(16), dp(16))
             }
-            val hwHeader = LinearLayout(context).apply {
+            val identityHeader = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            hwHeader.addView(
-                text("硬件档案", 15.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
+            identityHeader.addView(
+                text("车辆资料", 15.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
             )
-            hwHeader.addView(text("轻触编号可复制", 11.5f, ThemeTokens.TEXT_SUB))
-            hwCard.addView(hwHeader, lp(bottom = dp(12)))
+            identityHeader.addView(text("默认脱敏", 11.5f, ThemeTokens.TEXT_SUB))
+            identityCard.addView(identityHeader, lp(bottom = dp(8)))
+            identityCard.addView(
+                buildDetailValueRow("车架号", SensitiveUiText.identifier(vehicle.vin), copyable = true)
+            )
+            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
+            identityCard.addView(
+                buildDetailValueRow("发动机号", SensitiveUiText.identifier(vehicle.engineNumber), copyable = true)
+            )
+            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
+            identityCard.addView(
+                buildDetailValueRow("ICCID", SensitiveUiText.identifier(vehicle.iccid), copyable = true)
+            )
+            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
+            identityCard.addView(
+                buildDetailValueRow("SN 码", SensitiveUiText.identifier(vehicle.sn), copyable = true)
+            )
 
-            val gridRow1 = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            gridRow1.addView(
-                buildHardwareSpecTile("车架号 (VIN)", vehicle.vin.ifBlank { "--" }),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            identityCard.addView(
+                text("车主资料", 13f, ThemeTokens.TEXT_SUB, Typeface.BOLD),
+                lp(top = dp(18), bottom = dp(4))
             )
-            gridRow1.addView(
-                buildHardwareSpecTile("发动机号", vehicle.engineNumber.ifBlank { "--" }),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(10) }
+            identityCard.addView(
+                buildDetailValueRow("车主姓名", SensitiveUiText.personName(vehicle.hostName), copyable = false)
             )
-            hwCard.addView(gridRow1, lp())
-
-            val gridRow2 = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            gridRow2.addView(
-                buildHardwareSpecTile("车辆 ICCID", vehicle.iccid.ifBlank { "--" }),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
+            identityCard.addView(
+                buildDetailValueRow("购车时间", SensitiveUiText.year(vehicle.purchaseTime), copyable = false)
             )
-            gridRow2.addView(
-                buildHardwareSpecTile("车辆 SN 码", vehicle.sn.ifBlank { "--" }),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(10) }
-            )
-            hwCard.addView(gridRow2, lp(top = dp(10)))
-            body.addView(hwCard, lp(top = dp(12)))
+            body.addView(identityCard, lp(top = dp(12)))
 
             // Card 3: Owner & License Editable Form (933)
             if (vehicle.isBoundVehicle) {
@@ -1638,12 +1478,44 @@ internal class VehicleManagementScreens(
                     background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
                     setPadding(dp(18), dp(16), dp(18), dp(18))
                 }
-                editCard.addView(
-                    text("车主与牌照信息", 15.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
-                    lp(bottom = dp(14))
+                val editBody = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    visibility = View.GONE
+                }
+                val editChevron = AppIconView(context, AppIconType.CHEVRON_DOWN, ThemeTokens.TEXT_SUB)
+                var editExpanded = false
+                val editHeader = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = dp(48)
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = "展开编辑车辆资料"
+                    MotionSpec.attachPressPhysics(this, pressedScale = 0.98f)
+                    setOnClickListener {
+                        editExpanded = !editExpanded
+                        editBody.visibility = if (editExpanded) View.VISIBLE else View.GONE
+                        editChevron.animate()
+                            .rotation(if (editExpanded) 180f else 0f)
+                            .setDuration(180L)
+                            .start()
+                        contentDescription = if (editExpanded) "收起编辑车辆资料" else "展开编辑车辆资料"
+                        AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
+                    }
+                }
+                editHeader.addView(
+                    text("编辑车辆资料", 15.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
                 )
+                editHeader.addView(
+                    text("默认收起", 11.5f, ThemeTokens.TEXT_SUB),
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(8) }
+                )
+                editHeader.addView(editChevron, LinearLayout.LayoutParams(dp(18), dp(18)))
+                editCard.addView(editHeader)
+                editCard.addView(editBody)
 
-                editCard.addView(formFieldHeader("车牌号", required = true))
+                editBody.addView(formFieldHeader("车牌号", required = true), lp(top = dp(12)))
                 val (plateBox, plateInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入车牌号",
@@ -1651,9 +1523,9 @@ internal class VehicleManagementScreens(
                     inputType = InputType.TYPE_CLASS_TEXT,
                     maxLength = 12
                 )
-                editCard.addView(plateBox, lp(top = dp(2)))
+                editBody.addView(plateBox, lp(top = dp(2)))
 
-                editCard.addView(formFieldHeader("车主姓名", required = false), lp(top = dp(16)))
+                editBody.addView(formFieldHeader("车主姓名", required = false), lp(top = dp(16)))
                 val (ownerBox, ownerInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入车主姓名",
@@ -1661,16 +1533,16 @@ internal class VehicleManagementScreens(
                     inputType = InputType.TYPE_CLASS_TEXT,
                     maxLength = 24
                 )
-                editCard.addView(ownerBox, lp(top = dp(2)))
+                editBody.addView(ownerBox, lp(top = dp(2)))
 
-                editCard.addView(formFieldHeader("购车时间", required = false, note = "选填"), lp(top = dp(16)))
+                editBody.addView(formFieldHeader("购车时间", required = false, note = "选填"), lp(top = dp(16)))
                 val (purchaseDateBox, getPurchaseDate) = AppComponents.createDateTimePickerField(
                     context = context,
                     hint = "请选择购车时间",
                     initialValue = normalizeDateOnly(vehicle.purchaseTime),
                     mode = DateTimeMode.DATE
                 )
-                editCard.addView(purchaseDateBox, lp(top = dp(2)))
+                editBody.addView(purchaseDateBox, lp(top = dp(2)))
 
                 var saving = false
                 val saveBtn = AppComponents.createActionButton(context, "保存", ButtonStyle.PRIMARY) {
@@ -1706,6 +1578,14 @@ internal class VehicleManagementScreens(
                                 onVehicleInfoSaved(vehicle.vin, cleanPlate, cleanHost, cleanDate)
                                 onStatusMessage("车辆信息已保存")
                                 toast("车辆信息已保存")
+                                renderDetail(
+                                    vehicle.copy(
+                                        plateNo = cleanPlate,
+                                        hostName = cleanHost,
+                                        purchaseTime = cleanDate,
+                                        simStatus = liveSimStatus
+                                    )
+                                )
                                 onUpdated()
                             } else {
                                 toast("保存车辆信息失败")
@@ -1717,7 +1597,7 @@ internal class VehicleManagementScreens(
                         }
                     }
                 }
-                editCard.addView(saveBtn, lp(top = dp(20), height = dp(46)))
+                editBody.addView(saveBtn, lp(top = dp(20), height = dp(46)))
                 body.addView(editCard, lp(top = dp(12)))
 
                 // Card 4: Default-Hidden Collapsible Danger Zone (Cancel Cert 934 & Unbind 931)
@@ -1884,7 +1764,6 @@ internal class VehicleManagementScreens(
                     withContext(Dispatchers.IO) {
                         val list = httpClient.fetchVehicleList(active.accessToken)
                         val matched = list.firstOrNull { it.vin.equals(targetVin, ignoreCase = true) }
-                            ?: list.firstOrNull()
                             ?: throw IllegalStateException("未找到对应车辆档案")
                         val liveSim = runCatching {
                             httpClient.queryVehicleSimStatus(active.accessToken, matched.vin)
@@ -1893,6 +1772,7 @@ internal class VehicleManagementScreens(
                     }
                 }
                 res.onSuccess { fetched ->
+                    if (active.accessToken != profileProvider().accessToken) return@onSuccess
                     renderDetail(fetched)
                 }.onFailure { err ->
                     body.removeAllViews()
@@ -2205,35 +2085,49 @@ internal class VehicleManagementScreens(
     // Reusable Minimalist Dark Automotive UI Helpers
     // =========================================================================
 
-    private fun buildHardwareSpecTile(label: String, value: String): LinearLayout {
-        val canCopy = value.isNotBlank() && value != "--"
+    private fun buildDetailValueRow(
+        label: String,
+        maskedValue: String,
+        copyable: Boolean
+    ): LinearLayout {
+        val canCopy = copyable && maskedValue != SensitiveUiText.MISSING
         return LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            background = rounded(TILE_BG, 12f)
-            setPadding(dp(12), dp(11), dp(12), dp(11))
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(48)
             if (canCopy) {
                 isClickable = true
                 isFocusable = true
+                contentDescription = "$label，已脱敏，轻触复制脱敏值"
                 MotionSpec.attachPressPhysics(this, pressedScale = 0.97f)
                 setOnClickListener {
                     AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                    clipboard?.setPrimaryClip(ClipData.newPlainText(label, value))
-                    toast("${label}已复制")
+                    clipboard?.setPrimaryClip(ClipData.newPlainText(label, maskedValue))
+                    toast("${label}脱敏值已复制")
                 }
             }
-            addView(text(label, 11.5f, ThemeTokens.TEXT_SUB))
+            addView(
+                text(label, 12.5f, ThemeTokens.TEXT_SUB),
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            )
             addView(
                 TextView(context).apply {
-                    text = value
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                    text = maskedValue
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-                    setTextColor(if (canCopy) ThemeTokens.TEXT_PRIMARY else ThemeTokens.TEXT_SUB)
+                    setTextColor(if (maskedValue == SensitiveUiText.MISSING) ThemeTokens.TEXT_SUB else ThemeTokens.TEXT_BODY)
                     maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.MIDDLE
+                    ellipsize = TextUtils.TruncateAt.END
                 },
-                lp(top = dp(5))
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(16) }
             )
+            if (canCopy) {
+                addView(
+                    text("复制", 11f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD),
+                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) }
+                )
+            }
         }
     }
 
@@ -2562,11 +2456,6 @@ internal class VehicleManagementScreens(
         }.getOrElse { a.compareTo(b) }
     }
 
-    private fun maskVin(vin: String): String {
-        val clean = vin.trim().uppercase(Locale.US)
-        return if (clean.length >= 10) "${clean.take(4)}****${clean.takeLast(4)}" else clean
-    }
-
     private fun firstNonBlank(vararg values: String): String =
         values.firstOrNull { it.isNotBlank() }.orEmpty()
 
@@ -2625,7 +2514,6 @@ internal class VehicleManagementScreens(
 
         private val CARD_BG = Color.parseColor("#1C1E24")
         private val TILE_BG = Color.parseColor("#232630")
-        private val HERO_BANNER_BG = Color.parseColor("#15171D")
         private val CARD_BORDER = Color.parseColor("#2B2F3A")
         private val HINT_COLOR = Color.parseColor("#5C606A")
         private val SUCCESS_GREEN = Color.rgb(52, 211, 153)
