@@ -8,6 +8,8 @@ import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Outline
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -114,6 +116,11 @@ class SettingsScreen(
     private var activeDropdown: PopupWindow? = null
 
     // Live UI hooks on ABOUT page
+    private var aboutUpdateRow: LinearLayout? = null
+    private var aboutUpdateDot: View? = null
+    private var aboutUpdateValue: TextView? = null
+    private var aboutUpdateChevron: View? = null
+    private var aboutUpdateCard: LinearLayout? = null
     private var aboutStatusTitle: TextView? = null
     private var aboutStatusSub: TextView? = null
     private var aboutNotesView: TextView? = null
@@ -121,8 +128,10 @@ class SettingsScreen(
     private var aboutProgressFill: View? = null
     private var aboutProgressTrack: FrameLayout? = null
     private var aboutProgressLabel: TextView? = null
-    private var aboutCheckBtn: TextView? = null
     private var aboutActionBtn: TextView? = null
+    private var aboutReinstallDivider: View? = null
+    private var aboutReinstallRow: LinearLayout? = null
+    private var aboutReinstallSizeText: TextView? = null
 
     fun buildRootView(): View {
         currentSubPage = SubPage.MAIN
@@ -618,58 +627,105 @@ class SettingsScreen(
 
         val (curName, curCode) = AppUpdater.getCurrentVersion(activity)
 
-        // 1. Centered Clean Brand Mark & Version Pill
+        // 1. Centered Minimalist Brand Hero (dark-surface badge + clean version text)
         val brandSection = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(20), dp(24), dp(20), dp(28))
+            setPadding(dp(24), dp(34), dp(24), dp(32))
         }
 
-        val brandMark = ImageView(activity).apply {
-            setImageResource(R.drawable.ic_app_logo)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = "CarPlus Logo"
-        }
-        brandSection.addView(brandMark, LinearLayout.LayoutParams(dp(72), dp(72)))
+        brandSection.addView(buildAboutBrandBadge(), LinearLayout.LayoutParams(dp(68), dp(68)))
 
         brandSection.addView(
-            text("CarPlus", 22f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+            text("CarPlus", 20f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 gravity = Gravity.CENTER
+                letterSpacing = 0.02f
             },
             lp(top = dp(14))
         )
 
-        val versionPill = text("v$curName (Build $curCode)", 12.5f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD).apply {
-            gravity = Gravity.CENTER
-            background = rounded(Color.rgb(24, 34, 58), 14f, Color.rgb(44, 70, 128), 0.7f)
-            setPadding(dp(14), dp(5), dp(14), dp(5))
-        }
         brandSection.addView(
-            versionPill,
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { topMargin = dp(10) }
+            text("v$curName", 13.5f, ThemeTokens.TEXT_SUB).apply {
+                gravity = Gravity.CENTER
+            },
+            lp(top = dp(5))
         )
 
         brandSection.addView(
-            text("离线 3D 车控 · 双模数字钥匙", 13f, ThemeTokens.TEXT_SUB).apply {
+            text("离线 3D 车控 · 双模数字钥匙", 12.5f, ABOUT_SUBTITLE_MUTED).apply {
                 gravity = Gravity.CENTER
             },
-            lp(top = dp(10))
+            lp(top = dp(6))
         )
         body.addView(brandSection, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
 
-        // 2. Borderless Auto-Update Section
-        body.addView(AppComponents.createSectionHeader(activity, "软件更新"))
-        val updateSection = LinearLayout(activity).apply {
+        // 2. Borderless Software Update Row (matches Settings & Vehicle Info rows)
+        val updateRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(58)
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            isClickable = true
+            isFocusable = true
+        }
+        MotionSpec.attachPressPhysics(updateRow, pressedScale = 0.985f, haptic = false)
+        updateRow.addView(
+            text("软件更新", 15.5f, ThemeTokens.TEXT_PRIMARY),
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        )
+
+        val updateDot = View(activity).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(ThemeTokens.ACCENT_LIGHT)
+            }
+            visibility = View.GONE
+        }
+        updateRow.addView(
+            updateDot,
+            LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(6) }
+        )
+
+        val updateValue = text("检查中...", 13.5f, ThemeTokens.TEXT_SUB).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        updateRow.addView(
+            updateValue,
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+        )
+
+        val updateChevron = AppIconView(activity, AppIconType.CHEVRON_RIGHT, HINT_COLOR).apply {
+            visibility = View.GONE
+        }
+        updateRow.addView(
+            updateChevron,
+            LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(4) }
+        )
+
+        updateRow.setOnClickListener {
+            if (isCheckingUpdate || isDownloadingUpdate) return@setOnClickListener
+            val ready = downloadedApkFile?.let { it.exists() && it.length() > 0L } == true
+            if (ready || latestCheckResult?.hasUpdate == true) {
+                handleDownloadOrInstallClick()
+            } else {
+                triggerUpdateCheck(force = true)
+            }
+        }
+        body.addView(updateRow, lp())
+
+        // 3. Dynamic Update Card (collapsed when up to date; shown only for updates/downloads)
+        val updateCard = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(6), dp(20), dp(18))
+            background = rounded(ThemeTokens.BG_SURFACE, 12f, ThemeTokens.DIVIDER, 0.7f)
+            setPadding(dp(16), dp(15), dp(16), dp(16))
+            visibility = View.GONE
         }
 
-        val statusTitle = text("正在检查更新...", 16f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD)
-        val statusSub = text("正在获取最新版本信息", 13f, ThemeTokens.TEXT_SUB)
+        val statusTitle = text("", 14.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD)
+        val statusSub = text("", 12.5f, ThemeTokens.TEXT_SUB)
         val notesView = text("", 13f, ThemeTokens.TEXT_BODY).apply {
-            background = rounded(ThemeTokens.BG_SURFACE, 10f)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
             setLineSpacing(dpF(3f), 1f)
             visibility = View.GONE
         }
@@ -679,37 +735,21 @@ class SettingsScreen(
             visibility = View.GONE
         }
         val progressTrack = FrameLayout(activity).apply {
-            background = rounded(ThemeTokens.BTN_SECONDARY, 4f)
+            background = rounded(ThemeTokens.BTN_SECONDARY, 2f)
             clipToOutline = true
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, dpF(4f))
+                    outline.setRoundRect(0, 0, view.width, view.height, dpF(2f))
                 }
             }
         }
         val progressFill = View(activity).apply {
-            background = rounded(ThemeTokens.ACCENT_BLUE, 4f)
+            background = rounded(ThemeTokens.ACCENT_BLUE, 2f)
         }
         progressTrack.addView(progressFill, FrameLayout.LayoutParams(0, MATCH_PARENT, Gravity.START))
         val progressLabel = text("准备下载...", 12f, ThemeTokens.TEXT_SUB)
-        progressBox.addView(progressTrack, lp(height = dp(6)))
+        progressBox.addView(progressTrack, lp(height = dp(4)))
         progressBox.addView(progressLabel, lp(top = dp(7)))
-
-        val btnRow = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val checkBtn = AppComponents.createActionButton(
-            context = activity,
-            label = "重试",
-            style = ButtonStyle.SECONDARY
-        ) {
-            if (!isCheckingUpdate && !isDownloadingUpdate) {
-                triggerUpdateCheck(force = true)
-            }
-        }.apply {
-            visibility = View.GONE
-        }
 
         val actionBtn = AppComponents.createActionButton(
             context = activity,
@@ -721,9 +761,83 @@ class SettingsScreen(
             visibility = View.GONE
         }
 
-        btnRow.addView(checkBtn, LinearLayout.LayoutParams(0, dp(46), 1f))
-        btnRow.addView(actionBtn, LinearLayout.LayoutParams(0, dp(46), 1f))
+        updateCard.addView(statusTitle, lp())
+        updateCard.addView(statusSub, lp(top = dp(4)))
+        updateCard.addView(notesView, lp(top = dp(10)))
+        updateCard.addView(progressBox, lp(top = dp(12)))
+        updateCard.addView(actionBtn, lp(top = dp(14), height = dp(44)))
 
+        body.addView(
+            updateCard,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                marginStart = dp(20)
+                marginEnd = dp(20)
+                topMargin = dp(4)
+                bottomMargin = dp(16)
+            }
+        )
+
+        body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
+
+        // 4. Build Number Read-Only Row
+        val buildRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        buildRow.addView(
+            text("构建版本", 15.5f, ThemeTokens.TEXT_PRIMARY),
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        )
+        buildRow.addView(
+            text("Build $curCode", 13.5f, ThemeTokens.TEXT_SUB),
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+        )
+        body.addView(buildRow, lp())
+
+        // 5. Low-Emphasis Reinstall Row (shown only when up to date & package is available)
+        val reinstallDivider = AppComponents.createHairline(activity, startInsetDp = 20).apply {
+            visibility = View.GONE
+        }
+        val reinstallRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            isClickable = true
+            isFocusable = true
+            visibility = View.GONE
+        }
+        MotionSpec.attachPressPhysics(reinstallRow, pressedScale = 0.985f, haptic = false)
+        reinstallRow.addView(
+            text("重新安装当前版本", 15.5f, ThemeTokens.TEXT_BODY),
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        )
+        val reinstallSizeText = text("", 13.5f, ThemeTokens.TEXT_SUB).apply {
+            maxLines = 1
+        }
+        reinstallRow.addView(
+            reinstallSizeText,
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+        )
+        reinstallRow.addView(
+            AppIconView(activity, AppIconType.CHEVRON_RIGHT, HINT_COLOR),
+            LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(4) }
+        )
+        reinstallRow.setOnClickListener {
+            showReinstallConfirmDialog()
+        }
+
+        body.addView(reinstallDivider)
+        body.addView(reinstallRow, lp())
+        body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
+
+        aboutUpdateRow = updateRow
+        aboutUpdateDot = updateDot
+        aboutUpdateValue = updateValue
+        aboutUpdateChevron = updateChevron
+        aboutUpdateCard = updateCard
         aboutStatusTitle = statusTitle
         aboutStatusSub = statusSub
         aboutNotesView = notesView
@@ -731,15 +845,10 @@ class SettingsScreen(
         aboutProgressTrack = progressTrack
         aboutProgressFill = progressFill
         aboutProgressLabel = progressLabel
-        aboutCheckBtn = checkBtn
         aboutActionBtn = actionBtn
-
-        updateSection.addView(statusTitle, lp())
-        updateSection.addView(statusSub, lp(top = dp(5)))
-        updateSection.addView(notesView, lp(top = dp(12)))
-        updateSection.addView(progressBox, lp(top = dp(14)))
-        updateSection.addView(btnRow, lp(top = dp(18)))
-        body.addView(updateSection, lp())
+        aboutReinstallDivider = reinstallDivider
+        aboutReinstallRow = reinstallRow
+        aboutReinstallSizeText = reinstallSizeText
 
         scroll.addView(body, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
@@ -749,6 +858,54 @@ class SettingsScreen(
             triggerUpdateCheck(force = true)
         }
         return root
+    }
+
+    private fun buildAboutBrandBadge(): FrameLayout {
+        val badge = FrameLayout(activity).apply {
+            background = rounded(ABOUT_BADGE_SURFACE, 18f, ABOUT_BADGE_BORDER, 0.8f)
+            clipToOutline = true
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, dpF(18f))
+                }
+            }
+            contentDescription = "CarPlus 品牌标识"
+        }
+
+        // Convert black-on-white foreground vector artwork into crisp silver-white on transparent
+        // so the brand mark integrates seamlessly onto the dark automotive badge surface.
+        val invertToWhiteAlpha = ColorMatrix(
+            floatArrayOf(
+                0f, 0f, 0f, 0f, 245f,
+                0f, 0f, 0f, 0f, 247f,
+                0f, 0f, 0f, 0f, 250f,
+                -0.333f, -0.333f, -0.334f, 1f, 0f
+            )
+        )
+        val logoImage = ImageView(activity).apply {
+            setImageResource(R.drawable.ic_launcher_foreground)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            colorFilter = ColorMatrixColorFilter(invertToWhiteAlpha)
+        }
+        badge.addView(logoImage, FrameLayout.LayoutParams(dp(86), dp(86), Gravity.CENTER))
+        return badge
+    }
+
+    private fun showReinstallConfirmDialog() {
+        val res = latestCheckResult ?: return
+        if (isDownloadingUpdate || res.downloadUrl.isBlank()) return
+        val sizeLabel = formatBytes(res.assetSizeBytes)
+        activeConfirmDialog?.dismiss()
+        activeConfirmDialog = AppComponents.showConfirmDialog(
+            context = activity,
+            title = "重新安装当前版本",
+            message = "当前已是最新版本 v${res.currentVersionName}，是否重新下载安装包（$sizeLabel）？",
+            confirmText = "重新下载",
+            cancelText = "取消",
+            dangerConfirm = false
+        ) {
+            handleDownloadOrInstallClick()
+        }
     }
 
     // =========================================================================
@@ -850,55 +1007,89 @@ class SettingsScreen(
     }
 
     private fun renderAboutUpdateState() {
+        val updateRow = aboutUpdateRow ?: return
+        val updateDot = aboutUpdateDot ?: return
+        val updateValue = aboutUpdateValue ?: return
+        val updateChevron = aboutUpdateChevron ?: return
+        val updateCard = aboutUpdateCard ?: return
         val titleTv = aboutStatusTitle ?: return
         val subTv = aboutStatusSub ?: return
         val notesTv = aboutNotesView ?: return
         val progBox = aboutProgressBox ?: return
-        val checkBtn = aboutCheckBtn ?: return
         val actionBtn = aboutActionBtn ?: return
+        val reinstallDivider = aboutReinstallDivider ?: return
+        val reinstallRow = aboutReinstallRow ?: return
+        val reinstallSizeTv = aboutReinstallSizeText ?: return
+
+        val readyToInstall = downloadedApkFile?.let { it.exists() && it.length() > 0L } == true
 
         when {
             isDownloadingUpdate -> {
-                titleTv.text = "正在下载安装包..."
-                titleTv.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                updateRow.isEnabled = false
+                updateDot.visibility = View.GONE
+                updateChevron.visibility = View.GONE
+                updateValue.text = "下载中"
+                updateValue.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+
+                updateCard.visibility = View.VISIBLE
+                titleTv.text = "正在下载安装包"
+                titleTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
                 subTv.text = "下载完成后将自动调起系统安装器"
+                notesTv.visibility = View.GONE
                 progBox.visibility = View.VISIBLE
-                checkBtn.visibility = View.GONE
                 actionBtn.visibility = View.VISIBLE
                 actionBtn.text = "下载中..."
                 actionBtn.isEnabled = false
                 actionBtn.alpha = 0.5f
+
+                reinstallDivider.visibility = View.GONE
+                reinstallRow.visibility = View.GONE
             }
             isCheckingUpdate -> {
-                titleTv.text = "正在检查更新..."
-                titleTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
-                subTv.text = "正在获取最新版本信息"
-                notesTv.visibility = View.GONE
-                progBox.visibility = View.GONE
-                checkBtn.visibility = View.GONE
-                actionBtn.visibility = View.GONE
+                updateRow.isEnabled = false
+                updateDot.visibility = View.GONE
+                updateChevron.visibility = View.GONE
+                updateValue.text = "检查中..."
+                updateValue.setTextColor(ThemeTokens.TEXT_SUB)
+                updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+
+                updateCard.visibility = View.GONE
+                reinstallDivider.visibility = View.GONE
+                reinstallRow.visibility = View.GONE
             }
             updateCheckError != null -> {
-                titleTv.text = "检查更新失败"
-                titleTv.setTextColor(ThemeTokens.DANGER)
-                subTv.text = updateCheckError
-                notesTv.visibility = View.GONE
-                progBox.visibility = View.GONE
-                checkBtn.visibility = View.VISIBLE
-                checkBtn.isEnabled = true
-                checkBtn.alpha = 1f
-                actionBtn.visibility = View.GONE
+                updateRow.isEnabled = true
+                updateDot.visibility = View.GONE
+                updateChevron.visibility = View.VISIBLE
+                updateValue.text = "检查失败，轻触重试"
+                updateValue.setTextColor(ThemeTokens.DANGER)
+                updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+
+                updateCard.visibility = View.GONE
+                reinstallDivider.visibility = View.GONE
+                reinstallRow.visibility = View.GONE
             }
             latestCheckResult != null -> {
                 val res = latestCheckResult!!
                 val sizeLabel = formatBytes(res.assetSizeBytes)
-                val readyToInstall = downloadedApkFile?.let { it.exists() && it.length() > 0L } == true
-                checkBtn.visibility = View.GONE
+                val cleanNotes = sanitizeReleaseNotes(res.releaseNotes)
+                updateRow.isEnabled = true
 
-                if (res.hasUpdate) {
-                    val buildSuffix = if (res.latestVersionCode > 0) " (Build ${res.latestVersionCode})" else ""
-                    titleTv.text = "发现新版本 v${res.latestVersionName}$buildSuffix"
-                    titleTv.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                if (res.hasUpdate || readyToInstall) {
+                    updateDot.visibility = if (readyToInstall) View.GONE else View.VISIBLE
+                    updateChevron.visibility = View.GONE
+                    updateValue.text = if (readyToInstall) "等待安装" else "v${res.latestVersionName} 可更新"
+                    updateValue.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                    updateValue.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+
+                    updateCard.visibility = View.VISIBLE
+                    titleTv.text = if (readyToInstall) {
+                        "安装包已就绪"
+                    } else {
+                        "新版本 v${res.latestVersionName}"
+                    }
+                    titleTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
                     subTv.text = buildString {
                         append("安装包 $sizeLabel")
                         if (res.publishedAt.isNotBlank()) {
@@ -906,27 +1097,45 @@ class SettingsScreen(
                             append(res.publishedAt.take(10))
                         }
                     }
-                    notesTv.text = res.releaseNotes
-                    notesTv.visibility = if (res.releaseNotes.isNotBlank()) View.VISIBLE else View.GONE
+                    notesTv.text = cleanNotes
+                    notesTv.visibility = if (res.hasUpdate && cleanNotes.isNotBlank()) View.VISIBLE else View.GONE
                     progBox.visibility = if (readyToInstall) View.VISIBLE else View.GONE
-                    actionBtn.visibility = if (res.downloadUrl.isNotBlank()) View.VISIBLE else View.GONE
+                    actionBtn.visibility = if (readyToInstall || res.downloadUrl.isNotBlank()) View.VISIBLE else View.GONE
                     actionBtn.text = if (readyToInstall) "立即安装" else "下载并安装"
                     actionBtn.isEnabled = true
                     actionBtn.alpha = 1f
+
+                    reinstallDivider.visibility = View.GONE
+                    reinstallRow.visibility = View.GONE
                 } else {
-                    titleTv.text = "已是最新版本"
-                    titleTv.setTextColor(SUCCESS_GREEN)
-                    subTv.text = "当前 v${res.currentVersionName} (Build ${res.currentVersionCode}) · 最新包 $sizeLabel"
-                    notesTv.text = res.releaseNotes
-                    notesTv.visibility = if (res.releaseNotes.isNotBlank()) View.VISIBLE else View.GONE
-                    progBox.visibility = if (readyToInstall) View.VISIBLE else View.GONE
-                    actionBtn.visibility = if (res.downloadUrl.isNotBlank()) View.VISIBLE else View.GONE
-                    actionBtn.text = if (readyToInstall) "立即安装" else "重新下载安装"
-                    actionBtn.isEnabled = true
-                    actionBtn.alpha = 1f
+                    updateDot.visibility = View.GONE
+                    updateChevron.visibility = View.GONE
+                    updateValue.text = "已是最新版本"
+                    updateValue.setTextColor(ThemeTokens.TEXT_SUB)
+                    updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+
+                    updateCard.visibility = View.GONE
+                    val canReinstall = res.downloadUrl.isNotBlank()
+                    reinstallDivider.visibility = if (canReinstall) View.VISIBLE else View.GONE
+                    reinstallRow.visibility = if (canReinstall) View.VISIBLE else View.GONE
+                    reinstallSizeTv.text = sizeLabel
                 }
             }
         }
+    }
+
+    private fun sanitizeReleaseNotes(raw: String): String {
+        if (raw.isBlank()) return ""
+        val lines = raw.lineSequence()
+            .map { it.trim() }
+            .filter { line ->
+                line.isNotEmpty() &&
+                    line != "最新版本安装包" &&
+                    !RELEASE_META_LINE_REGEX.matches(line) &&
+                    !RELEASE_TITLE_ONLY_REGEX.matches(line)
+            }
+            .toList()
+        return lines.joinToString("\n").trim()
     }
 
     private fun updateProgressBar(downloaded: Long, total: Long) {
@@ -1285,6 +1494,11 @@ class SettingsScreen(
     private fun clearAboutHooks() {
         progressWidthAnimator?.cancel()
         progressWidthAnimator = null
+        aboutUpdateRow = null
+        aboutUpdateDot = null
+        aboutUpdateValue = null
+        aboutUpdateChevron = null
+        aboutUpdateCard = null
         aboutStatusTitle = null
         aboutStatusSub = null
         aboutNotesView = null
@@ -1292,8 +1506,10 @@ class SettingsScreen(
         aboutProgressFill = null
         aboutProgressTrack = null
         aboutProgressLabel = null
-        aboutCheckBtn = null
         aboutActionBtn = null
+        aboutReinstallDivider = null
+        aboutReinstallRow = null
+        aboutReinstallSizeText = null
     }
 
     companion object {
@@ -1310,7 +1526,18 @@ class SettingsScreen(
         private const val KEY_TRIP_TRACK_ENABLED = "trip_track_enabled"
         private const val AVATAR_FILENAME = "user_avatar.jpg"
 
-        private val SUCCESS_GREEN = Color.rgb(52, 211, 153)
+        private val ABOUT_BADGE_SURFACE = Color.parseColor("#1E2026")
+        private val ABOUT_BADGE_BORDER = Color.parseColor("#2A2D35")
+        private val ABOUT_SUBTITLE_MUTED = Color.parseColor("#6A6E78")
         private val HINT_COLOR = Color.rgb(92, 96, 106)
+
+        private val RELEASE_META_LINE_REGEX = Regex(
+            """^(?:(?:versionName|versionCode|commit|sha|sha256|tag|build|branch|ref|run_id|artifact)\s*=\s*\S+\s*)+$""",
+            RegexOption.IGNORE_CASE
+        )
+        private val RELEASE_TITLE_ONLY_REGEX = Regex(
+            """^CarPlus\s+v[0-9]+(?:\.[0-9]+)*(?:\s*\(Build\s+\d+\))?$""",
+            RegexOption.IGNORE_CASE
+        )
     }
 }
