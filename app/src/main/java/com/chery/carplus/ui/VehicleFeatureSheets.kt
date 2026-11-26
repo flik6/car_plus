@@ -98,6 +98,7 @@ internal class VehicleFeatureSheets(
     private val onOpenRemoteAuthManagement: (() -> Unit)? = null,
     private val liveDistanceLabelProvider: () -> String = { "" },
     private val liveAddressLabelProvider: () -> String = { "" },
+    private val deviceLocationProvider: () -> Pair<Double, Double>? = { null },
     private val onVehiclesChanged: () -> Unit = {}
 ) {
     private var activeDialog: Dialog? = null
@@ -1707,11 +1708,19 @@ internal class VehicleFeatureSheets(
                     if (mapDestroyed) return
                     mapReady = true
                     val t = telemetryProvider()
-                    val lat = t?.latitude
-                    val lon = t?.longitude
-                    if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
+                    val vLat = t?.latitude
+                    val vLon = t?.longitude
+                    val hasV = vLat != null && vLon != null && (vLat != 0.0 || vLon != 0.0)
+                    val userLoc = deviceLocationProvider()
+                    val hasU = userLoc != null && (userLoc.first != 0.0 || userLoc.second != 0.0)
+                    if (hasV || hasU) {
+                        val vLatArg = if (hasV) "$vLat" else "null"
+                        val vLonArg = if (hasV) "$vLon" else "null"
+                        val uLatArg = if (hasU) "${userLoc!!.first}" else "null"
+                        val uLonArg = if (hasU) "${userLoc!!.second}" else "null"
+                        val badgeLabel = if (hasV) "车辆与当前位置" else "当前位置"
                         view.evaluateJavascript(
-                            "window.CarMap && window.CarMap.setVehicleLocation($lat, $lon, ${JSONObject.quote("当前车辆位置")});",
+                            "window.CarMap && window.CarMap.setLocations($vLatArg, $vLonArg, ${JSONObject.quote(badgeLabel)}, $uLatArg, $uLonArg);",
                             null
                         )
                     }
@@ -1725,6 +1734,43 @@ internal class VehicleFeatureSheets(
         }
         mapWebView = wv
         mapContainer.addView(wv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+
+        // Embedded Navigation pill inside the map overlay (bottom-right next to recenter control)
+        val mapNavBtn = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(Color.argb(232, 24, 26, 32), 18f, Color.argb(95, 61, 155, 255), 0.9f)
+            setPadding(dp(12), 0, dp(14), 0)
+            isClickable = true
+            isFocusable = true
+            elevation = dpF(4f)
+            contentDescription = "导航到车辆位置"
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.94f)
+            setOnClickListener {
+                AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
+                val t = telemetryProvider()
+                val lat = t?.latitude
+                val lon = t?.longitude
+                if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
+                    showNavigationAppPicker(lat, lon, liveAddressLabelProvider().ifBlank { "我的车辆" })
+                } else {
+                    toast("暂无可导航的车辆位置")
+                }
+            }
+        }
+        mapNavBtn.addView(
+            AppIconView(context, AppIconType.LOCATION_ARROW, ThemeTokens.ACCENT_LIGHT),
+            LinearLayout.LayoutParams(dp(15), dp(15)).apply { marginEnd = dp(5) }
+        )
+        mapNavBtn.addView(text("导航", 13f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD))
+        mapContainer.addView(
+            mapNavBtn,
+            FrameLayout.LayoutParams(WRAP_CONTENT, dp(36), Gravity.BOTTOM or Gravity.END).apply {
+                marginEnd = dp(56)
+                bottomMargin = dp(12)
+            }
+        )
+
         root.addView(
             mapContainer,
             LinearLayout.LayoutParams(MATCH_PARENT, mapHeight).apply {
@@ -1735,13 +1781,11 @@ internal class VehicleFeatureSheets(
             }
         )
 
-        // Sleek borderless Location & Navigation bar directly beneath the map
-        val navBar = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(12))
+        // Compact borderless address & distance summary directly beneath the map
+        val addrBar = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(10))
         }
-        val addrCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         val locationTelemetry = telemetryProvider()
         val hasVehicleLocation = locationTelemetry?.latitude != null &&
             locationTelemetry.longitude != null &&
@@ -1758,9 +1802,10 @@ internal class VehicleFeatureSheets(
         }
         val addressView = text(approxAddr, 15f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 }
         val distanceView = text(distLabel, 12.5f, TEXT_SUB).apply { maxLines = 1 }
-        addrCol.addView(addressView)
-        addrCol.addView(distanceView, lp(top = dp(2)))
-        navBar.addView(addrCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(12) })
+        addrBar.addView(addressView)
+        addrBar.addView(distanceView, lp(top = dp(2)))
+        root.addView(addrBar, lp())
+
         val unregisterAddressUpdate = registerAddressUpdate { resolved ->
             val current = telemetryProvider()
             val lat = current?.latitude
@@ -1773,43 +1818,17 @@ internal class VehicleFeatureSheets(
             distanceView.text = liveDistanceLabelProvider().ifBlank { "距离暂不可用" }
         }
 
-        val navBtn = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = rounded(Color.rgb(28, 34, 46), 16f, Color.argb(90, 61, 155, 255), 0.8f)
-            setPadding(dp(12), dp(7), dp(14), dp(7))
-            isClickable = true
-            isFocusable = true
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.94f)
-            setOnClickListener {
-                AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
-                val t = telemetryProvider()
-                val lat = t?.latitude
-                val lon = t?.longitude
-                if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-                    showNavigationAppPicker(lat, lon, liveAddressLabelProvider().ifBlank { "我的车辆" })
-                } else {
-                    toast("暂无可导航的车辆位置")
-                }
-            }
-        }
-        navBtn.addView(
-            AppIconView(context, AppIconType.LOCATION_ARROW, ThemeTokens.ACCENT_LIGHT),
-            LinearLayout.LayoutParams(dp(15), dp(15)).apply { marginEnd = dp(6) }
-        )
-        navBtn.addView(text("导航", 13.5f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD))
-        navBar.addView(navBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        root.addView(navBar, lp())
-        root.addView(AppComponents.createHairline(context, startInsetDp = 20), lp(bottom = dp(10)))
+        root.addView(AppComponents.createHairline(context, startInsetDp = 20))
+        root.addView(AppComponents.createSectionHeader(context, "历史行程"), lp())
 
-        // Lower independent scrollable pane: Date pills + Historical Trip List (no Live tab, no summary card, no refresh button)
+        // Lower independent scrollable pane: Date pills + Historical Trip List (with clear empty state)
         val lowerScroll = ScrollView(context).apply {
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         val listContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), 0, dp(20), dp(20))
+            setPadding(dp(20), dp(4), dp(20), dp(20))
         }
         lowerScroll.addView(listContainer, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(lowerScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
@@ -2187,7 +2206,7 @@ internal class VehicleFeatureSheets(
         val rows = buildList {
             if (resolvedPlate.isNotBlank()) add("车牌号码" to resolvedPlate)
             add("车辆位置" to if (hasCoords) liveAddressLabelProvider().ifBlank { "街道信息暂不可用" } else "位置暂不可用")
-            add("直线距离" to if (hasCoords) liveDistanceLabelProvider().ifBlank { "距离暂不可用" } else "距离暂不可用")
+            add("距离" to if (hasCoords) liveDistanceLabelProvider().ifBlank { "距离暂不可用" } else "距离暂不可用")
             add("车辆在线 / 定位状态" to locationStatus)
             t?.time?.takeIf { it.isNotBlank() }?.let { add("定位时间" to it) }
         }
@@ -2242,12 +2261,21 @@ internal class VehicleFeatureSheets(
                         loadTripHistoryTab(container, profile, isTabActive, autoPlotFirst, onClearSelectionRegistrar, onPlotTrip)
                     }, lp(top = dp(10), height = dp(42)))
                 } else {
-                    val emptyMsg = if (tripTrackEnabledProvider() == false) {
-                        "行程轨迹记录当前未开启\n请前往「设置 → 行程轨迹记录」开启"
+                    val emptySub = if (tripTrackEnabledProvider() == false) {
+                        "行程轨迹记录未开启，可前往「设置 → 行程轨迹记录」开启"
                     } else {
-                        "暂无近 7 天历史行程记录\n行驶结束后将自动同步"
+                        "行驶结束后将自动同步最近行程"
                     }
-                    container.addView(emptyHint(emptyMsg).apply { setLineSpacing(0f, 1.4f) })
+                    container.addView(
+                        AppComponents.createEmptyState(
+                            context = context,
+                            icon = AppIconType.CLOCK,
+                            title = "暂无历史行程",
+                            subtitle = emptySub
+                        ).apply {
+                            setPadding(dp(20), dp(28), dp(20), dp(28))
+                        }
+                    )
                 }
                 return@launch
             }

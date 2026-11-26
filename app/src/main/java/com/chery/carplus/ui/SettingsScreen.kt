@@ -129,9 +129,6 @@ class SettingsScreen(
     private var aboutProgressTrack: FrameLayout? = null
     private var aboutProgressLabel: TextView? = null
     private var aboutActionBtn: TextView? = null
-    private var aboutReinstallDivider: View? = null
-    private var aboutReinstallRow: LinearLayout? = null
-    private var aboutReinstallSizeText: TextView? = null
 
     fun buildRootView(): View {
         currentSubPage = SubPage.MAIN
@@ -795,42 +792,6 @@ class SettingsScreen(
             LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
         )
         body.addView(buildRow, lp())
-
-        // 5. Low-Emphasis Reinstall Row (shown only when up to date & package is available)
-        val reinstallDivider = AppComponents.createHairline(activity, startInsetDp = 20).apply {
-            visibility = View.GONE
-        }
-        val reinstallRow = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(56)
-            setPadding(dp(20), dp(12), dp(20), dp(12))
-            isClickable = true
-            isFocusable = true
-            visibility = View.GONE
-        }
-        MotionSpec.attachPressPhysics(reinstallRow, pressedScale = 0.985f, haptic = false)
-        reinstallRow.addView(
-            text("重新安装当前版本", 15.5f, ThemeTokens.TEXT_BODY),
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-        )
-        val reinstallSizeText = text("", 13.5f, ThemeTokens.TEXT_SUB).apply {
-            maxLines = 1
-        }
-        reinstallRow.addView(
-            reinstallSizeText,
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
-        )
-        reinstallRow.addView(
-            AppIconView(activity, AppIconType.CHEVRON_RIGHT, HINT_COLOR),
-            LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(4) }
-        )
-        reinstallRow.setOnClickListener {
-            showReinstallConfirmDialog()
-        }
-
-        body.addView(reinstallDivider)
-        body.addView(reinstallRow, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
 
         aboutUpdateRow = updateRow
@@ -846,9 +807,6 @@ class SettingsScreen(
         aboutProgressFill = progressFill
         aboutProgressLabel = progressLabel
         aboutActionBtn = actionBtn
-        aboutReinstallDivider = reinstallDivider
-        aboutReinstallRow = reinstallRow
-        aboutReinstallSizeText = reinstallSizeText
 
         scroll.addView(body, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
@@ -889,23 +847,6 @@ class SettingsScreen(
         }
         badge.addView(logoImage, FrameLayout.LayoutParams(dp(86), dp(86), Gravity.CENTER))
         return badge
-    }
-
-    private fun showReinstallConfirmDialog() {
-        val res = latestCheckResult ?: return
-        if (isDownloadingUpdate || res.downloadUrl.isBlank()) return
-        val sizeLabel = formatBytes(res.assetSizeBytes)
-        activeConfirmDialog?.dismiss()
-        activeConfirmDialog = AppComponents.showConfirmDialog(
-            context = activity,
-            title = "重新安装当前版本",
-            message = "当前已是最新版本 v${res.currentVersionName}，是否重新下载安装包（$sizeLabel）？",
-            confirmText = "重新下载",
-            cancelText = "取消",
-            dangerConfirm = false
-        ) {
-            handleDownloadOrInstallClick()
-        }
     }
 
     // =========================================================================
@@ -1017,9 +958,6 @@ class SettingsScreen(
         val notesTv = aboutNotesView ?: return
         val progBox = aboutProgressBox ?: return
         val actionBtn = aboutActionBtn ?: return
-        val reinstallDivider = aboutReinstallDivider ?: return
-        val reinstallRow = aboutReinstallRow ?: return
-        val reinstallSizeTv = aboutReinstallSizeText ?: return
 
         val readyToInstall = downloadedApkFile?.let { it.exists() && it.length() > 0L } == true
 
@@ -1042,9 +980,6 @@ class SettingsScreen(
                 actionBtn.text = "下载中..."
                 actionBtn.isEnabled = false
                 actionBtn.alpha = 0.5f
-
-                reinstallDivider.visibility = View.GONE
-                reinstallRow.visibility = View.GONE
             }
             isCheckingUpdate -> {
                 updateRow.isEnabled = false
@@ -1055,8 +990,6 @@ class SettingsScreen(
                 updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
 
                 updateCard.visibility = View.GONE
-                reinstallDivider.visibility = View.GONE
-                reinstallRow.visibility = View.GONE
             }
             updateCheckError != null -> {
                 updateRow.isEnabled = true
@@ -1067,8 +1000,6 @@ class SettingsScreen(
                 updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
 
                 updateCard.visibility = View.GONE
-                reinstallDivider.visibility = View.GONE
-                reinstallRow.visibility = View.GONE
             }
             latestCheckResult != null -> {
                 val res = latestCheckResult!!
@@ -1104,9 +1035,6 @@ class SettingsScreen(
                     actionBtn.text = if (readyToInstall) "立即安装" else "下载并安装"
                     actionBtn.isEnabled = true
                     actionBtn.alpha = 1f
-
-                    reinstallDivider.visibility = View.GONE
-                    reinstallRow.visibility = View.GONE
                 } else {
                     updateDot.visibility = View.GONE
                     updateChevron.visibility = View.GONE
@@ -1115,10 +1043,6 @@ class SettingsScreen(
                     updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
 
                     updateCard.visibility = View.GONE
-                    val canReinstall = res.downloadUrl.isNotBlank()
-                    reinstallDivider.visibility = if (canReinstall) View.VISIBLE else View.GONE
-                    reinstallRow.visibility = if (canReinstall) View.VISIBLE else View.GONE
-                    reinstallSizeTv.text = sizeLabel
                 }
             }
         }
@@ -1507,9 +1431,6 @@ class SettingsScreen(
         aboutProgressTrack = null
         aboutProgressLabel = null
         aboutActionBtn = null
-        aboutReinstallDivider = null
-        aboutReinstallRow = null
-        aboutReinstallSizeText = null
     }
 
     companion object {

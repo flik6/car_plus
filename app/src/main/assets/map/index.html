@@ -121,6 +121,7 @@
         zoom: 15.0
       };
       var vehiclePos = null;       // { lat, lon }
+      var userPos = null;          // { lat, lon }
       var liveLocationLabel = '当前车辆位置';
       var routePoints = [];        // [ { lat, lon }, ... ]
       var routeCumDist = [];       // normalized 0..1 cumulative distances along routePoints
@@ -423,6 +424,11 @@
           }
         }
 
+        if (userPos && !geofencePicker.active) {
+          var up = project(userPos.lat, userPos.lon);
+          drawUserMarker(up.x, up.y);
+        }
+
         if (vehiclePos) {
           var vp = project(vehiclePos.lat, vehiclePos.lon);
           drawVehicleMarker(vp.x, vp.y);
@@ -476,6 +482,26 @@
         overlayCtx.arc(x, y, 4.5, 0, Math.PI * 2);
         overlayCtx.fillStyle = '#ffffff';
         overlayCtx.fill();
+        overlayCtx.restore();
+      }
+
+      function drawUserMarker(x, y) {
+        overlayCtx.save();
+        overlayCtx.translate(x, y);
+
+        overlayCtx.beginPath();
+        overlayCtx.arc(0, 0, 18, 0, Math.PI * 2);
+        overlayCtx.fillStyle = 'rgba(61, 155, 255, 0.22)';
+        overlayCtx.fill();
+
+        overlayCtx.beginPath();
+        overlayCtx.arc(0, 0, 7.5, 0, Math.PI * 2);
+        overlayCtx.fillStyle = '#3d9bff';
+        overlayCtx.fill();
+        overlayCtx.lineWidth = 2.4;
+        overlayCtx.strokeStyle = '#ffffff';
+        overlayCtx.stroke();
+
         overlayCtx.restore();
       }
 
@@ -587,15 +613,25 @@
         requestDraw();
       }
 
+      function fitLiveLocations() {
+        var pts = [];
+        if (vehiclePos) pts.push(vehiclePos);
+        if (userPos) pts.push(userPos);
+        if (pts.length >= 2) {
+          fitBounds(pts);
+        } else if (pts.length === 1) {
+          view.lat = pts[0].lat;
+          view.lon = pts[0].lon;
+          view.zoom = 15.5;
+          requestDraw();
+        }
+      }
+
       function returnToLiveLocationImpl() {
         stopRouteLoop();
         routePoints = [];
         routeCumDist = [];
-        if (vehiclePos) {
-          view.lat = vehiclePos.lat;
-          view.lon = vehiclePos.lon;
-          view.zoom = 15.5;
-        }
+        fitLiveLocations();
         badge.textContent = liveLocationLabel || '当前车辆位置';
         notifyRouteMode(false);
         requestDraw();
@@ -702,12 +738,33 @@
           liveLocationLabel = label || '当前车辆位置';
           routePoints = [];
           routeCumDist = [];
-          view.lat = lat;
-          view.lon = lon;
-          view.zoom = 15.5;
           badge.textContent = liveLocationLabel;
           notifyRouteMode(false);
-          requestDraw();
+          fitLiveLocations();
+        },
+        setUserLocation: function (lat, lon) {
+          if (typeof lat !== 'number' || typeof lon !== 'number' || (lat === 0 && lon === 0)) return;
+          userPos = { lat: lat, lon: lon };
+          if (routePoints.length === 0 && !geofencePicker.active) {
+            fitLiveLocations();
+          } else {
+            requestDraw();
+          }
+        },
+        setLocations: function (vLat, vLon, label, uLat, uLon) {
+          stopRouteLoop();
+          routePoints = [];
+          routeCumDist = [];
+          if (typeof vLat === 'number' && typeof vLon === 'number' && (vLat !== 0 || vLon !== 0)) {
+            vehiclePos = { lat: vLat, lon: vLon };
+          }
+          if (typeof uLat === 'number' && typeof uLon === 'number' && (uLat !== 0 || uLon !== 0)) {
+            userPos = { lat: uLat, lon: uLon };
+          }
+          liveLocationLabel = label || (vehiclePos ? '当前车辆位置' : '当前位置');
+          badge.textContent = liveLocationLabel;
+          notifyRouteMode(false);
+          fitLiveLocations();
         },
         showTripRoute: function (points, label) {
           if (!Array.isArray(points) || points.length === 0) return;

@@ -1,9 +1,6 @@
 package com.chery.carplus.ui
 
-import android.animation.ValueAnimator
-import android.app.DatePickerDialog
 import android.app.Dialog
-import android.app.TimePickerDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -288,11 +285,9 @@ internal class VehicleManagementScreens(
     }
 
     /**
-     * Level-2 Driver Detail screen (TopBar: 驾驶员详情):
-     * - Enable switch (905)
-     * - Edit driver name & period (903)
-     * - Operation records entry (137)
-     * - Default-hidden collapsible Danger Zone: Revoke driver authorization (904) with confirm dialog
+     * Level-2 Driver Detail screen (TopBar: 驾驶员详情 + right "编辑" / "保存"):
+     * Clean borderless dark layout matching Settings/Profile. Tapping top-right "编辑"
+     * converts only editable fields (姓名、授权时段) into in-place inputs + wheel range picker.
      */
     private fun openDriverDetailScreen(
         item: VehicleAuthorizationItem,
@@ -300,10 +295,12 @@ internal class VehicleManagementScreens(
         onChanged: () -> Unit
     ) {
         var currentEnabled = item.enabled
-        val granteeName = item.receiverAccountName.ifBlank { item.receiverMobile.ifBlank { "驾驶员" } }
-        val isControlLevel = item.levelFlag == "1" || item.authority == "1"
-        var startValue = formatAuthTime(item.startTime).takeUnless { it == "--" }.orEmpty()
-        var endValue = formatAuthTime(item.endTime).takeUnless { it == "--" }.orEmpty()
+        var currentName = item.receiverAccountName.ifBlank { item.receiverMobile.ifBlank { "驾驶员" } }
+        var currentStart = formatAuthTime(item.startTime).takeUnless { it == "--" }.orEmpty()
+        var currentEnd = formatAuthTime(item.endTime).takeUnless { it == "--" }.orEmpty()
+        var isEditing = false
+        var saving = false
+        var toggling = false
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -311,14 +308,8 @@ internal class VehicleManagementScreens(
             isClickable = true
             isFocusable = true
         }
-        root.addView(
-            AppComponents.createTopBar(
-                context = context,
-                title = "驾驶员详情",
-                onBack = { onPopOverlaySubpage() }
-            ),
-            lp()
-        )
+        val topBarHost = FrameLayout(context)
+        root.addView(topBarHost, lp())
 
         val scroll = ScrollView(context).apply {
             isFillViewport = true
@@ -327,173 +318,29 @@ internal class VehicleManagementScreens(
         }
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(34))
+            setPadding(0, dp(4), 0, dp(32))
         }
         scroll.addView(body, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        // Card 1: Driver Status & Enable Switch (905)
-        val statusCard = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-            setPadding(dp(18), dp(16), dp(18), dp(16))
-        }
+        var draftNameInput: EditText? = null
+        var getDraftRange: (() -> Pair<String, String>)? = null
 
-        val statusBadge = TextView(context).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setTypeface(null, Typeface.BOLD)
-            setPadding(dp(8), dp(3), dp(8), dp(3))
-        }
-        fun applyStatusBadge(enabled: Boolean) {
-            statusBadge.text = if (enabled) "已启用" else "已停用"
-            statusBadge.setTextColor(if (enabled) SUCCESS_GREEN else ThemeTokens.TEXT_SUB)
-            statusBadge.background = rounded(if (enabled) SUCCESS_TINT_BG else MUTED_TINT_BG, 6f)
-        }
-        applyStatusBadge(currentEnabled)
+        lateinit var renderScreen: () -> Unit
 
-        val identityHeader = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val nameTitleTv = text(granteeName, 18.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD)
-        identityHeader.addView(nameTitleTv)
-        identityHeader.addView(
-            statusBadge,
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) }
-        )
-        identityHeader.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-        identityHeader.addView(
-            TextView(context).apply {
-                text = item.permissionLabel
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(if (isControlLevel) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_BODY)
-                background = rounded(if (isControlLevel) ACCENT_TINT_BG else MUTED_TINT_BG, 7f)
-                setPadding(dp(9), dp(3), dp(9), dp(3))
-            }
-        )
-        statusCard.addView(identityHeader, lp())
-
-        val metaSub = item.receiverMobile.takeIf { it.isNotBlank() }?.let { "手机号 $it" } ?: "驾驶员授权"
-        statusCard.addView(text(metaSub, 13f, ThemeTokens.TEXT_SUB), lp(top = dp(6)))
-
-        statusCard.addView(
-            View(context).apply { setBackgroundColor(ThemeTokens.DIVIDER) },
-            lp(top = dp(14), bottom = dp(14), height = dpF(0.7f).roundToInt().coerceAtLeast(1))
-        )
-
-        var toggling = false
-        val enableSwitch = ToggleSwitch(context).apply {
-            checked = currentEnabled
-            onToggleAttempt = { targetEnabled ->
-                if (!toggling) {
-                    toggling = true
-                    setChecked(targetEnabled, animate = true)
-                    applyStatusBadge(targetEnabled)
-                    val active = profileProvider()
-                    scope.launch {
-                        val res = runCatching {
-                            withContext(Dispatchers.IO) {
-                                httpClient.toggleRemoteAuthorization(
-                                    accessToken = active.accessToken,
-                                    keyId = item.keyId,
-                                    enabled = targetEnabled,
-                                    vin = vin
-                                )
-                            }
-                        }
-                        toggling = false
-                        res.onSuccess { ok ->
-                            if (ok) {
-                                currentEnabled = targetEnabled
-                                toast(if (targetEnabled) "已启用该驾驶员权限" else "已停用该驾驶员权限")
-                                onChanged()
-                            } else {
-                                setChecked(currentEnabled, animate = true)
-                                applyStatusBadge(currentEnabled)
-                                toast("状态切换失败")
-                            }
-                        }.onFailure { err ->
-                            setChecked(currentEnabled, animate = true)
-                            applyStatusBadge(currentEnabled)
-                            if (err !is CherySessionExpiredException) {
-                                toast("操作失败：${err.message.orEmpty().take(70)}")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        val toggleRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val toggleCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        toggleCol.addView(text("启用该驾驶员权限", 15f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD))
-        toggleCol.addView(text("关闭后将临时暂停对方的查车与控车能力", 12f, ThemeTokens.TEXT_SUB), lp(top = dp(3)))
-        toggleRow.addView(toggleCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        toggleRow.addView(enableSwitch, LinearLayout.LayoutParams(dp(46), dp(26)).apply { marginStart = dp(12) })
-        statusCard.addView(toggleRow, lp())
-        body.addView(statusCard, lp())
-
-        // Card 2: Edit Driver Info (903)
-        val editCard = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-            setPadding(dp(18), dp(16), dp(18), dp(18))
-        }
-        editCard.addView(text("编辑驾驶员信息", 15.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD), lp(bottom = dp(14)))
-
-        editCard.addView(formFieldHeader("驾驶员姓名", required = true))
-        val (nameBox, nameInput) = AppComponents.createUnderlineInput(
-            context = context,
-            hint = "请输入驾驶员姓名",
-            initialValue = item.receiverAccountName,
-            inputType = InputType.TYPE_CLASS_TEXT,
-            maxLength = 20
-        )
-        editCard.addView(nameBox, lp(top = dp(2)))
-
-        editCard.addView(formFieldHeader("手机号", required = false, note = "不可修改"), lp(top = dp(16)))
-        val (mobileBox, mobileInput) = AppComponents.createUnderlineInput(
-            context = context,
-            hint = "",
-            initialValue = item.receiverMobile,
-            inputType = InputType.TYPE_CLASS_PHONE
-        )
-        mobileInput.isEnabled = false
-        mobileInput.setTextColor(ThemeTokens.TEXT_SUB)
-        editCard.addView(mobileBox, lp(top = dp(2)))
-
-        editCard.addView(formFieldHeader("开始时间", required = true), lp(top = dp(16)))
-        val (startRow, getStartVal) = createMinuteDateTimePickerField(
-            hint = "请选择开始时间",
-            initialValue = startValue
-        ) { startValue = it }
-        editCard.addView(startRow, lp(top = dp(2)))
-
-        editCard.addView(formFieldHeader("结束时间", required = true), lp(top = dp(16)))
-        val (endRow, getEndVal) = createMinuteDateTimePickerField(
-            hint = "请选择结束时间",
-            initialValue = endValue
-        ) { endValue = it }
-        editCard.addView(endRow, lp(top = dp(2)))
-
-        var saving = false
-        val saveBtn = AppComponents.createActionButton(context, "保存修改", ButtonStyle.PRIMARY) {
-            if (saving) return@createActionButton
-            val cleanName = nameInput.text.toString().trim()
-            val cleanStart = getStartVal().trim()
-            val cleanEnd = getEndVal().trim()
+        fun submitDriverEdit() {
+            if (saving) return
+            val cleanName = draftNameInput?.text?.toString()?.trim().orEmpty()
+            val (cleanStart, cleanEnd) = getDraftRange?.invoke() ?: (currentStart to currentEnd)
             if (cleanName.isBlank()) {
-                AppHaptics.perform(editCard, HapticLevel.ERROR_REJECT)
+                AppHaptics.perform(body, HapticLevel.ERROR_REJECT)
                 toast("请输入驾驶员姓名")
-                return@createActionButton
+                return
             }
             if (cleanStart.isBlank() || cleanEnd.isBlank() || compareMinuteDateTime(cleanEnd, cleanStart) <= 0) {
-                AppHaptics.perform(editCard, HapticLevel.ERROR_REJECT)
+                AppHaptics.perform(body, HapticLevel.ERROR_REJECT)
                 toast("结束时间必须晚于开始时间")
-                return@createActionButton
+                return
             }
             val active = profileProvider()
             saving = true
@@ -514,12 +361,16 @@ internal class VehicleManagementScreens(
                 saving = false
                 res.onSuccess { ok ->
                     if (ok) {
-                        AppHaptics.perform(editCard, HapticLevel.MEDIUM_CONFIRM)
-                        nameTitleTv.text = cleanName
-                        toast("驾驶员信息已更新")
+                        AppHaptics.perform(body, HapticLevel.MEDIUM_CONFIRM)
+                        currentName = cleanName
+                        currentStart = cleanStart
+                        currentEnd = cleanEnd
+                        isEditing = false
+                        toast("驾驶员信息已保存")
+                        renderScreen()
                         onChanged()
                     } else {
-                        toast("保存修改失败")
+                        toast("保存失败")
                     }
                 }.onFailure { err ->
                     if (err !is CherySessionExpiredException) {
@@ -528,102 +379,230 @@ internal class VehicleManagementScreens(
                 }
             }
         }
-        editCard.addView(saveBtn, lp(top = dp(20), height = dp(46)))
-        body.addView(editCard, lp(top = dp(12)))
 
-        // Card 3: Operation Records Entry (137)
-        val recordsCard = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-            setPadding(dp(16), dp(15), dp(16), dp(15))
-            isClickable = true
-            isFocusable = true
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.98f)
-            setOnClickListener {
-                openDriverOperationRecordsScreen(item = item, vin = vin)
+        renderScreen = {
+            draftNameInput = null
+            getDraftRange = null
+
+            topBarHost.removeAllViews()
+            topBarHost.addView(
+                AppComponents.createTopBar(
+                    context = context,
+                    title = "驾驶员详情",
+                    onBack = {
+                        if (isEditing) {
+                            isEditing = false
+                            renderScreen()
+                        } else {
+                            onPopOverlaySubpage()
+                        }
+                    },
+                    rightText = if (isEditing) "保存" else "编辑",
+                    onRightClick = {
+                        if (isEditing) {
+                            submitDriverEdit()
+                        } else {
+                            isEditing = true
+                            renderScreen()
+                        }
+                    }
+                ),
+                FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            )
+
+            body.removeAllViews()
+
+            // Compact Hero Identity
+            val hero = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(14), dp(20), dp(18))
             }
-        }
-        val recIconBox = FrameLayout(context).apply {
-            background = rounded(TILE_BG, 10f)
-            addView(
-                AppIconView(context, AppIconType.CLOCK, ThemeTokens.TEXT_PRIMARY),
-                FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER)
+            hero.addView(
+                text(currentName, 22f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }
             )
-        }
-        recordsCard.addView(recIconBox, LinearLayout.LayoutParams(dp(36), dp(36)))
-        val recTextCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        recTextCol.addView(text("操作记录", 15f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD))
-        recTextCol.addView(text("查看该驾驶员的远程控车记录", 12f, ThemeTokens.TEXT_SUB), lp(top = dp(2)))
-        recordsCard.addView(
-            recTextCol,
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(12) }
-        )
-        recordsCard.addView(
-            AppIconView(context, AppIconType.CHEVRON_RIGHT, Color.parseColor("#676C78")),
-            LinearLayout.LayoutParams(dp(16), dp(16))
-        )
-        body.addView(recordsCard, lp(top = dp(12)))
+            val statusSub = listOf(
+                if (currentEnabled) "已启用" else "已停用",
+                item.permissionLabel
+            ).filter { it.isNotBlank() }.joinToString(" · ")
+            hero.addView(text(statusSub, 13.5f, ThemeTokens.TEXT_SUB), lp(top = dp(5)))
+            body.addView(hero, lp())
+            body.addView(AppComponents.createHairline(context, startInsetDp = 20))
 
-        // Card 4: Default-Hidden Collapsible Danger Zone -> Revoke Driver (904)
-        val dangerSection = createCollapsibleDangerSection(title = "危险操作") { content ->
-            content.addView(
-                text("撤销后对方将立即失去该车辆的查车与远程控车权限。", 12.5f, ThemeTokens.TEXT_SUB).apply {
-                    setLineSpacing(dpF(2f), 1f)
-                },
-                lp(bottom = dp(12))
-            )
-            val revokeBtn = TextView(context).apply {
-                text = "撤销该驾驶员授权"
-                gravity = Gravity.CENTER
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(ThemeTokens.DANGER)
-                background = rounded(DANGER_TINT_BG, 11f, DANGER_BORDER, 0.8f)
-                MotionSpec.attachPressPhysics(this, pressedScale = 0.96f)
-                setOnClickListener {
-                    activeDialog?.dismiss()
-                    activeDialog = AppComponents.showConfirmDialog(
-                        context = context,
-                        title = "撤销驾驶员授权",
-                        message = "确认撤销「${nameTitleTv.text}」的驾驶员权限？撤销后对方将无法查看车况或远程控车。",
-                        confirmText = "确认撤销",
-                        cancelText = "取消",
-                        dangerConfirm = true
-                    ) {
-                        val active = profileProvider()
-                        scope.launch {
-                            val res = runCatching {
-                                withContext(Dispatchers.IO) {
-                                    httpClient.deleteRemoteAuthorization(
-                                        accessToken = active.accessToken,
-                                        keyId = item.keyId,
-                                        vin = vin
-                                    )
+            // Enable Toggle Row (view mode)
+            if (!isEditing) {
+                val enableSwitch = ToggleSwitch(context).apply {
+                    checked = currentEnabled
+                    onToggleAttempt = { targetEnabled ->
+                        if (!toggling) {
+                            toggling = true
+                            setChecked(targetEnabled, animate = true)
+                            val active = profileProvider()
+                            scope.launch {
+                                val res = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        httpClient.toggleRemoteAuthorization(
+                                            accessToken = active.accessToken,
+                                            keyId = item.keyId,
+                                            enabled = targetEnabled,
+                                            vin = vin
+                                        )
+                                    }
                                 }
-                            }
-                            res.onSuccess { ok ->
-                                if (ok) {
-                                    AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
-                                    toast("已撤销驾驶员授权")
-                                    onPopOverlaySubpage()
-                                    onChanged()
-                                } else {
-                                    toast("撤销失败，请重试")
-                                }
-                            }.onFailure { err ->
-                                if (err !is CherySessionExpiredException) {
-                                    toast("撤销失败：${err.message.orEmpty().take(80)}")
+                                toggling = false
+                                res.onSuccess { ok ->
+                                    if (ok) {
+                                        currentEnabled = targetEnabled
+                                        toast(if (targetEnabled) "已启用该驾驶员权限" else "已停用该驾驶员权限")
+                                        renderScreen()
+                                        onChanged()
+                                    } else {
+                                        setChecked(currentEnabled, animate = true)
+                                        toast("状态切换失败")
+                                    }
+                                }.onFailure { err ->
+                                    setChecked(currentEnabled, animate = true)
+                                    if (err !is CherySessionExpiredException) {
+                                        toast("操作失败：${err.message.orEmpty().take(70)}")
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                body.addView(
+                    AppComponents.createListRow(
+                        context = context,
+                        icon = null,
+                        title = "启用权限",
+                        subtitle = "关闭后将临时暂停对方的查车与控车",
+                        trailingView = enableSwitch,
+                        showChevron = false
+                    ),
+                    lp()
+                )
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
             }
-            content.addView(revokeBtn, lp(height = dp(44)))
-        }
-        body.addView(dangerSection, lp(top = dp(14)))
 
+            // Section: 授权信息 (editable fields become in-place inputs in edit mode)
+            body.addView(AppComponents.createSectionHeader(context, "授权信息"), lp())
+
+            if (isEditing) {
+                val (nameBox, nameInput) = AppComponents.createUnderlineInput(
+                    context = context,
+                    hint = "请输入驾驶员姓名",
+                    initialValue = currentName,
+                    inputType = InputType.TYPE_CLASS_TEXT,
+                    maxLength = 20
+                )
+                draftNameInput = nameInput
+                body.addView(buildInlineEditRow("姓名", nameBox), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            } else {
+                body.addView(buildBorderlessInfoRow("姓名", currentName), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            }
+
+            body.addView(
+                buildBorderlessInfoRow(
+                    label = "手机号",
+                    value = item.receiverMobile.ifBlank { SensitiveUiText.MISSING },
+                    dimmed = isEditing
+                ),
+                lp()
+            )
+            body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+            body.addView(
+                buildBorderlessInfoRow(
+                    label = "授权权限",
+                    value = item.permissionLabel,
+                    dimmed = isEditing
+                ),
+                lp()
+            )
+            body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+            if (isEditing) {
+                val (rangeBox, rangeProvider) = AppComponents.createDateTimeRangePickerField(
+                    context = context,
+                    hint = "请选择授权时段",
+                    initialStart = currentStart,
+                    initialEnd = currentEnd,
+                    mode = WheelDateTimeMode.DATE_TIME_RANGE,
+                    title = "选择授权时段"
+                )
+                getDraftRange = rangeProvider
+                body.addView(buildInlineEditRow("授权时段", rangeBox), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            } else {
+                body.addView(buildBorderlessInfoRow("开始时间", currentStart.ifBlank { SensitiveUiText.MISSING }), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(buildBorderlessInfoRow("结束时间", currentEnd.ifBlank { SensitiveUiText.MISSING }), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            }
+
+            if (!isEditing) {
+                body.addView(
+                    AppComponents.createListRow(
+                        context = context,
+                        icon = AppIconType.CLOCK,
+                        title = "操作记录",
+                        showChevron = true,
+                        onClick = { openDriverOperationRecordsScreen(item = item, vin = vin) }
+                    ),
+                    lp()
+                )
+
+                body.addView(View(context), LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(
+                    AppComponents.createActionButton(context, "撤销驾驶员授权", ButtonStyle.DANGER_TEXT) {
+                        activeDialog?.dismiss()
+                        activeDialog = AppComponents.showConfirmDialog(
+                            context = context,
+                            title = "撤销驾驶员授权",
+                            message = "确认撤销「$currentName」的驾驶员权限？撤销后对方将无法查看车况或远程控车。",
+                            confirmText = "确认撤销",
+                            cancelText = "取消",
+                            dangerConfirm = true
+                        ) {
+                            val active = profileProvider()
+                            scope.launch {
+                                val res = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        httpClient.deleteRemoteAuthorization(
+                                            accessToken = active.accessToken,
+                                            keyId = item.keyId,
+                                            vin = vin
+                                        )
+                                    }
+                                }
+                                res.onSuccess { ok ->
+                                    if (ok) {
+                                        AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
+                                        toast("已撤销驾驶员授权")
+                                        onPopOverlaySubpage()
+                                        onChanged()
+                                    } else {
+                                        toast("撤销失败，请重试")
+                                    }
+                                }.onFailure { err ->
+                                    if (err !is CherySessionExpiredException) {
+                                        toast("撤销失败：${err.message.orEmpty().take(80)}")
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    lp(top = dp(4), height = dp(54))
+                )
+            }
+        }
+
+        renderScreen()
         onPushOverlaySubpage(root, null)
     }
 
@@ -1168,7 +1147,7 @@ internal class VehicleManagementScreens(
     ): LinearLayout {
         val activeVin = profileProvider().vin.trim().uppercase(Locale.US)
         val isCurrentActive = vehicle.vin.equals(activeVin, ignoreCase = true)
-        val modelTitle = vehicle.modelName.ifBlank { "我的座驾" }
+        val modelTitle = VehicleDisplayNames.resolve(vehicle)
         val (statusText, statusFg, statusBg) = when {
             isCurrentActive -> Triple("当前控车", ThemeTokens.ACCENT_LIGHT, ACCENT_TINT_BG)
             vehicle.isSelected -> Triple("默认车辆", ThemeTokens.TEXT_PRIMARY, ThemeTokens.ACCENT_BLUE)
@@ -1244,21 +1223,25 @@ internal class VehicleManagementScreens(
     }
 
     /**
-     * Level-2 Vehicle Detail screen (TopBar: 车辆详情):
-     * - Card 1: Identity, live certification badge, set default (932), switch active car, Drivers shortcut
-     * - Card 2: Complete 2x2 Hardware & Real-Name Archive (VIN / Engine / ICCID / SN, tap to copy)
-     * - Card 3: Inline Owner & License Info Editor (plate / owner / purchase date + Save 933)
-     * - Card 4: Default-Hidden Collapsible Danger Zone (Cancel Cert 934 & Unbind 931, double confirm + 6-digit PIN)
+     * Level-2 Vehicle Detail screen (TopBar: 车辆详情 + right "编辑" / "保存"):
+     * Clean borderless dark layout matching Settings/Profile. Tapping top-right "编辑"
+     * converts only editable fields (车牌号、车主姓名、购车时间) into in-place inputs.
      */
     fun openEditVehicleScreen(
         initialVehicle: VehicleSummary? = null,
         vinFallback: String = "",
         onUpdated: () -> Unit = {}
-    ) = openVehicleDetailScreen(initialVehicle, vinFallback, onUpdated)
+    ) = openVehicleDetailScreen(
+        initialVehicle = initialVehicle,
+        vinFallback = vinFallback,
+        startInEditMode = true,
+        onUpdated = onUpdated
+    )
 
     fun openVehicleDetailScreen(
         initialVehicle: VehicleSummary? = null,
         vinFallback: String = "",
+        startInEditMode: Boolean = false,
         onUpdated: () -> Unit = {}
     ) {
         val activeProfile = profileProvider()
@@ -1272,14 +1255,16 @@ internal class VehicleManagementScreens(
             isClickable = true
             isFocusable = true
         }
-        root.addView(
+        val topBarHost = FrameLayout(context)
+        topBarHost.addView(
             AppComponents.createTopBar(
                 context = context,
                 title = "车辆详情",
                 onBack = { onPopOverlaySubpage() }
             ),
-            lp()
+            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
         )
+        root.addView(topBarHost, lp())
 
         val scroll = ScrollView(context).apply {
             isFillViewport = true
@@ -1288,118 +1273,141 @@ internal class VehicleManagementScreens(
         }
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(36))
+            setPadding(0, dp(4), 0, dp(36))
         }
         scroll.addView(body, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
+        var isEditing = startInEditMode
+        var saving = false
+
         fun renderDetail(vehicle: VehicleSummary) {
             rememberVehicleSummaries(listOf(vehicle), activeProfile.accessToken)
-            body.removeAllViews()
             val activeVin = profileProvider().vin.trim().uppercase(Locale.US)
             val isCurrentActive = vehicle.vin.equals(activeVin, ignoreCase = true)
-            val modelTitle = vehicle.modelName.ifBlank { "我的座驾" }
+            val modelTitle = VehicleDisplayNames.resolve(vehicle)
+            val canEdit = vehicle.isBoundVehicle
+            if (!canEdit) isEditing = false
             var liveSimStatus = vehicle.simStatus
 
-            // Card 1: Identity & Primary Vehicle Actions
-            val headerCard = LinearLayout(context).apply {
+            var plateInputRef: EditText? = null
+            var ownerInputRef: EditText? = null
+            var getPurchaseDateRef: (() -> String)? = null
+
+            fun submitVehicleSave() {
+                if (saving) return
+                val cleanPlate = plateInputRef?.text?.toString()?.trim()?.uppercase(Locale.US).orEmpty()
+                val cleanHost = ownerInputRef?.text?.toString()?.trim().orEmpty()
+                val cleanDate = normalizeDateOnly(getPurchaseDateRef?.invoke().orEmpty())
+                if (cleanPlate.isBlank()) {
+                    AppHaptics.perform(body, HapticLevel.ERROR_REJECT)
+                    toast("请输入车牌号")
+                    return
+                }
+                val active = profileProvider()
+                saving = true
+                scope.launch {
+                    val res = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.saveVehicleInfo(
+                                accessToken = active.accessToken,
+                                vin = vehicle.vin,
+                                plateNo = cleanPlate,
+                                hostName = cleanHost,
+                                purchaseDate = cleanDate
+                            )
+                        }
+                    }
+                    saving = false
+                    res.onSuccess { ok ->
+                        if (ok) {
+                            AppHaptics.perform(body, HapticLevel.MEDIUM_CONFIRM)
+                            isEditing = false
+                            onVehicleInfoSaved(vehicle.vin, cleanPlate, cleanHost, cleanDate)
+                            onStatusMessage("车辆信息已保存")
+                            toast("车辆信息已保存")
+                            renderDetail(
+                                vehicle.copy(
+                                    plateNo = cleanPlate,
+                                    hostName = cleanHost,
+                                    purchaseTime = cleanDate,
+                                    simStatus = liveSimStatus
+                                )
+                            )
+                            onUpdated()
+                        } else {
+                            toast("保存车辆信息失败")
+                        }
+                    }.onFailure { err ->
+                        if (err !is CherySessionExpiredException) {
+                            toast("保存失败：${err.message.orEmpty().take(80)}")
+                        }
+                    }
+                }
+            }
+
+            topBarHost.removeAllViews()
+            topBarHost.addView(
+                AppComponents.createTopBar(
+                    context = context,
+                    title = "车辆详情",
+                    onBack = {
+                        if (isEditing) {
+                            isEditing = false
+                            renderDetail(vehicle)
+                        } else {
+                            onPopOverlaySubpage()
+                        }
+                    },
+                    rightText = if (!canEdit) null else if (isEditing) "保存" else "编辑",
+                    onRightClick = if (!canEdit) null else {
+                        {
+                            if (isEditing) {
+                                submitVehicleSave()
+                            } else {
+                                isEditing = true
+                                renderDetail(vehicle)
+                            }
+                        }
+                    }
+                ),
+                FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            )
+
+            body.removeAllViews()
+
+            // Hero Header: Model name + clean status line + subtle quick action chips
+            val hero = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-                setPadding(dp(18), dp(16), dp(18), dp(16))
+                setPadding(dp(20), dp(14), dp(20), dp(18))
             }
-            val topRow = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            topRow.addView(
-                text(modelTitle, 20f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+            hero.addView(
+                text(modelTitle, 22f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 }
             )
-            val simBadge = TextView(context).apply {
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                setTypeface(null, Typeface.BOLD)
-                setPadding(dp(8), dp(3), dp(8), dp(3))
-            }
-            fun updateSimBadge() {
+            val statusParts = buildList {
                 if (vehicle.isBoundVehicle) {
-                    val (t, fg, bg) = simStatusAppearance(liveSimStatus)
-                    simBadge.text = t
-                    simBadge.setTextColor(fg)
-                    simBadge.background = rounded(bg, 7f)
+                    add(simStatusAppearance(liveSimStatus).first)
                 } else {
-                    simBadge.text = "被授权"
-                    simBadge.setTextColor(ThemeTokens.ACCENT_LIGHT)
-                    simBadge.background = rounded(ACCENT_TINT_BG, 7f)
+                    add("被授权")
                 }
+                if (vehicle.isSelected) add("默认车辆")
+                if (isCurrentActive) add("当前控车")
             }
-            updateSimBadge()
-            topRow.addView(
-                simBadge,
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) }
+            hero.addView(
+                text(statusParts.joinToString(" · "), 13.5f, ThemeTokens.TEXT_SUB),
+                lp(top = dp(5))
             )
-            topRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-
-            if (vehicle.isSelected) {
-                topRow.addView(
-                    TextView(context).apply {
-                        text = "默认车辆"
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-                        setTypeface(null, Typeface.BOLD)
-                        setTextColor(ThemeTokens.TEXT_PRIMARY)
-                        background = rounded(ThemeTokens.ACCENT_BLUE, 8f)
-                        setPadding(dp(9), dp(4), dp(9), dp(4))
-                    }
-                )
-            } else if (vehicle.isBoundVehicle) {
-                topRow.addView(
-                    pillActionButton("设为默认车辆", accent = false) {
-                        val active = profileProvider()
-                        scope.launch {
-                            val res = runCatching {
-                                withContext(Dispatchers.IO) {
-                                    httpClient.setDefaultVehicle(active.accessToken, vehicle.vin)
-                                }
-                            }
-                            res.onSuccess { ok ->
-                                if (ok) {
-                                    AppHaptics.perform(headerCard, HapticLevel.MEDIUM_CONFIRM)
-                                    toast("已将 $modelTitle 设为默认车辆")
-                                    onSelectVehicleSummary(vehicle.copy(selected = "1"))
-                                    renderDetail(vehicle.copy(selected = "1", simStatus = liveSimStatus))
-                                    onUpdated()
-                                } else {
-                                    toast("设置默认车辆失败")
-                                }
-                            }.onFailure { err ->
-                                if (err !is CherySessionExpiredException) {
-                                    toast("设置失败：${err.message.orEmpty().take(70)}")
-                                }
-                            }
-                        }
-                    },
-                    LinearLayout.LayoutParams(WRAP_CONTENT, dp(28))
-                )
-            }
-            headerCard.addView(topRow, lp())
-
-            val platePreview = TextView(context).apply {
-                text = vehicle.plateNo.ifBlank { "未设置车牌号" }
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                setTextColor(if (vehicle.plateNo.isNotBlank()) ThemeTokens.TEXT_BODY else ThemeTokens.TEXT_SUB)
-            }
-            headerCard.addView(platePreview, lp(top = dp(6)))
-
             if (!vehicle.isBoundVehicle && vehicle.authDateListSummary.isNotBlank()) {
-                headerCard.addView(
+                hero.addView(
                     text("授权时段：${vehicle.authDateListSummary}", 12.5f, ThemeTokens.TEXT_SUB),
-                    lp(top = dp(6))
+                    lp(top = dp(4))
                 )
             }
 
-            if (!isCurrentActive || vehicle.isBoundVehicle) {
+            if (!isEditing) {
                 val quickRow = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
@@ -1414,108 +1422,59 @@ internal class VehicleManagementScreens(
                         LinearLayout.LayoutParams(0, dp(38), 1f)
                     )
                 }
+                if (vehicle.isBoundVehicle && !vehicle.isSelected) {
+                    quickRow.addView(
+                        cardActionChip("设为默认车辆", accent = false) {
+                            val active = profileProvider()
+                            scope.launch {
+                                val res = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        httpClient.setDefaultVehicle(active.accessToken, vehicle.vin)
+                                    }
+                                }
+                                res.onSuccess { ok ->
+                                    if (ok) {
+                                        AppHaptics.perform(hero, HapticLevel.MEDIUM_CONFIRM)
+                                        toast("已将 $modelTitle 设为默认车辆")
+                                        onSelectVehicleSummary(vehicle.copy(selected = "1"))
+                                        renderDetail(vehicle.copy(selected = "1", simStatus = liveSimStatus))
+                                        onUpdated()
+                                    } else {
+                                        toast("设置默认车辆失败")
+                                    }
+                                }.onFailure { err ->
+                                    if (err !is CherySessionExpiredException) {
+                                        toast("设置失败：${err.message.orEmpty().take(70)}")
+                                    }
+                                }
+                            }
+                        },
+                        LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+                            if (quickRow.childCount > 0) marginStart = dp(10)
+                        }
+                    )
+                }
                 if (vehicle.isBoundVehicle && isCurrentActive) {
                     quickRow.addView(
                         cardActionChip("驾驶员", accent = false) {
                             openDriversScreen()
                         },
-                        LinearLayout.LayoutParams(0, dp(38), 1f)
+                        LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+                            if (quickRow.childCount > 0) marginStart = dp(10)
+                        }
                     )
                 }
-                headerCard.addView(quickRow, lp(top = dp(14)))
-            }
-            body.addView(headerCard, lp())
-
-            // Card 2: Privacy-masked identity groups. No default plaintext and no plaintext copy.
-            val identityCard = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-                setPadding(dp(16), dp(16), dp(16), dp(16))
-            }
-            val identityHeader = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            identityHeader.addView(
-                text("车辆资料", 15.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-            )
-            identityHeader.addView(text("默认脱敏", 11.5f, ThemeTokens.TEXT_SUB))
-            identityCard.addView(identityHeader, lp(bottom = dp(8)))
-            identityCard.addView(
-                buildDetailValueRow("车架号", SensitiveUiText.identifier(vehicle.vin), copyable = true)
-            )
-            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
-            identityCard.addView(
-                buildDetailValueRow("发动机号", SensitiveUiText.identifier(vehicle.engineNumber), copyable = true)
-            )
-            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
-            identityCard.addView(
-                buildDetailValueRow("ICCID", SensitiveUiText.identifier(vehicle.iccid), copyable = true)
-            )
-            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
-            identityCard.addView(
-                buildDetailValueRow("SN 码", SensitiveUiText.identifier(vehicle.sn), copyable = true)
-            )
-
-            identityCard.addView(
-                text("车主资料", 13f, ThemeTokens.TEXT_SUB, Typeface.BOLD),
-                lp(top = dp(18), bottom = dp(4))
-            )
-            identityCard.addView(
-                buildDetailValueRow("车主姓名", SensitiveUiText.personName(vehicle.hostName), copyable = false)
-            )
-            identityCard.addView(AppComponents.createHairline(context, startInsetDp = 0))
-            identityCard.addView(
-                buildDetailValueRow("购车时间", SensitiveUiText.year(vehicle.purchaseTime), copyable = false)
-            )
-            body.addView(identityCard, lp(top = dp(12)))
-
-            // Card 3: Owner & License Editable Form (933)
-            if (vehicle.isBoundVehicle) {
-                val editCard = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-                    setPadding(dp(18), dp(16), dp(18), dp(18))
+                if (quickRow.childCount > 0) {
+                    hero.addView(quickRow, lp(top = dp(14)))
                 }
-                val editBody = LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    visibility = View.GONE
-                }
-                val editChevron = AppIconView(context, AppIconType.CHEVRON_DOWN, ThemeTokens.TEXT_SUB)
-                var editExpanded = false
-                val editHeader = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    minimumHeight = dp(48)
-                    isClickable = true
-                    isFocusable = true
-                    contentDescription = "展开编辑车辆资料"
-                    MotionSpec.attachPressPhysics(this, pressedScale = 0.98f)
-                    setOnClickListener {
-                        editExpanded = !editExpanded
-                        editBody.visibility = if (editExpanded) View.VISIBLE else View.GONE
-                        editChevron.animate()
-                            .rotation(if (editExpanded) 180f else 0f)
-                            .setDuration(180L)
-                            .start()
-                        contentDescription = if (editExpanded) "收起编辑车辆资料" else "展开编辑车辆资料"
-                        AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
-                    }
-                }
-                editHeader.addView(
-                    text("编辑车辆资料", 15.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
-                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-                )
-                editHeader.addView(
-                    text("默认收起", 11.5f, ThemeTokens.TEXT_SUB),
-                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(8) }
-                )
-                editHeader.addView(editChevron, LinearLayout.LayoutParams(dp(18), dp(18)))
-                editCard.addView(editHeader)
-                editCard.addView(editBody)
+            }
+            body.addView(hero, lp())
+            body.addView(AppComponents.createHairline(context, startInsetDp = 20))
 
-                editBody.addView(formFieldHeader("车牌号", required = true), lp(top = dp(12)))
+            // Section 1: 基本信息 (the 3 editable fields switch cleanly in-place)
+            body.addView(AppComponents.createSectionHeader(context, "基本信息"), lp())
+
+            if (isEditing) {
                 val (plateBox, plateInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入车牌号",
@@ -1523,9 +1482,10 @@ internal class VehicleManagementScreens(
                     inputType = InputType.TYPE_CLASS_TEXT,
                     maxLength = 12
                 )
-                editBody.addView(plateBox, lp(top = dp(2)))
+                plateInputRef = plateInput
+                body.addView(buildInlineEditRow("车牌号", plateBox), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
 
-                editBody.addView(formFieldHeader("车主姓名", required = false), lp(top = dp(16)))
                 val (ownerBox, ownerInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入车主姓名",
@@ -1533,190 +1493,89 @@ internal class VehicleManagementScreens(
                     inputType = InputType.TYPE_CLASS_TEXT,
                     maxLength = 24
                 )
-                editBody.addView(ownerBox, lp(top = dp(2)))
+                ownerInputRef = ownerInput
+                body.addView(buildInlineEditRow("车主姓名", ownerBox), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
 
-                editBody.addView(formFieldHeader("购车时间", required = false, note = "选填"), lp(top = dp(16)))
                 val (purchaseDateBox, getPurchaseDate) = AppComponents.createDateTimePickerField(
                     context = context,
                     hint = "请选择购车时间",
                     initialValue = normalizeDateOnly(vehicle.purchaseTime),
-                    mode = DateTimeMode.DATE
+                    mode = DateTimeMode.DATE,
+                    title = "选择购车时间"
                 )
-                editBody.addView(purchaseDateBox, lp(top = dp(2)))
+                getPurchaseDateRef = getPurchaseDate
+                body.addView(buildInlineEditRow("购车时间", purchaseDateBox), lp())
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            } else {
+                body.addView(
+                    buildBorderlessInfoRow("车牌号", vehicle.plateNo.ifBlank { "未设置" }),
+                    lp()
+                )
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(
+                    buildBorderlessInfoRow("车主姓名", SensitiveUiText.personName(vehicle.hostName)),
+                    lp()
+                )
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(
+                    buildBorderlessInfoRow("购车时间", SensitiveUiText.year(vehicle.purchaseTime)),
+                    lp()
+                )
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            }
 
-                var saving = false
-                val saveBtn = AppComponents.createActionButton(context, "保存", ButtonStyle.PRIMARY) {
-                    if (saving) return@createActionButton
-                    val cleanPlate = plateInput.text.toString().trim().uppercase(Locale.US)
-                    val cleanHost = ownerInput.text.toString().trim()
-                    val cleanDate = normalizeDateOnly(getPurchaseDate())
-                    if (cleanPlate.isBlank()) {
-                        AppHaptics.perform(editCard, HapticLevel.ERROR_REJECT)
-                        toast("请输入车牌号")
-                        return@createActionButton
-                    }
-                    val active = profileProvider()
-                    saving = true
-                    scope.launch {
-                        val res = runCatching {
-                            withContext(Dispatchers.IO) {
-                                httpClient.saveVehicleInfo(
-                                    accessToken = active.accessToken,
-                                    vin = vehicle.vin,
-                                    plateNo = cleanPlate,
-                                    hostName = cleanHost,
-                                    purchaseDate = cleanDate
-                                )
-                            }
-                        }
-                        saving = false
-                        res.onSuccess { ok ->
-                            if (ok) {
-                                AppHaptics.perform(editCard, HapticLevel.MEDIUM_CONFIRM)
-                                platePreview.text = cleanPlate
-                                platePreview.setTextColor(ThemeTokens.TEXT_BODY)
-                                onVehicleInfoSaved(vehicle.vin, cleanPlate, cleanHost, cleanDate)
-                                onStatusMessage("车辆信息已保存")
-                                toast("车辆信息已保存")
-                                renderDetail(
-                                    vehicle.copy(
-                                        plateNo = cleanPlate,
-                                        hostName = cleanHost,
-                                        purchaseTime = cleanDate,
-                                        simStatus = liveSimStatus
-                                    )
-                                )
-                                onUpdated()
-                            } else {
-                                toast("保存车辆信息失败")
-                            }
-                        }.onFailure { err ->
-                            if (err !is CherySessionExpiredException) {
-                                toast("保存失败：${err.message.orEmpty().take(80)}")
-                            }
-                        }
-                    }
-                }
-                editBody.addView(saveBtn, lp(top = dp(20), height = dp(46)))
-                body.addView(editCard, lp(top = dp(12)))
+            // Section 2: 车辆标识 (always read-only masked rows; tap to copy)
+            body.addView(AppComponents.createSectionHeader(context, "车辆标识"), lp())
+            body.addView(
+                buildDetailValueRow("车架号", SensitiveUiText.identifier(vehicle.vin), copyable = !isEditing, dimmed = isEditing),
+                lp()
+            )
+            body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            body.addView(
+                buildDetailValueRow("发动机号", SensitiveUiText.identifier(vehicle.engineNumber), copyable = !isEditing, dimmed = isEditing),
+                lp()
+            )
+            body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            body.addView(
+                buildDetailValueRow("ICCID", SensitiveUiText.identifier(vehicle.iccid), copyable = !isEditing, dimmed = isEditing),
+                lp()
+            )
+            body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            body.addView(
+                buildDetailValueRow("SN 码", SensitiveUiText.identifier(vehicle.sn), copyable = !isEditing, dimmed = isEditing),
+                lp()
+            )
 
-                // Card 4: Default-Hidden Collapsible Danger Zone (Cancel Cert 934 & Unbind 931)
-                val dangerSection = createCollapsibleDangerSection(title = "危险操作") { content ->
-                    content.addView(
-                        text("取消认证或解除绑定均属于不可逆敏感操作，执行前需二次确认并验证 6 位车控安全密码。", 12.5f, ThemeTokens.TEXT_SUB).apply {
-                            setLineSpacing(dpF(2f), 1f)
-                        },
-                        lp(bottom = dp(12))
-                    )
-
-                    val actionRow = LinearLayout(context).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                    }
-
-                    val cancelCertBtn = TextView(context).apply {
-                        gravity = Gravity.CENTER
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                        setTypeface(null, Typeface.BOLD)
-                    }
-                    fun updateCancelCertBtn() {
-                        val certified = liveSimStatus == "1"
-                        cancelCertBtn.text = if (certified) "取消认证" else "未实名认证"
-                        cancelCertBtn.setTextColor(if (certified) ThemeTokens.TEXT_PRIMARY else ThemeTokens.TEXT_SUB)
-                        cancelCertBtn.background = rounded(
-                            if (certified) TILE_BG else Color.parseColor("#1F2127"),
-                            10f,
-                            CARD_BORDER,
-                            0.8f
-                        )
-                        cancelCertBtn.alpha = if (certified) 1f else 0.55f
-                    }
-                    updateCancelCertBtn()
-                    MotionSpec.attachPressPhysics(cancelCertBtn, pressedScale = 0.96f)
-                    cancelCertBtn.setOnClickListener {
-                        if (liveSimStatus != "1") {
-                            toast("当前车辆未处于已认证状态")
-                            return@setOnClickListener
-                        }
-                        activeDialog?.dismiss()
-                        activeDialog = AppComponents.showConfirmDialog(
-                            context = context,
-                            title = "取消车辆实名认证",
-                            message = "取消认证后将影响车联网通信及远程控车功能，需验证 6 位车控安全密码。确定要取消认证吗？",
-                            confirmText = "继续验证",
-                            cancelText = "取消",
-                            dangerConfirm = true
-                        ) {
-                            activeDialog = SixDigitPinSheet.showVerifyPinSheet(
-                                context = context,
-                                title = "验证车控安全密码",
-                                subtitle = "请输入 6 位车控安全密码以取消车辆认证"
-                            ) { pin, showError, dismiss ->
-                                val active = profileProvider()
-                                scope.launch {
-                                    val res = runCatching {
-                                        withContext(Dispatchers.IO) {
-                                            httpClient.cancelVehicleCertification(
-                                                accessToken = active.accessToken,
-                                                vin = vehicle.vin,
-                                                iccid = vehicle.iccid,
-                                                pinPlain = pin
-                                            )
-                                        }
-                                    }
-                                    res.onSuccess { ok ->
-                                        if (ok) {
-                                            dismiss()
-                                            liveSimStatus = "0"
-                                            updateSimBadge()
-                                            updateCancelCertBtn()
-                                            toast("已取消车辆实名认证")
-                                            onUpdated()
-                                        } else {
-                                            showError("车控密码验证失败，请重试")
-                                        }
-                                    }.onFailure { err ->
-                                        if (err is CherySessionExpiredException) {
-                                            dismiss()
-                                        } else {
-                                            showError(err.message.orEmpty().ifBlank { "取消认证失败" }.take(60))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    val unbindBtn = TextView(context).apply {
-                        text = "解除绑定"
-                        gravity = Gravity.CENTER
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-                        setTypeface(null, Typeface.BOLD)
-                        setTextColor(ThemeTokens.DANGER)
-                        background = rounded(DANGER_TINT_BG, 10f, DANGER_BORDER, 0.8f)
-                        MotionSpec.attachPressPhysics(this, pressedScale = 0.96f)
-                        setOnClickListener {
+            // Bottom understated destructive actions (hidden during edit mode)
+            if (vehicle.isBoundVehicle && !isEditing) {
+                body.addView(View(context), LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+                if (liveSimStatus == "1") {
+                    body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                    body.addView(
+                        AppComponents.createActionButton(context, "取消实名认证", ButtonStyle.DANGER_TEXT) {
                             activeDialog?.dismiss()
                             activeDialog = AppComponents.showConfirmDialog(
                                 context = context,
-                                title = "解除车辆绑定",
-                                message = "解除绑定后，当前账号将移除该车辆的所有远程控车与数字钥匙权限，需验证 6 位车控安全密码。确定继续吗？",
-                                confirmText = "继续解绑",
+                                title = "取消车辆实名认证",
+                                message = "取消认证后将影响车联网通信及远程控车功能，需验证 6 位车控安全密码。确定要取消认证吗？",
+                                confirmText = "继续验证",
                                 cancelText = "取消",
                                 dangerConfirm = true
                             ) {
                                 activeDialog = SixDigitPinSheet.showVerifyPinSheet(
                                     context = context,
                                     title = "验证车控安全密码",
-                                    subtitle = "请输入 6 位车控安全密码以解除车辆绑定"
+                                    subtitle = "请输入 6 位车控安全密码以取消车辆认证"
                                 ) { pin, showError, dismiss ->
                                     val active = profileProvider()
                                     scope.launch {
                                         val res = runCatching {
                                             withContext(Dispatchers.IO) {
-                                                httpClient.unbindVehicle(
+                                                httpClient.cancelVehicleCertification(
                                                     accessToken = active.accessToken,
                                                     vin = vehicle.vin,
+                                                    iccid = vehicle.iccid,
                                                     pinPlain = pin
                                                 )
                                             }
@@ -1724,9 +1583,9 @@ internal class VehicleManagementScreens(
                                         res.onSuccess { ok ->
                                             if (ok) {
                                                 dismiss()
-                                                toast("车辆已解除绑定")
-                                                onPopOverlaySubpage()
-                                                onVehicleUnbound(vehicle.vin)
+                                                liveSimStatus = "0"
+                                                toast("已取消车辆实名认证")
+                                                renderDetail(vehicle.copy(simStatus = "0"))
                                                 onUpdated()
                                             } else {
                                                 showError("车控密码验证失败，请重试")
@@ -1735,20 +1594,67 @@ internal class VehicleManagementScreens(
                                             if (err is CherySessionExpiredException) {
                                                 dismiss()
                                             } else {
-                                                showError(err.message.orEmpty().ifBlank { "解绑失败" }.take(60))
+                                                showError(err.message.orEmpty().ifBlank { "取消认证失败" }.take(60))
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                    }
-
-                    actionRow.addView(cancelCertBtn, LinearLayout.LayoutParams(0, dp(42), 1f))
-                    actionRow.addView(unbindBtn, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(10) })
-                    content.addView(actionRow, lp())
+                        },
+                        lp(top = dp(4), height = dp(52))
+                    )
                 }
-                body.addView(dangerSection, lp(top = dp(14)))
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(
+                    AppComponents.createActionButton(context, "解除车辆绑定", ButtonStyle.DANGER_TEXT) {
+                        activeDialog?.dismiss()
+                        activeDialog = AppComponents.showConfirmDialog(
+                            context = context,
+                            title = "解除车辆绑定",
+                            message = "解除绑定后，当前账号将移除该车辆的所有远程控车与数字钥匙权限，需验证 6 位车控安全密码。确定继续吗？",
+                            confirmText = "继续解绑",
+                            cancelText = "取消",
+                            dangerConfirm = true
+                        ) {
+                            activeDialog = SixDigitPinSheet.showVerifyPinSheet(
+                                context = context,
+                                title = "验证车控安全密码",
+                                subtitle = "请输入 6 位车控安全密码以解除车辆绑定"
+                            ) { pin, showError, dismiss ->
+                                val active = profileProvider()
+                                scope.launch {
+                                    val res = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            httpClient.unbindVehicle(
+                                                accessToken = active.accessToken,
+                                                vin = vehicle.vin,
+                                                pinPlain = pin
+                                            )
+                                        }
+                                    }
+                                    res.onSuccess { ok ->
+                                        if (ok) {
+                                            dismiss()
+                                            toast("车辆已解除绑定")
+                                            onPopOverlaySubpage()
+                                            onVehicleUnbound(vehicle.vin)
+                                            onUpdated()
+                                        } else {
+                                            showError("车控密码验证失败，请重试")
+                                        }
+                                    }.onFailure { err ->
+                                        if (err is CherySessionExpiredException) {
+                                            dismiss()
+                                        } else {
+                                            showError(err.message.orEmpty().ifBlank { "解绑失败" }.take(60))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    lp(top = dp(4), height = dp(52))
+                )
             }
         }
 
@@ -1964,170 +1870,93 @@ internal class VehicleManagementScreens(
     }
 
     // =========================================================================
-    // Smooth Animated Collapsible Danger Section (Default Hidden / Collapsed)
-    // =========================================================================
-
-    private fun createCollapsibleDangerSection(
-        title: String,
-        buildBody: (LinearLayout) -> Unit
-    ): LinearLayout {
-        var expanded = false
-        var activeAnim: ValueAnimator? = null
-
-        val wrapper = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            background = rounded(Color.parseColor("#191B20"), 16f, CARD_BORDER, 0.8f)
-            clipChildren = true
-            clipToPadding = true
-        }
-
-        val headerRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            isClickable = true
-            isFocusable = true
-        }
-        val titleTv = text(title, 14f, ThemeTokens.TEXT_SUB, Typeface.BOLD)
-        val chevron = AppIconView(context, AppIconType.CHEVRON_DOWN, ThemeTokens.TEXT_SUB)
-        headerRow.addView(titleTv, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        headerRow.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)))
-        wrapper.addView(headerRow, lp())
-
-        val bodyContainer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(2), dp(16), dp(16))
-            visibility = View.GONE
-            alpha = 0f
-        }
-        buildBody(bodyContainer)
-        wrapper.addView(bodyContainer, LinearLayout.LayoutParams(MATCH_PARENT, 0))
-
-        MotionSpec.attachPressPhysics(headerRow, pressedScale = 0.985f, haptic = false)
-        headerRow.setOnClickListener {
-            AppHaptics.perform(headerRow, HapticLevel.LIGHT_TICK)
-            expanded = !expanded
-            activeAnim?.cancel()
-
-            titleTv.setTextColor(if (expanded) ThemeTokens.DANGER else ThemeTokens.TEXT_SUB)
-            chevron.animate().cancel()
-            chevron.animate()
-                .rotation(if (expanded) 180f else 0f)
-                .setDuration(240L)
-                .setInterpolator(MotionSpec.EASE_OUT_EXPO)
-                .start()
-
-            if (expanded) {
-                val widthSpec = View.MeasureSpec.makeMeasureSpec(
-                    wrapper.width.takeIf { it > 0 } ?: (context.resources.displayMetrics.widthPixels - dp(32)),
-                    View.MeasureSpec.EXACTLY
-                )
-                val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-                bodyContainer.measure(widthSpec, heightSpec)
-                val targetHeight = bodyContainer.measuredHeight.coerceAtLeast(dp(64))
-
-                bodyContainer.visibility = View.VISIBLE
-                bodyContainer.layoutParams = (bodyContainer.layoutParams as LinearLayout.LayoutParams).apply {
-                    height = 0
-                }
-                bodyContainer.alpha = 0f
-
-                activeAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 260L
-                    interpolator = MotionSpec.EASE_OUT_EXPO
-                    addUpdateListener { anim ->
-                        val f = anim.animatedValue as Float
-                        val lpCur = bodyContainer.layoutParams as LinearLayout.LayoutParams
-                        lpCur.height = (targetHeight * f).roundToInt()
-                        bodyContainer.layoutParams = lpCur
-                        bodyContainer.alpha = f
-                    }
-                    addListener(object : android.animation.AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: android.animation.Animator) {
-                            val lpCur = bodyContainer.layoutParams as LinearLayout.LayoutParams
-                            lpCur.height = WRAP_CONTENT
-                            bodyContainer.layoutParams = lpCur
-                            bodyContainer.alpha = 1f
-                        }
-                    })
-                    start()
-                }
-            } else {
-                val startHeight = bodyContainer.height.coerceAtLeast(1)
-                activeAnim = ValueAnimator.ofFloat(1f, 0f).apply {
-                    duration = 220L
-                    interpolator = MotionSpec.EASE_STANDARD
-                    addUpdateListener { anim ->
-                        val f = anim.animatedValue as Float
-                        val lpCur = bodyContainer.layoutParams as LinearLayout.LayoutParams
-                        lpCur.height = (startHeight * f).roundToInt()
-                        bodyContainer.layoutParams = lpCur
-                        bodyContainer.alpha = f
-                    }
-                    addListener(object : android.animation.AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: android.animation.Animator) {
-                            bodyContainer.visibility = View.GONE
-                            val lpCur = bodyContainer.layoutParams as LinearLayout.LayoutParams
-                            lpCur.height = 0
-                            bodyContainer.layoutParams = lpCur
-                            bodyContainer.alpha = 0f
-                        }
-                    })
-                    start()
-                }
-            }
-        }
-
-        return wrapper
-    }
-
-    // =========================================================================
     // Reusable Minimalist Dark Automotive UI Helpers
     // =========================================================================
+
+    private fun buildBorderlessInfoRow(
+        label: String,
+        value: String,
+        dimmed: Boolean = false
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(54)
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            alpha = if (dimmed) 0.55f else 1f
+            addView(
+                text(label, 14.5f, ThemeTokens.TEXT_SUB),
+                LinearLayout.LayoutParams(dp(84), WRAP_CONTENT)
+            )
+            addView(
+                text(value, 15f, if (value == SensitiveUiText.MISSING || value == "未设置") ThemeTokens.TEXT_SUB else ThemeTokens.TEXT_PRIMARY).apply {
+                    gravity = Gravity.END
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(12) }
+            )
+        }
+    }
+
+    private fun buildInlineEditRow(label: String, inputView: View): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            setPadding(dp(20), dp(6), dp(20), dp(6))
+            addView(
+                text(label, 14.5f, ThemeTokens.TEXT_SUB),
+                LinearLayout.LayoutParams(dp(84), WRAP_CONTENT)
+            )
+            addView(
+                inputView,
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(8) }
+            )
+        }
+    }
 
     private fun buildDetailValueRow(
         label: String,
         maskedValue: String,
-        copyable: Boolean
+        copyable: Boolean,
+        dimmed: Boolean = false
     ): LinearLayout {
         val canCopy = copyable && maskedValue != SensitiveUiText.MISSING
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(48)
+            minimumHeight = dp(54)
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            alpha = if (dimmed) 0.55f else 1f
             if (canCopy) {
                 isClickable = true
                 isFocusable = true
-                contentDescription = "$label，已脱敏，轻触复制脱敏值"
-                MotionSpec.attachPressPhysics(this, pressedScale = 0.97f)
+                contentDescription = "$label，$maskedValue，轻触复制"
+                MotionSpec.attachPressPhysics(this, pressedScale = 0.985f, haptic = false)
                 setOnClickListener {
                     AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     clipboard?.setPrimaryClip(ClipData.newPlainText(label, maskedValue))
-                    toast("${label}脱敏值已复制")
+                    toast("已复制${label}")
                 }
             }
             addView(
-                text(label, 12.5f, ThemeTokens.TEXT_SUB),
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                text(label, 14.5f, ThemeTokens.TEXT_SUB),
+                LinearLayout.LayoutParams(dp(84), WRAP_CONTENT)
             )
             addView(
                 TextView(context).apply {
                     text = maskedValue
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                    typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                    gravity = Gravity.END
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
                     setTextColor(if (maskedValue == SensitiveUiText.MISSING) ThemeTokens.TEXT_SUB else ThemeTokens.TEXT_BODY)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 },
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(16) }
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(12) }
             )
-            if (canCopy) {
-                addView(
-                    text("复制", 11f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD),
-                    LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) }
-                )
-            }
         }
     }
 
@@ -2157,86 +1986,14 @@ internal class VehicleManagementScreens(
         initialValue: String,
         onChanged: (String) -> Unit
     ): Pair<LinearLayout, () -> String> {
-        var currentVal = formatAuthTime(initialValue).takeUnless { it == "--" }.orEmpty()
-        val cal = Calendar.getInstance()
-        runCatching {
-            val parts = currentVal.split(" ")
-            if (parts.isNotEmpty() && parts[0].contains("-")) {
-                val d = parts[0].split("-")
-                if (d.size == 3) {
-                    cal.set(Calendar.YEAR, d[0].toInt())
-                    cal.set(Calendar.MONTH, d[1].toInt() - 1)
-                    cal.set(Calendar.DAY_OF_MONTH, d[2].toInt())
-                }
-            }
-            if (parts.size >= 2 && parts[1].contains(":")) {
-                val t = parts[1].split(":")
-                if (t.size >= 2) {
-                    cal.set(Calendar.HOUR_OF_DAY, t[0].toInt())
-                    cal.set(Calendar.MINUTE, t[1].toInt())
-                }
-            }
-        }
-
-        val outer = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        val valueTv = TextView(context).apply {
-            text = currentVal.ifBlank { hint }
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setTextColor(if (currentVal.isNotBlank()) ThemeTokens.TEXT_PRIMARY else HINT_COLOR)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        }
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(10), 0, dp(10))
-            addView(valueTv, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(
-                AppIconView(context, AppIconType.CALENDAR, ThemeTokens.TEXT_SUB),
-                LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginStart = dp(8) }
-            )
-        }
-        val underline = View(context).apply { setBackgroundColor(ThemeTokens.DIVIDER) }
-
-        MotionSpec.attachPressPhysics(outer, pressedScale = 0.985f)
-        outer.setOnClickListener {
-            DatePickerDialog(
-                context,
-                android.R.style.Theme_DeviceDefault_Dialog_Alert,
-                { _, year, month, day ->
-                    cal.set(Calendar.YEAR, year)
-                    cal.set(Calendar.MONTH, month)
-                    cal.set(Calendar.DAY_OF_MONTH, day)
-                    TimePickerDialog(
-                        context,
-                        android.R.style.Theme_DeviceDefault_Dialog_Alert,
-                        { _, hour, minute ->
-                            cal.set(Calendar.HOUR_OF_DAY, hour)
-                            cal.set(Calendar.MINUTE, minute)
-                            val formatted = String.format(
-                                Locale.US,
-                                "%04d-%02d-%02d %02d:%02d",
-                                year, month + 1, day, hour, minute
-                            )
-                            currentVal = formatted
-                            valueTv.text = formatted
-                            valueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
-                            onChanged(formatted)
-                        },
-                        cal.get(Calendar.HOUR_OF_DAY),
-                        cal.get(Calendar.MINUTE),
-                        true
-                    ).show()
-                },
-                cal.get(Calendar.YEAR),
-                cal.get(Calendar.MONTH),
-                cal.get(Calendar.DAY_OF_MONTH)
-            ).show()
-        }
-
-        outer.addView(row, lp())
-        outer.addView(underline, lp(height = dpF(0.8f).roundToInt().coerceAtLeast(1)))
-        return outer to { currentVal }
+        val cleaned = formatAuthTime(initialValue).takeUnless { it == "--" }.orEmpty()
+        return AppComponents.createDateTimePickerField(
+            context = context,
+            hint = hint,
+            initialValue = cleaned,
+            mode = DateTimeMode.DATE_TIME_MINUTE,
+            onValueChanged = onChanged
+        )
     }
 
     private fun createPasswordToggleUnderlineInput(

@@ -2,9 +2,7 @@ package com.chery.carplus.ui
 
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
-import android.app.DatePickerDialog
 import android.app.Dialog
-import android.app.TimePickerDialog
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
@@ -51,9 +49,13 @@ object ThemeTokens {
 }
 
 enum class DateTimeMode {
-    DATE_TIME,
+    YEAR_MONTH,
     DATE,
-    TIME
+    DATE_HOUR,
+    DATE_TIME,
+    DATE_TIME_MINUTE,
+    TIME,
+    TIME_SECONDS
 }
 
 enum class ButtonStyle {
@@ -378,42 +380,26 @@ object AppComponents {
     }
 
     /**
-     * Borderless underline Date/Time selector row backed by native dark DatePickerDialog / TimePickerDialog.
-     * Returns Pair(rowView, valueProvider).
+     * Borderless underline Date/Time selector row backed by our unified dark
+     * [WheelDateTimePicker] bottom sheet. Returns Pair(rowView, valueProvider).
      */
     fun createDateTimePickerField(
         context: Context,
         hint: String,
         initialValue: String = "",
         mode: DateTimeMode = DateTimeMode.DATE_TIME,
+        title: String? = null,
         onValueChanged: (String) -> Unit = {}
     ): Pair<LinearLayout, () -> String> {
         var currentValue = initialValue.trim()
-        val cal = Calendar.getInstance()
-
-        // Parse initialValue if present so picker opens on that date/time
-        runCatching {
-            val parts = currentValue.split(" ")
-            if (mode != DateTimeMode.TIME && parts.isNotEmpty() && parts[0].contains("-")) {
-                val d = parts[0].split("-")
-                if (d.size == 3) {
-                    cal.set(Calendar.YEAR, d[0].toInt())
-                    cal.set(Calendar.MONTH, d[1].toInt() - 1)
-                    cal.set(Calendar.DAY_OF_MONTH, d[2].toInt())
-                }
-            }
-            val timePart = when {
-                mode == DateTimeMode.TIME -> currentValue
-                parts.size >= 2 -> parts[1]
-                else -> ""
-            }
-            if (timePart.contains(":")) {
-                val t = timePart.split(":")
-                if (t.size >= 2) {
-                    cal.set(Calendar.HOUR_OF_DAY, t[0].toInt())
-                    cal.set(Calendar.MINUTE, t[1].toInt())
-                }
-            }
+        val wheelMode = when (mode) {
+            DateTimeMode.YEAR_MONTH -> WheelDateTimeMode.YEAR_MONTH
+            DateTimeMode.DATE -> WheelDateTimeMode.DATE
+            DateTimeMode.DATE_HOUR -> WheelDateTimeMode.DATE_HOUR
+            DateTimeMode.DATE_TIME -> WheelDateTimeMode.DATE_TIME_SECONDS
+            DateTimeMode.DATE_TIME_MINUTE -> WheelDateTimeMode.DATE_TIME
+            DateTimeMode.TIME -> WheelDateTimeMode.TIME_HM
+            DateTimeMode.TIME_SECONDS -> WheelDateTimeMode.TIME_HMS
         }
 
         val outer = LinearLayout(context).apply {
@@ -437,7 +423,7 @@ object AppComponents {
         row.addView(
             AppIconView(
                 context,
-                if (mode == DateTimeMode.TIME) AppIconType.CLOCK else AppIconType.CALENDAR,
+                if (mode == DateTimeMode.TIME || mode == DateTimeMode.TIME_SECONDS) AppIconType.CLOCK else AppIconType.CALENDAR,
                 ThemeTokens.TEXT_SUB
             ),
             LinearLayout.LayoutParams(dp(context, 18f), dp(context, 18f)).apply {
@@ -450,59 +436,18 @@ object AppComponents {
             setBackgroundColor(ThemeTokens.DIVIDER)
         }
 
-        fun applyFormatted(formatted: String) {
-            currentValue = formatted
-            valueView.text = formatted
-            valueView.setTextColor(ThemeTokens.TEXT_PRIMARY)
-            onValueChanged(formatted)
-        }
-
-        fun openTimePicker(y: Int, m: Int, d: Int) {
-            TimePickerDialog(
-                context,
-                android.R.style.Theme_DeviceDefault_Dialog_Alert,
-                { _, hour, minute ->
-                    cal.set(Calendar.HOUR_OF_DAY, hour)
-                    cal.set(Calendar.MINUTE, minute)
-                    val formatted = if (mode == DateTimeMode.TIME) {
-                        String.format(Locale.US, "%02d:%02d", hour, minute)
-                    } else {
-                        String.format(Locale.US, "%04d-%02d-%02d %02d:%02d:00", y, m + 1, d, hour, minute)
-                    }
-                    applyFormatted(formatted)
-                },
-                cal.get(Calendar.HOUR_OF_DAY),
-                cal.get(Calendar.MINUTE),
-                true
-            ).show()
-        }
-
         MotionSpec.attachPressPhysics(outer, pressedScale = 0.985f)
         outer.setOnClickListener {
-            if (mode == DateTimeMode.TIME) {
-                openTimePicker(
-                    cal.get(Calendar.YEAR),
-                    cal.get(Calendar.MONTH),
-                    cal.get(Calendar.DAY_OF_MONTH)
-                )
-            } else {
-                DatePickerDialog(
-                    context,
-                    android.R.style.Theme_DeviceDefault_Dialog_Alert,
-                    { _, year, month, day ->
-                        cal.set(Calendar.YEAR, year)
-                        cal.set(Calendar.MONTH, month)
-                        cal.set(Calendar.DAY_OF_MONTH, day)
-                        if (mode == DateTimeMode.DATE) {
-                            applyFormatted(String.format(Locale.US, "%04d-%02d-%02d", year, month + 1, day))
-                        } else {
-                            openTimePicker(year, month, day)
-                        }
-                    },
-                    cal.get(Calendar.YEAR),
-                    cal.get(Calendar.MONTH),
-                    cal.get(Calendar.DAY_OF_MONTH)
-                ).show()
+            WheelDateTimePicker.show(
+                context = context,
+                mode = wheelMode,
+                title = title,
+                initialValue = currentValue
+            ) { formatted ->
+                currentValue = formatted
+                valueView.text = formatted
+                valueView.setTextColor(ThemeTokens.TEXT_PRIMARY)
+                onValueChanged(formatted)
             }
         }
 
@@ -516,6 +461,73 @@ object AppComponents {
         )
 
         return outer to { currentValue }
+    }
+
+    /**
+     * Borderless underline Date/Time Range selector row backed by [WheelDateTimePicker.showRange].
+     */
+    fun createDateTimeRangePickerField(
+        context: Context,
+        hint: String,
+        initialStart: String = "",
+        initialEnd: String = "",
+        mode: WheelDateTimeMode = WheelDateTimeMode.DATE_TIME_RANGE,
+        title: String? = null,
+        onRangeChanged: (start: String, end: String) -> Unit = { _, _ -> }
+    ): Pair<LinearLayout, () -> Pair<String, String>> {
+        var curStart = initialStart.trim()
+        var curEnd = initialEnd.trim()
+
+        fun formatSummary(): String = if (curStart.isNotBlank() && curEnd.isNotBlank()) {
+            "$curStart ~ $curEnd"
+        } else {
+            ""
+        }
+
+        val outer = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val valueView = TextView(context).apply {
+            val summary = formatSummary()
+            text = summary.ifBlank { hint }
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+            setTextColor(if (summary.isNotBlank()) ThemeTokens.TEXT_PRIMARY else Color.parseColor("#5C606A"))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(context, 10f), 0, dp(context, 10f))
+        }
+        row.addView(valueView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(
+            AppIconView(context, AppIconType.CALENDAR, ThemeTokens.TEXT_SUB),
+            LinearLayout.LayoutParams(dp(context, 18f), dp(context, 18f)).apply { marginStart = dp(context, 8f) }
+        )
+
+        val linePx = (0.8f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
+        val underline = View(context).apply { setBackgroundColor(ThemeTokens.DIVIDER) }
+
+        MotionSpec.attachPressPhysics(outer, pressedScale = 0.985f)
+        outer.setOnClickListener {
+            WheelDateTimePicker.showRange(
+                context = context,
+                mode = mode,
+                title = title,
+                initialStart = curStart,
+                initialEnd = curEnd
+            ) { s, e ->
+                curStart = s
+                curEnd = e
+                valueView.text = formatSummary()
+                valueView.setTextColor(ThemeTokens.TEXT_PRIMARY)
+                onRangeChanged(s, e)
+            }
+        }
+
+        outer.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        outer.addView(underline, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, linePx))
+        return outer to { curStart to curEnd }
     }
 
     /**

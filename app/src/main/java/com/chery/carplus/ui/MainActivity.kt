@@ -228,6 +228,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var blePermissionsRequested = false
     private var provisioningJob: Job? = null
     private var provisioningActive = false
+    private var lastManualBleTapMs = 0L
     private var smsCountdownJob: Job? = null
     private var telemetryJob: Job? = null
     private var periodicRefreshJob: Job? = null
@@ -405,6 +406,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             },
             liveAddressLabelProvider = { currentStreetLabel() },
+            deviceLocationProvider = { getBestDeviceGcj02Location() },
             onVehiclesChanged = { handleVehiclesChanged() }
         )
 
@@ -1785,38 +1787,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         homeHeaderView = header
         page.addView(header)
 
-        // Stable top-left display-only Bluetooth channel icon. The vehicle identity and
-        // short states stay in the same left rail so they never compete with the icon.
-        val identityRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.TOP
-        }
-        header.addView(identityRow, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-
-        val channelBadgeWrap = FrameLayout(this).apply {
-            isClickable = false
-            isFocusable = false
-        }
-        channelBadgeIcon = AppIconView(this, AppIconType.BLUETOOTH_ICON, TEXT_SECONDARY).apply {
-            contentDescription = "蓝牙通道未连接，当前使用远程网络"
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-        }
-        channelBadgeWrap.addView(
-            channelBadgeIcon,
-            FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER)
-        )
-        identityRow.addView(channelBadgeWrap, LinearLayout.LayoutParams(dp(28), dp(28)).apply {
-            topMargin = dp(2)
-        })
-
         val leftCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
-        identityRow.addView(leftCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-            marginStart = dp(2)
-        })
+        header.addView(leftCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
-        // Row 1: Vehicle Title + downward chevron (anchored dropdown popover switcher)
+        // Row 1: Vehicle Title + downward chevron (vehicle switcher) | Interactive Bluetooth scan button on the right
+        val titleLineRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        leftCol.addView(titleLineRow)
+
         val titleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1826,27 +1808,51 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             MotionSpec.attachPressPhysics(this, pressedScale = 0.96f)
             setOnClickListener { showVehicleSwitcherPopover(this) }
         }
-        leftCol.addView(titleRow)
+        titleLineRow.addView(titleRow)
 
+        val initialCachedModel = VehicleDisplayNames.normalizeCachedName(
+            uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty(),
+            uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
+        )
         vehicleNameView = text(
-            uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "我的座驾" },
+            initialCachedModel,
             24f,
             TEXT_PRIMARY,
             Typeface.BOLD
         ).apply {
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            maxWidth = dp(220)
+            maxWidth = dp(200)
         }
         titleRow.addView(vehicleNameView)
 
         val chevronDown = AppIconView(this, AppIconType.CHEVRON_DOWN, TEXT_PRIMARY)
         titleRow.addView(chevronDown, LinearLayout.LayoutParams(dp(18), dp(18)).apply {
-            marginStart = dp(6)
+            marginStart = dp(5)
             topMargin = dp(2)
         })
 
-        // Row 2: Fuel progress bar + tappable % <-> km toggle + license plate badge
+        // Interactive Bluetooth scan/connect button placed directly to the right of the vehicle title
+        val channelBadgeWrap = FrameLayout(this).apply {
+            isClickable = true
+            isFocusable = true
+            contentDescription = "蓝牙连接"
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.88f, haptic = false)
+            setOnClickListener { triggerManualBleScanAndConnect(this) }
+        }
+        channelBadgeIcon = AppIconView(this, AppIconType.BLUETOOTH_ICON, TEXT_SECONDARY).apply {
+            contentDescription = "蓝牙通道未连接，轻触扫描连接"
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        }
+        channelBadgeWrap.addView(
+            channelBadgeIcon,
+            FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER)
+        )
+        titleLineRow.addView(channelBadgeWrap, LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+            marginStart = dp(4)
+        })
+
+        // Row 2: Fuel progress bar + tappable % <-> km toggle + license plate badge (or setup guide)
         val energyRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1877,13 +1883,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         plateBadgeView = text("", 11f, Color.rgb(218, 222, 232), Typeface.BOLD).apply {
             background = rounded(Color.rgb(38, 41, 48), 5f, Color.rgb(66, 70, 82), 0.7f)
-            setPadding(dp(6), dp(2), dp(6), dp(2))
+            setPadding(dp(7), dp(2), dp(7), dp(2))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             visibility = View.GONE
             isClickable = true
             isFocusable = true
-            setOnClickListener { managementScreens.openEditVehicleScreen() }
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.94f, haptic = false)
+            setOnClickListener {
+                val curPlate = firstNonBlank(
+                    activeTelemetry?.licensePlate.orEmpty(),
+                    uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
+                )
+                managementScreens.openVehicleDetailScreen(startInEditMode = curPlate.isBlank())
+            }
             layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
                 marginStart = dp(6)
             }
@@ -3432,15 +3445,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun refreshHomeHeaderAndRows() {
         if (currentScreen != Screen.HOME) return
         val telemetry = activeTelemetry
-        val modelName = uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "我的座驾" }
         val plateNo = firstNonBlank(
             telemetry?.licensePlate.orEmpty(),
             uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
         )
+        val modelName = VehicleDisplayNames.normalizeCachedName(
+            uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty(),
+            plateNo
+        )
         vehicleNameView?.text = modelName
+        val hasBound = currentProfile?.vin?.isNotBlank() == true || profileStore.getActiveProfile().vin.isNotBlank()
         plateBadgeView?.apply {
             if (plateNo.isNotBlank()) {
                 text = plateNo
+                setTextColor(Color.rgb(218, 222, 232))
+                background = rounded(Color.rgb(38, 41, 48), 5f, Color.rgb(66, 70, 82), 0.7f)
+                visibility = View.VISIBLE
+            } else if (hasBound) {
+                text = "设置车牌"
+                setTextColor(ThemeTokens.ACCENT_LIGHT)
+                background = rounded(Color.argb(34, 61, 155, 255), 5f, Color.argb(90, 61, 155, 255), 0.7f)
                 visibility = View.VISIBLE
             } else {
                 visibility = View.GONE
@@ -3606,8 +3630,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val distM = haversineDistanceMeters(phoneGcj.first, phoneGcj.second, vehicleGcjLat, vehicleGcjLon)
         if (distM.isNaN() || distM.isInfinite() || distM < 0.0) return null
         return when {
-            distM < 1000.0 -> "直线距离 ${distM.roundToInt()} 米"
-            else -> String.format(Locale.US, "直线距离 %.1f 公里", distM / 1000.0)
+            distM < 1000.0 -> "距 ${distM.roundToInt()} 米"
+            else -> String.format(Locale.US, "距 %.1f 公里", distM / 1000.0)
         }
     }
 
@@ -4799,6 +4823,52 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     // BLE Proximity & Live Response Callbacks
     // =========================================================================
 
+    private fun triggerManualBleScanAndConnect(triggerView: View) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastManualBleTapMs < 3000L) return
+        lastManualBleTapMs = now
+
+        AppHaptics.perform(triggerView, HapticLevel.LIGHT_TICK)
+        if (bleConnected || bleController.isSessionReady()) {
+            val rssi = bleController.lastProximityRssi?.let { " ($it dBm)" }.orEmpty()
+            showHomeStatus("手机钥匙已连接 (BLE 直连)$rssi")
+            return
+        }
+        val profile = profileStore.getActiveProfile()
+        if (profile.vin.isBlank()) {
+            showHomeStatus("请先绑定车辆")
+            return
+        }
+        if (!ensureBlePermissions()) return
+
+        val manager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = manager?.adapter
+        if (adapter == null) {
+            showHomeStatus("当前设备不支持蓝牙")
+            return
+        }
+        if (!adapter.isEnabled) {
+            requestBluetoothEnable()
+            return
+        }
+
+        channelBadgeIcon?.animate()?.cancel()
+        channelBadgeIcon?.apply {
+            alpha = 0.45f
+            animate().alpha(1f).setDuration(380L).start()
+        }
+        bleController.startAutoProximityWatch(
+            profileProvider = { profileStore.getActiveProfile() }
+        ) { requestBluetoothEnable() }
+        showHomeStatus(
+            if (bleNearby || bleController.isVehicleNearby) {
+                "正在连接附近车辆蓝牙..."
+            } else {
+                "正在扫描并连接车辆蓝牙..."
+            }
+        )
+    }
+
     private fun startProximityWhenPermitted() {
         if (currentScreen != Screen.HOME) return
         if (!ensureBlePermissions()) return
@@ -5331,12 +5401,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun isValidMobile(mobile: String): Boolean = MOBILE_REGEX.matches(mobile)
 
-    private fun vehicleModelName(vehicle: VehicleSummary): String = firstNonBlank(
-        vehicle.standardName,
-        vehicle.vehicleName,
-        vehicle.seriesName,
-        vehicle.vehicleCode
-    ).ifBlank { "我的座驾" }
+    private fun vehicleModelName(vehicle: VehicleSummary): String =
+        VehicleDisplayNames.resolve(vehicle)
 
     private fun hasCompleteKeyMaterial(profile: VehicleProfile): Boolean = runCatching {
         profile.rootKeyBytes().size == 16 &&
