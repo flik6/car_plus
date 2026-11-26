@@ -107,26 +107,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val label: String,
         val icon: AppIconType
     ) {
-        LOCK("LOCK", "锁车", AppIconType.LOCK_CLOSED),
+        LOCK("LOCK", "锁车/解锁", AppIconType.LOCK_CLOSED),
         CLIMATE("CLIMATE", "空调", AppIconType.FAN_BLADE),
         FLASH("FLASH", "寻车", AppIconType.BOLT_FLASH),
         TRUNK("TRUNK", "后备箱", AppIconType.TRUNK_OPEN),
-        TAILGATE_OPEN("TAILGATE_OPEN", "开尾门", AppIconType.TRUNK_OPEN),
-        TAILGATE_CLOSE("TAILGATE_CLOSE", "关尾门", AppIconType.TAILGATE_CLOSE),
         ENGINE("ENGINE", "启停", AppIconType.ENGINE_POWER),
-        WINDOW_OPEN("WINDOW_OPEN", "开窗", AppIconType.WINDOW_OPEN),
-        WINDOW_VENT("WINDOW_VENT", "透气", AppIconType.WINDOW_VENT),
-        WINDOW_CLOSE("WINDOW_CLOSE", "关窗", AppIconType.WINDOW_CLOSE),
-        SUNROOF_OPEN("SUNROOF_OPEN", "开天窗", AppIconType.SUNROOF_OPEN),
-        SUNROOF_CLOSE("SUNROOF_CLOSE", "关天窗", AppIconType.SUNROOF_CLOSE);
+        WINDOW("WINDOW", "车窗", AppIconType.WINDOW_OPEN),
+        WINDOW_VENT("WINDOW_VENT", "车窗透气", AppIconType.WINDOW_VENT),
+        SUNROOF("SUNROOF", "天窗", AppIconType.SUNROOF_OPEN),
+        SUNROOF_TILT("SUNROOF_TILT", "天窗翘起", AppIconType.SUNROOF_TILT);
 
         companion object {
             val DEFAULT_LIST: List<QuickActionId> = listOf(LOCK, CLIMATE, FLASH, TRUNK)
 
             fun fromId(raw: String): QuickActionId? {
-                val normalized = raw.trim().uppercase(Locale.US)
-                if (normalized == "SUNROOF") return SUNROOF_OPEN
-                return values().firstOrNull { it.id == normalized }
+                return when (raw.trim().uppercase(Locale.US)) {
+                    "TAILGATE_OPEN", "TAILGATE_CLOSE" -> TRUNK
+                    "WINDOW_OPEN", "WINDOW_CLOSE" -> WINDOW
+                    "SUNROOF_OPEN", "SUNROOF_CLOSE", "SUNROOF" -> SUNROOF
+                    else -> values().firstOrNull { it.id == raw.trim().uppercase(Locale.US) }
+                }
             }
         }
     }
@@ -245,7 +245,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var locationOverlayView: View? = null
     private var locationOverlayDestroy: (() -> Unit)? = null
     private val locationAddressObservers = linkedSetOf<(String) -> Unit>()
-    private var refreshVehicleInfo: (() -> Unit)? = null
     private var messagesOverlayView: View? = null
     private val subpageOverlayStack = ArrayDeque<Pair<View, (() -> Unit)?>>()
     private var settingsScreen: SettingsScreen? = null
@@ -359,7 +358,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             },
             onVehicleUnbound = { unboundVin -> handleVehicleUnbound(unboundVin) },
-            onStatusMessage = { showHomeStatus(it) }
+            onStatusMessage = { showHomeStatus(it) },
+            vehicleLiveSpecsProvider = { vin -> buildActiveVehicleLiveSpecs(vin) },
+            onOpenVehicleUpgrade = { featureSheets.showVehicleUpgradeSheet() }
         )
         featureSheets = VehicleFeatureSheets(
             context = this,
@@ -1560,7 +1561,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             if (current.accessToken != profile.accessToken ||
                 !current.vin.equals(profile.vin, ignoreCase = true)) return@launch
             managementScreens.rememberVehicleSummaries(vehicles, profile.accessToken)
-            refreshVehicleInfo?.invoke()
+            managementScreens.refreshOpenVehicleInfo()
             val matched = vehicles.firstOrNull { it.vin.equals(profile.vin, ignoreCase = true) }
                 ?: vehicles.firstOrNull()
             matched?.isTracksOpen?.let { cloudTripTrackEnabled = it }
@@ -2169,129 +2170,30 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         managementScreens.openDriversScreen()
     }
 
-    private fun showVehicleInfoSubpageScreen() {
+    private fun buildActiveVehicleLiveSpecs(vin: String): List<Pair<String, String>> {
         val profile = profileStore.getActiveProfile()
+        if (!profile.vin.equals(vin, ignoreCase = true)) return emptyList()
         val t = activeTelemetry
-        val vehicle = managementScreens.cachedVehicleSummary(profile.vin)
-        val modelName = vehicle?.let { vehicleModelName(it) }
-            ?: uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "我的座驾" }
-        val plateNo = vehicle?.plateNo?.takeIf { it.isNotBlank() }
-            ?: uiPrefs.getString(KEY_PLATE_NO, "").orEmpty().ifBlank { "未设置" }
-        val odoStr = t?.odometerKm?.takeIf { it > 0.0 }?.let { "${String.format(Locale.US, "%,d", it.roundToInt())} km" }
-            ?: t?.odometer?.takeIf { it.isNotBlank() }?.let { "$it km" }
-            ?: "--"
+        val odoStr = t?.odometerKm?.takeIf { it > 0.0 }?.let {
+            "${String.format(Locale.US, "%,d", it.roundToInt())} km"
+        } ?: t?.odometer?.takeIf { it.isNotBlank() }?.let { "$it km" } ?: "--"
         val tyreStr = formatTyreSummary(t).let { if (it == "--") "--" else "$it bar" }
         val voltStr = t?.batteryVoltage?.let { String.format(Locale.US, "%.2f V", it) } ?: "--"
         val bleNameStr = profile.bleName.ifBlank { "--" }
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(BG_HOME)
-            isClickable = true
-            isFocusable = true
-        }
-        root.addView(
-            AppComponents.createTopBar(
-                context = this,
-                title = "车辆信息",
-                onBack = { popSubpageOverlay() },
-                rightText = "编辑",
-                onRightClick = {
-                    managementScreens.openEditVehicleScreen(onUpdated = { refreshVehicleInfo?.invoke() })
-                }
-            ),
-            lp()
-        )
-
-        val scroll = ScrollView(this).apply {
-            isFillViewport = true
-            isVerticalScrollBarEnabled = false
-        }
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(4), 0, dp(32))
-        }
-        scroll.addView(content, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-
-        content.addView(AppComponents.createSectionHeader(this, "基本信息"), lp())
-        val basicSpecs = listOf(
-            "车型名称" to modelName,
-            "车牌号" to plateNo,
+        return listOf(
             "总里程" to odoStr,
             "四轮胎压" to tyreStr,
             "蓄电池电压" to voltStr,
             "蓝牙钥匙名称" to bleNameStr
         )
-        fun addSpecRows(parent: LinearLayout, specs: List<Pair<String, String>>) {
-            specs.forEachIndexed { idx, (label, value) ->
-                parent.addView(
-                    AppComponents.createListRow(
-                        context = this,
-                        icon = null,
-                        title = label,
-                        trailingText = value,
-                        showChevron = false,
-                        onClick = null
-                    ),
-                    lp()
-                )
-                if (idx < specs.lastIndex) {
-                    parent.addView(AppComponents.createHairline(this, startInsetDp = 20))
-                }
-            }
-        }
-        addSpecRows(content, basicSpecs)
+    }
 
-        content.addView(AppComponents.createSectionHeader(this, "车辆资料"), lp())
-        val identityRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(identityRows, lp())
-        val refreshIdentityRows: () -> Unit = {
-            val current = profileStore.getActiveProfile()
-            if (current.accessToken == profile.accessToken && current.vin.equals(profile.vin, ignoreCase = true)) {
-                val summary = managementScreens.cachedVehicleSummary(profile.vin)
-                identityRows.removeAllViews()
-                addSpecRows(
-                    identityRows,
-                    listOf(
-                        "车架号" to SensitiveUiText.identifier(profile.vin),
-                        "发动机号" to SensitiveUiText.identifier(summary?.engineNumber),
-                        "ICCID" to SensitiveUiText.identifier(summary?.iccid),
-                        "SN 码" to SensitiveUiText.identifier(summary?.sn),
-                        "车主姓名" to SensitiveUiText.personName(summary?.hostName),
-                        "购车时间" to SensitiveUiText.year(summary?.purchaseTime)
-                    )
-                )
-            }
-        }
-        refreshIdentityRows()
-
-        content.addView(AppComponents.createSectionHeader(this, "车辆管理与系统"), lp())
-        content.addView(
-            AppComponents.createListRow(
-                context = this,
-                icon = AppIconType.CAR_CONTROLS,
-                title = "车辆管理",
-                subtitle = "查看硬件档案、修改车牌与实名认证状态",
-                showChevron = true
-            ) { managementScreens.openMyVehiclesScreen() },
-            lp()
+    private fun showVehicleInfoSubpageScreen() {
+        val profile = profileStore.getActiveProfile()
+        managementScreens.openVehicleInfoScreen(
+            initialVehicle = managementScreens.cachedVehicleSummary(profile.vin),
+            vinFallback = profile.vin
         )
-        content.addView(AppComponents.createHairline(this, startInsetDp = 58))
-        content.addView(
-            AppComponents.createListRow(
-                context = this,
-                icon = AppIconType.INFO_CIRCLE,
-                title = "车辆升级",
-                showChevron = true
-            ) { featureSheets.showVehicleUpgradeSheet() },
-            lp()
-        )
-
-        refreshVehicleInfo = refreshIdentityRows
-        pushSubpageOverlay(root) {
-            if (refreshVehicleInfo === refreshIdentityRows) refreshVehicleInfo = null
-        }
     }
 
     private fun showLocationSubpageScreen() {
@@ -2804,17 +2706,50 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
     }
 
+    private fun areWindowsOpen(t: VehicleTelemetry?): Boolean {
+        if (t == null) return false
+        return isDoorOpenToken(t.frontLeftWindowState.ifBlank { t.windowStates["frontLeft"].orEmpty() }) ||
+            isDoorOpenToken(t.frontRightWindowState.ifBlank { t.windowStates["frontRight"].orEmpty() }) ||
+            isDoorOpenToken(t.backLeftWindowState.ifBlank { t.windowStates["backLeft"].orEmpty() }) ||
+            isDoorOpenToken(t.backRightWindowState.ifBlank { t.windowStates["backRight"].orEmpty() })
+    }
+
+    private fun isSkylightTilted(skylightState: String?): Boolean =
+        skylightState.orEmpty().trim().lowercase(Locale.US) in setOf("12", "tilt", "cock")
+
     private fun isQuickActionActive(action: QuickActionId): Boolean {
         val t = activeTelemetry
         return when (action) {
             QuickActionId.LOCK -> !(t?.doorLocked ?: (carVisual?.vehicleLocked ?: true))
             QuickActionId.CLIMATE -> t?.acOn == true
-            QuickActionId.TRUNK, QuickActionId.TAILGATE_OPEN -> t?.trunkOpen == true
-            QuickActionId.TAILGATE_CLOSE -> t?.trunkOpen == false
+            QuickActionId.TRUNK -> t?.trunkOpen == true
             QuickActionId.ENGINE -> t?.engineRunning == true
-            QuickActionId.SUNROOF_OPEN -> isSkylightOpen(t?.skylightState)
-            QuickActionId.SUNROOF_CLOSE -> t != null && !isSkylightOpen(t.skylightState)
+            QuickActionId.WINDOW -> areWindowsOpen(t)
+            QuickActionId.SUNROOF -> isSkylightOpen(t?.skylightState)
+            QuickActionId.SUNROOF_TILT -> isSkylightTilted(t?.skylightState)
             else -> false
+        }
+    }
+
+    private fun resolveQuickActionIcon(action: QuickActionId, active: Boolean): AppIconType = when (action) {
+        QuickActionId.LOCK -> if (active) AppIconType.LOCK_OPEN else AppIconType.LOCK_CLOSED
+        QuickActionId.TRUNK -> if (active) AppIconType.TAILGATE_CLOSE else AppIconType.TRUNK_OPEN
+        QuickActionId.ENGINE -> if (active) AppIconType.ENGINE_STOP else AppIconType.ENGINE_POWER
+        QuickActionId.WINDOW -> if (active) AppIconType.WINDOW_CLOSE else AppIconType.WINDOW_OPEN
+        QuickActionId.SUNROOF -> if (active) AppIconType.SUNROOF_CLOSE else AppIconType.SUNROOF_OPEN
+        else -> action.icon
+    }
+
+    private fun resolveQuickActionLabel(action: QuickActionId, active: Boolean, editMode: Boolean): String {
+        if (editMode) return action.label
+        return when (action) {
+            QuickActionId.LOCK -> if (active) "锁车" else "解锁"
+            QuickActionId.CLIMATE -> if (active) "关空调" else "空调"
+            QuickActionId.TRUNK -> if (active) "关后备箱" else "开后备箱"
+            QuickActionId.ENGINE -> if (active) "熄火" else "启动"
+            QuickActionId.WINDOW -> if (active) "关车窗" else "开车窗"
+            QuickActionId.SUNROOF -> if (active) "关天窗" else "开天窗"
+            else -> action.label
         }
     }
 
@@ -2849,8 +2784,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         gridHost.removeAllViews()
         quickDeckRowViews.clear()
-        val tileHeight = dp(76)
-        QuickActionId.values().toList().chunked(4).forEachIndexed { rowIdx, chunk ->
+        val tileHeight = dp(78)
+        QuickActionId.values().toList().chunked(3).forEachIndexed { rowIdx, chunk ->
             val rowView = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
             }
@@ -2858,16 +2793,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             chunk.forEachIndexed { colIdx, action ->
                 val isPinned = action in selectedSet
                 val isStateActive = isQuickActionActive(action)
-                val iconType = if (action == QuickActionId.LOCK && isStateActive && !quickDeckEditMode) {
-                    AppIconType.LOCK_OPEN
-                } else {
-                    action.icon
-                }
-                val tileLabel = if (action == QuickActionId.LOCK && isStateActive && !quickDeckEditMode) {
-                    "已解锁"
-                } else {
-                    action.label
-                }
+                val iconType = if (quickDeckEditMode) action.icon else resolveQuickActionIcon(action, isStateActive)
+                val tileLabel = resolveQuickActionLabel(action, isStateActive, quickDeckEditMode)
 
                 val btn = AppComponents.createControlIconButton(
                     context = this,
@@ -3013,13 +2940,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 dispatchSmartVehicleCommand("find_car", "闪灯鸣笛寻车")
             }
             QuickActionId.TRUNK -> {
-                dispatchSmartVehicleCommand("trunk_open", "开启后备箱")
-            }
-            QuickActionId.TAILGATE_OPEN -> {
-                dispatchSmartVehicleCommand("tailgate_open", "打开尾门")
-            }
-            QuickActionId.TAILGATE_CLOSE -> {
-                dispatchSmartVehicleCommand("tailgate_close", "关闭尾门")
+                if (activeTelemetry?.trunkOpen == true) {
+                    dispatchSmartVehicleCommand("tailgate_close", "关闭后备箱")
+                } else {
+                    dispatchSmartVehicleCommand("trunk_open", "开启后备箱")
+                }
             }
             QuickActionId.ENGINE -> {
                 if (activeTelemetry?.engineRunning == true) {
@@ -3028,20 +2953,25 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     dispatchSmartVehicleCommand("engine_start", "远程启动引擎")
                 }
             }
-            QuickActionId.WINDOW_OPEN -> {
-                dispatchSmartVehicleCommand("window_open", "车窗全开")
+            QuickActionId.WINDOW -> {
+                if (areWindowsOpen(activeTelemetry)) {
+                    dispatchSmartVehicleCommand("window_close", "关闭车窗")
+                } else {
+                    dispatchSmartVehicleCommand("window_open", "打开车窗")
+                }
             }
             QuickActionId.WINDOW_VENT -> {
                 dispatchSmartVehicleCommand("window_ventilate", "车窗透气")
             }
-            QuickActionId.WINDOW_CLOSE -> {
-                dispatchSmartVehicleCommand("window_close", "车窗全关")
+            QuickActionId.SUNROOF -> {
+                if (isSkylightOpen(activeTelemetry?.skylightState)) {
+                    dispatchSmartVehicleCommand("skylight_close", "关闭天窗")
+                } else {
+                    dispatchSmartVehicleCommand("skylight_open", "打开天窗")
+                }
             }
-            QuickActionId.SUNROOF_OPEN -> {
-                dispatchSmartVehicleCommand("skylight_open", "打开天窗")
-            }
-            QuickActionId.SUNROOF_CLOSE -> {
-                dispatchSmartVehicleCommand("skylight_close", "关闭天窗")
+            QuickActionId.SUNROOF_TILT -> {
+                dispatchSmartVehicleCommand("skylight_tilt", "天窗翘起")
             }
         }
     }
@@ -3052,7 +2982,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val acActive = telemetry?.acOn == true
         val trunkIsOpen = telemetry?.trunkOpen == true
         val engineRunningNow = telemetry?.engineRunning == true
+        val windowsOpenNow = areWindowsOpen(telemetry)
         val sunroofOpenNow = isSkylightOpen(telemetry?.skylightState)
+        val sunroofTiltedNow = isSkylightTilted(telemetry?.skylightState)
 
         quickActionIcons[QuickActionId.LOCK]?.apply {
             iconType = if (effectiveLocked) AppIconType.LOCK_CLOSED else AppIconType.LOCK_OPEN
@@ -3063,22 +2995,23 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             spinEnabled = acActive
         }
         quickActionIcons[QuickActionId.TRUNK]?.apply {
+            iconType = if (trunkIsOpen) AppIconType.TAILGATE_CLOSE else AppIconType.TRUNK_OPEN
             MotionSpec.animateIconTint(this, if (trunkIsOpen) ACCENT_BLUE else TEXT_PRIMARY)
-        }
-        quickActionIcons[QuickActionId.TAILGATE_OPEN]?.apply {
-            MotionSpec.animateIconTint(this, if (trunkIsOpen) ACCENT_BLUE else TEXT_PRIMARY)
-        }
-        quickActionIcons[QuickActionId.TAILGATE_CLOSE]?.apply {
-            MotionSpec.animateIconTint(this, if (telemetry?.trunkOpen == false) ACCENT_BLUE else TEXT_PRIMARY)
         }
         quickActionIcons[QuickActionId.ENGINE]?.apply {
+            iconType = if (engineRunningNow) AppIconType.ENGINE_STOP else AppIconType.ENGINE_POWER
             MotionSpec.animateIconTint(this, if (engineRunningNow) ACCENT_BLUE else TEXT_PRIMARY)
         }
-        quickActionIcons[QuickActionId.SUNROOF_OPEN]?.apply {
+        quickActionIcons[QuickActionId.WINDOW]?.apply {
+            iconType = if (windowsOpenNow) AppIconType.WINDOW_CLOSE else AppIconType.WINDOW_OPEN
+            MotionSpec.animateIconTint(this, if (windowsOpenNow) ACCENT_BLUE else TEXT_PRIMARY)
+        }
+        quickActionIcons[QuickActionId.SUNROOF]?.apply {
+            iconType = if (sunroofOpenNow) AppIconType.SUNROOF_CLOSE else AppIconType.SUNROOF_OPEN
             MotionSpec.animateIconTint(this, if (sunroofOpenNow) ACCENT_BLUE else TEXT_PRIMARY)
         }
-        quickActionIcons[QuickActionId.SUNROOF_CLOSE]?.apply {
-            MotionSpec.animateIconTint(this, if (telemetry != null && !sunroofOpenNow) ACCENT_BLUE else TEXT_PRIMARY)
+        quickActionIcons[QuickActionId.SUNROOF_TILT]?.apply {
+            MotionSpec.animateIconTint(this, if (sunroofTiltedNow) ACCENT_BLUE else TEXT_PRIMARY)
         }
     }
 
@@ -3178,7 +3111,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     activeTelemetry?.licensePlate.orEmpty(),
                     uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
                 )
-                managementScreens.openVehicleDetailScreen(startInEditMode = curPlate.isBlank())
+                val active = profileStore.getActiveProfile()
+                managementScreens.openVehicleInfoScreen(
+                    initialVehicle = managementScreens.cachedVehicleSummary(active.vin),
+                    vinFallback = active.vin,
+                    startInEditMode = curPlate.isBlank()
+                )
             }
         }
         footerBox.addView(plateBadgeView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
@@ -4588,6 +4526,30 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 "skylight_open" -> current.copy(skylightState = "open")
                 "skylight_tilt" -> current.copy(skylightState = "tilt")
                 "skylight_close" -> current.copy(skylightState = "closed")
+                "window_open", "window_ventilate" -> current.copy(
+                    frontLeftWindowState = "open",
+                    frontRightWindowState = "open",
+                    backLeftWindowState = "open",
+                    backRightWindowState = "open",
+                    windowStates = current.windowStates + mapOf(
+                        "frontLeft" to "open",
+                        "frontRight" to "open",
+                        "backLeft" to "open",
+                        "backRight" to "open"
+                    )
+                )
+                "window_close" -> current.copy(
+                    frontLeftWindowState = "closed",
+                    frontRightWindowState = "closed",
+                    backLeftWindowState = "closed",
+                    backRightWindowState = "closed",
+                    windowStates = current.windowStates + mapOf(
+                        "frontLeft" to "closed",
+                        "frontRight" to "closed",
+                        "backLeft" to "closed",
+                        "backRight" to "closed"
+                    )
+                )
                 "engine_start" -> current.copy(engineRunning = true, engineState = "1")
                 "engine_stop" -> current.copy(engineRunning = false, engineState = "0")
                 else -> current

@@ -42,10 +42,10 @@ import kotlin.math.roundToInt
  * information hierarchy, consistent entry-to-topbar naming, and default-collapsed danger zones:
  *
  * 1. 「驾驶员」 (Level 1: 1 clean card per driver) -> 「驾驶员详情」 (Level 2: enable toggle 905,
- *    inline edit 903, operation records 137, default-hidden danger revoke 904) / 「添加驾驶员」 (902).
- * 2. 「车辆管理」 (Level 1: 1 clean card per vehicle) -> 「车辆详情」 (Level 2: hardware archive,
- *    inline owner/plate edit 933, set default 932, default-hidden danger cancel cert 934 & unbind 931)
- *    / 「添加车辆」 (930).
+ *    top-right in-place edit 903, operation records 137, bottom danger revoke 904) / 「添加驾驶员」 (902).
+ * 2. 「车辆管理」 (Level 1: 1 clean card per vehicle) -> unified 「车辆信息」 (Level 2: live status,
+ *    top-right in-place plate/owner/purchase-date edit 933, hardware archive, OTA upgrade,
+ *    set default 932, bottom cancel cert 934 & unbind 931) / 「添加车辆」 (930).
  */
 internal class VehicleManagementScreens(
     private val context: Context,
@@ -57,12 +57,19 @@ internal class VehicleManagementScreens(
     private val onSelectVehicleSummary: (VehicleSummary) -> Unit,
     private val onVehicleInfoSaved: (vin: String, plateNo: String, hostName: String, purchaseDate: String) -> Unit,
     private val onVehicleUnbound: (vin: String) -> Unit,
-    private val onStatusMessage: (String) -> Unit
+    private val onStatusMessage: (String) -> Unit,
+    private val vehicleLiveSpecsProvider: (vin: String) -> List<Pair<String, String>> = { emptyList() },
+    private val onOpenVehicleUpgrade: () -> Unit = {}
 ) {
 
     private var activeDialog: Dialog? = null
     private val cachedVehiclesByVin = mutableMapOf<String, VehicleSummary>()
     private var cachedVehicleSession = ""
+    private var openVehicleInfoRefresh: (() -> Unit)? = null
+
+    fun refreshOpenVehicleInfo() {
+        openVehicleInfoRefresh?.invoke()
+    }
 
     fun cachedVehicleSummary(vin: String): VehicleSummary? {
         if (cachedVehicleSession != profileProvider().accessToken) return null
@@ -83,6 +90,7 @@ internal class VehicleManagementScreens(
     fun dismissAll() {
         runCatching { activeDialog?.dismiss() }
         activeDialog = null
+        openVehicleInfoRefresh = null
         cachedVehiclesByVin.clear()
         cachedVehicleSession = ""
     }
@@ -1005,7 +1013,7 @@ internal class VehicleManagementScreens(
     }
 
     // =========================================================================
-    // 2. 「车辆管理」一级界面 (一车一卡) -> 二级界面「车辆详情」/「添加车辆」
+    // 2. 「车辆管理」一级界面 (一车一卡) -> 统一「车辆信息」/「添加车辆」
     // =========================================================================
 
     fun openMyVehiclesScreen(
@@ -1170,7 +1178,7 @@ internal class VehicleManagementScreens(
             contentDescription = "$modelTitle，${vehicle.plateNo.ifBlank { "未设置车牌号" }}，$statusText"
             MotionSpec.attachPressPhysics(this, pressedScale = 0.98f)
             setOnClickListener {
-                openVehicleDetailScreen(
+                openVehicleInfoScreen(
                     initialVehicle = vehicle,
                     vinFallback = vehicle.vin,
                     onUpdated = onReload
@@ -1223,15 +1231,16 @@ internal class VehicleManagementScreens(
     }
 
     /**
-     * Level-2 Vehicle Detail screen (TopBar: 车辆详情 + right "编辑" / "保存"):
-     * Clean borderless dark layout matching Settings/Profile. Tapping top-right "编辑"
-     * converts only editable fields (车牌号、车主姓名、购车时间) into in-place inputs.
+     * Unified Vehicle Info screen (TopBar: 车辆信息 + right "编辑" / "保存"):
+     * Consolidates the previous Vehicle Info and Vehicle Detail screens into one clean
+     * borderless screen: live telemetry status, top-right in-place editable fields,
+     * masked vehicle identifiers, OTA upgrade, and bottom destructive actions.
      */
     fun openEditVehicleScreen(
         initialVehicle: VehicleSummary? = null,
         vinFallback: String = "",
         onUpdated: () -> Unit = {}
-    ) = openVehicleDetailScreen(
+    ) = openVehicleInfoScreen(
         initialVehicle = initialVehicle,
         vinFallback = vinFallback,
         startInEditMode = true,
@@ -1239,6 +1248,18 @@ internal class VehicleManagementScreens(
     )
 
     fun openVehicleDetailScreen(
+        initialVehicle: VehicleSummary? = null,
+        vinFallback: String = "",
+        startInEditMode: Boolean = false,
+        onUpdated: () -> Unit = {}
+    ) = openVehicleInfoScreen(
+        initialVehicle = initialVehicle,
+        vinFallback = vinFallback,
+        startInEditMode = startInEditMode,
+        onUpdated = onUpdated
+    )
+
+    fun openVehicleInfoScreen(
         initialVehicle: VehicleSummary? = null,
         vinFallback: String = "",
         startInEditMode: Boolean = false,
@@ -1259,7 +1280,7 @@ internal class VehicleManagementScreens(
         topBarHost.addView(
             AppComponents.createTopBar(
                 context = context,
-                title = "车辆详情",
+                title = "车辆信息",
                 onBack = { onPopOverlaySubpage() }
             ),
             FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
@@ -1280,8 +1301,10 @@ internal class VehicleManagementScreens(
 
         var isEditing = startInEditMode
         var saving = false
+        var currentVehicle: VehicleSummary? = initialVehicle
 
         fun renderDetail(vehicle: VehicleSummary) {
+            currentVehicle = vehicle
             rememberVehicleSummaries(listOf(vehicle), activeProfile.accessToken)
             val activeVin = profileProvider().vin.trim().uppercase(Locale.US)
             val isCurrentActive = vehicle.vin.equals(activeVin, ignoreCase = true)
@@ -1350,7 +1373,7 @@ internal class VehicleManagementScreens(
             topBarHost.addView(
                 AppComponents.createTopBar(
                     context = context,
-                    title = "车辆详情",
+                    title = "车辆信息",
                     onBack = {
                         if (isEditing) {
                             isEditing = false
@@ -1376,7 +1399,7 @@ internal class VehicleManagementScreens(
 
             body.removeAllViews()
 
-            // Hero Header: Model name + clean status line + subtle quick action chips
+            // Hero Header: Model name + clean status line + subtle switch/default chips (no Drivers button)
             val hero = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(20), dp(14), dp(20), dp(18))
@@ -1454,16 +1477,6 @@ internal class VehicleManagementScreens(
                         }
                     )
                 }
-                if (vehicle.isBoundVehicle && isCurrentActive) {
-                    quickRow.addView(
-                        cardActionChip("驾驶员", accent = false) {
-                            openDriversScreen()
-                        },
-                        LinearLayout.LayoutParams(0, dp(38), 1f).apply {
-                            if (quickRow.childCount > 0) marginStart = dp(10)
-                        }
-                    )
-                }
                 if (quickRow.childCount > 0) {
                     hero.addView(quickRow, lp(top = dp(14)))
                 }
@@ -1525,7 +1538,20 @@ internal class VehicleManagementScreens(
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
             }
 
-            // Section 2: 车辆标识 (always read-only masked rows; tap to copy)
+            // Section 2: 车辆状态 (live telemetry specs for active vehicle, hidden during edit mode)
+            val liveSpecs = if (isCurrentActive && !isEditing) vehicleLiveSpecsProvider(vehicle.vin) else emptyList()
+            if (liveSpecs.isNotEmpty()) {
+                body.addView(AppComponents.createSectionHeader(context, "车辆状态"), lp())
+                liveSpecs.forEachIndexed { idx, (label, value) ->
+                    body.addView(buildBorderlessInfoRow(label, value), lp())
+                    if (idx < liveSpecs.lastIndex) {
+                        body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                    }
+                }
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+            }
+
+            // Section 3: 车辆标识 (always read-only masked rows; tap to copy)
             body.addView(AppComponents.createSectionHeader(context, "车辆标识"), lp())
             body.addView(
                 buildDetailValueRow("车架号", SensitiveUiText.identifier(vehicle.vin), copyable = !isEditing, dimmed = isEditing),
@@ -1546,6 +1572,22 @@ internal class VehicleManagementScreens(
                 buildDetailValueRow("SN 码", SensitiveUiText.identifier(vehicle.sn), copyable = !isEditing, dimmed = isEditing),
                 lp()
             )
+
+            // Section 4: 系统 (OTA upgrade for active vehicle; no Vehicle Management cross-link)
+            if (isCurrentActive && !isEditing) {
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(AppComponents.createSectionHeader(context, "系统"), lp())
+                body.addView(
+                    AppComponents.createListRow(
+                        context = context,
+                        icon = AppIconType.INFO_CIRCLE,
+                        title = "车辆升级",
+                        showChevron = true,
+                        onClick = { onOpenVehicleUpgrade() }
+                    ),
+                    lp()
+                )
+            }
 
             // Bottom understated destructive actions (hidden during edit mode)
             if (vehicle.isBoundVehicle && !isEditing) {
@@ -1658,12 +1700,26 @@ internal class VehicleManagementScreens(
             }
         }
 
-        onPushOverlaySubpage(root, null)
+        val refreshHook: () -> Unit = {
+            if (!isEditing) {
+                val updated = cachedVehicleSummary(targetVin) ?: currentVehicle
+                if (updated != null) {
+                    renderDetail(updated)
+                }
+            }
+        }
+        openVehicleInfoRefresh = refreshHook
+        onPushOverlaySubpage(root) {
+            if (openVehicleInfoRefresh === refreshHook) {
+                openVehicleInfoRefresh = null
+            }
+        }
 
-        if (initialVehicle != null) {
-            renderDetail(initialVehicle)
+        val resolvedInitial = initialVehicle ?: cachedVehicleSummary(targetVin)
+        if (resolvedInitial != null) {
+            renderDetail(resolvedInitial)
         } else {
-            body.addView(loadingHint("正在加载车辆详情..."))
+            body.addView(loadingHint("正在加载车辆信息..."))
             scope.launch {
                 val active = profileProvider()
                 val res = runCatching {
@@ -1683,7 +1739,7 @@ internal class VehicleManagementScreens(
                 }.onFailure { err ->
                     body.removeAllViews()
                     if (err is CherySessionExpiredException) return@onFailure
-                    body.addView(errorBanner("加载车辆详情失败：${err.message.orEmpty().take(90)}"))
+                    body.addView(errorBanner("加载车辆信息失败：${err.message.orEmpty().take(90)}"))
                 }
             }
         }
@@ -1971,7 +2027,7 @@ internal class VehicleManagementScreens(
                     context = context,
                     icon = AppIconType.CAR_CONTROLS,
                     title = "当前账号暂未绑定车辆",
-                    subtitle = "添加车辆后即可在此查看车辆详情、修改车牌与管理驾驶员"
+                    subtitle = "添加车辆后即可在此查看车辆信息、修改车牌与管理车辆"
                 )
             )
             addView(
