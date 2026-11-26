@@ -2850,7 +2850,7 @@ internal class VehicleFeatureSheets(
         }
     }
 
-    fun showVehicleUpgradeSheet() {
+    fun showVehicleUpgradeSheet(prefetchedInfo: VehicleUpgradeInfo? = null) {
         val profile = profileProvider()
         var pollJob: Job? = null
         var sheetActive = true
@@ -2866,6 +2866,152 @@ internal class VehicleFeatureSheets(
             val host = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             body.addView(host, lp(top = dp(10)))
 
+            fun renderUpgradeResult(res: Result<VehicleUpgradeInfo>, retryAction: () -> Unit) {
+                host.removeAllViews()
+                res.onSuccess { info: VehicleUpgradeInfo ->
+                    val hasNewVersion = info.hasUpgrade || info.upgradeTaskId.isNotBlank()
+                    val card = cardBox()
+                    card.addView(kvRow("当前版本", info.currentVersion.ifBlank { "--" }))
+                    val statusText = when {
+                        hasNewVersion -> "发现新版本"
+                        else -> "已是最新版本"
+                    }
+                    card.addView(kvRow("固件状态", statusText))
+                    if (info.upgradeTime.isNotBlank()) {
+                        card.addView(kvRow("预计耗时", info.upgradeTime))
+                    }
+
+                    val notes = info.releaseNote.ifBlank { info.descriptionText }
+                    if (notes.isNotBlank()) {
+                        card.addView(text("更新说明", 12.5f, TEXT_SUB, Typeface.BOLD), lp(top = dp(10), bottom = dp(4)))
+                        val notesScroll = ScrollView(context).apply {
+                            isVerticalScrollBarEnabled = true
+                            overScrollMode = View.OVER_SCROLL_NEVER
+                        }
+                        notesScroll.addView(
+                            text(notes, 13f, TEXT_BODY).apply { setLineSpacing(0f, 1.45f) },
+                            ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                        )
+                        card.addView(notesScroll, LinearLayout.LayoutParams(MATCH_PARENT, dp(180)))
+                    }
+                    host.addView(card)
+
+                    // Inline silent-polling linear progress indicator (shown while upgrading)
+                    val progressBox = LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        visibility = View.GONE
+                    }
+                    val progressRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+                    val progressLabel = text("正在升级...", 13f, TEXT_BODY)
+                    val progressPct = text("0%", 13f, ACCENT_BLUE, Typeface.BOLD)
+                    progressRow.addView(progressLabel, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                    progressRow.addView(progressPct)
+                    progressBox.addView(progressRow, lp(bottom = dp(6)))
+
+                    val track = FrameLayout(context).apply {
+                        background = rounded(Color.rgb(42, 45, 52), 3f)
+                    }
+                    val fill = View(context).apply {
+                        background = rounded(PRIMARY_BLUE, 3f)
+                    }
+                    track.addView(fill, FrameLayout.LayoutParams(0, MATCH_PARENT))
+                    progressBox.addView(track, lp(height = dp(6)))
+                    host.addView(progressBox, lp(top = dp(14)))
+
+                    fun updateProgressUi(pct: Int, label: String) {
+                        val clamped = pct.coerceIn(0, 100)
+                        progressBox.visibility = View.VISIBLE
+                        progressLabel.text = label
+                        progressPct.text = "$clamped%"
+                        track.post {
+                            val targetW = ((track.width * clamped) / 100f).roundToInt().coerceAtLeast(if (clamped > 0) dp(6) else 0)
+                            fill.layoutParams = FrameLayout.LayoutParams(targetW, MATCH_PARENT)
+                        }
+                    }
+
+                    fun startSilentProgressPoll(taskId: String) {
+                        pollJob?.cancel()
+                        pollJob = scope.launch {
+                            while (isActive && sheetActive) {
+                                val st = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        httpClient.fetchVehicleUpgradeStatus(profile.vin, taskId, profile.accessToken)
+                                    }
+                                }.getOrNull()
+                                if (!sheetActive) break
+                                if (st != null) {
+                                    val label = if (st.surplusTime.isNotBlank()) {
+                                        "正在升级 · 剩余 ${st.surplusTime}"
+                                    } else {
+                                        "正在升级中..."
+                                    }
+                                    updateProgressUi(st.percentage, label)
+                                    if (st.percentage >= 100) break
+                                }
+                                delay(3_000L)
+                            }
+                        }
+                    }
+
+                    // Strict CTA: New version -> "立即升级" + "取消"; Already up to date -> ONLY "取消"
+                    if (hasNewVersion && info.upgradeTaskId.isNotBlank()) {
+                        val ctaRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                        ctaRow.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(46)))
+                        lateinit var upgradeBtn: TextView
+                        upgradeBtn = primaryBtn("立即升级") {
+                            AppComponents.showConfirmDialog(
+                                context = context,
+                                title = "确认开始车辆升级",
+                                message = "升级期间请确保车辆处于驻车状态且电量充足，过程中请勿操作车辆。",
+                                confirmText = "立即升级",
+                                cancelText = "取消"
+                            ) {
+                                AppHaptics.perform(upgradeBtn, HapticLevel.MEDIUM_CONFIRM)
+                                upgradeBtn.isEnabled = false
+                                upgradeBtn.alpha = 0.55f
+                                upgradeBtn.text = "升级中..."
+                                updateProgressUi(1, "正在下发升级指令...")
+                                scope.launch {
+                                    val ok = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            httpClient.triggerVehicleUpgrade(profile.vin, info.upgradeTaskId, profile.accessToken)
+                                        }
+                                    }.getOrDefault(false)
+                                    if (!sheetActive) return@launch
+                                    if (ok) {
+                                        startSilentProgressPoll(info.upgradeTaskId)
+                                    } else {
+                                        progressBox.visibility = View.GONE
+                                        upgradeBtn.isEnabled = true
+                                        upgradeBtn.alpha = 1f
+                                        upgradeBtn.text = "立即升级"
+                                        toast("触发车辆升级失败，请稍后重试")
+                                    }
+                                }
+                            }
+                        }
+                        ctaRow.addView(upgradeBtn, weightLp(dp(10), dp(46)))
+                        host.addView(ctaRow, lp(top = dp(16)))
+
+                        if (info.percentage in 1..99) {
+                            updateProgressUi(info.percentage, "正在升级中...")
+                            startSilentProgressPoll(info.upgradeTaskId)
+                        }
+                    } else {
+                        host.addView(secondaryBtn("取消") { dialog.dismiss() }, lp(top = dp(16), height = dp(46)))
+                    }
+                }.onFailure { err ->
+                    host.addView(errorHint("检查升级失败：${err.message.orEmpty().take(100)}"))
+                    val errRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                    errRow.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(44)))
+                    errRow.addView(primaryBtn("重试") { retryAction() }, weightLp(dp(10), dp(44)))
+                    host.addView(errRow, lp(top = dp(14)))
+                }
+            }
+
             fun checkNow() {
                 host.removeAllViews()
                 host.addView(loadingHint("正在检查车辆固件版本..."))
@@ -2876,153 +3022,15 @@ internal class VehicleFeatureSheets(
                         }
                     }
                     if (!sheetActive) return@launch
-                    host.removeAllViews()
-
-                    res.onSuccess { info: VehicleUpgradeInfo ->
-                        val hasNewVersion = info.hasUpgrade || info.upgradeTaskId.isNotBlank()
-                        val card = cardBox()
-                        card.addView(kvRow("当前版本", info.currentVersion.ifBlank { "--" }))
-                        val statusText = when {
-                            hasNewVersion -> "发现新版本"
-                            else -> "已是最新版本"
-                        }
-                        card.addView(kvRow("固件状态", statusText))
-                        if (info.upgradeTime.isNotBlank()) {
-                            card.addView(kvRow("预计耗时", info.upgradeTime))
-                        }
-
-                        val notes = info.releaseNote.ifBlank { info.descriptionText }
-                        if (notes.isNotBlank()) {
-                            card.addView(text("更新说明", 12.5f, TEXT_SUB, Typeface.BOLD), lp(top = dp(10), bottom = dp(4)))
-                            val notesScroll = ScrollView(context).apply {
-                                isVerticalScrollBarEnabled = true
-                                overScrollMode = View.OVER_SCROLL_NEVER
-                            }
-                            notesScroll.addView(
-                                text(notes, 13f, TEXT_BODY).apply { setLineSpacing(0f, 1.45f) },
-                                ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
-                            )
-                            card.addView(notesScroll, LinearLayout.LayoutParams(MATCH_PARENT, dp(180)))
-                        }
-                        host.addView(card)
-
-                        // Inline silent-polling linear progress indicator (shown while upgrading)
-                        val progressBox = LinearLayout(context).apply {
-                            orientation = LinearLayout.VERTICAL
-                            visibility = View.GONE
-                        }
-                        val progressRow = LinearLayout(context).apply {
-                            orientation = LinearLayout.HORIZONTAL
-                            gravity = Gravity.CENTER_VERTICAL
-                        }
-                        val progressLabel = text("正在升级...", 13f, TEXT_BODY)
-                        val progressPct = text("0%", 13f, ACCENT_BLUE, Typeface.BOLD)
-                        progressRow.addView(progressLabel, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                        progressRow.addView(progressPct)
-                        progressBox.addView(progressRow, lp(bottom = dp(6)))
-
-                        val track = FrameLayout(context).apply {
-                            background = rounded(Color.rgb(42, 45, 52), 3f)
-                        }
-                        val fill = View(context).apply {
-                            background = rounded(PRIMARY_BLUE, 3f)
-                        }
-                        track.addView(fill, FrameLayout.LayoutParams(0, MATCH_PARENT))
-                        progressBox.addView(track, lp(height = dp(6)))
-                        host.addView(progressBox, lp(top = dp(14)))
-
-                        fun updateProgressUi(pct: Int, label: String) {
-                            val clamped = pct.coerceIn(0, 100)
-                            progressBox.visibility = View.VISIBLE
-                            progressLabel.text = label
-                            progressPct.text = "$clamped%"
-                            track.post {
-                                val targetW = ((track.width * clamped) / 100f).roundToInt().coerceAtLeast(if (clamped > 0) dp(6) else 0)
-                                fill.layoutParams = FrameLayout.LayoutParams(targetW, MATCH_PARENT)
-                            }
-                        }
-
-                        fun startSilentProgressPoll(taskId: String) {
-                            pollJob?.cancel()
-                            pollJob = scope.launch {
-                                while (isActive && sheetActive) {
-                                    val st = runCatching {
-                                        withContext(Dispatchers.IO) {
-                                            httpClient.fetchVehicleUpgradeStatus(profile.vin, taskId, profile.accessToken)
-                                        }
-                                    }.getOrNull()
-                                    if (!sheetActive) break
-                                    if (st != null) {
-                                        val label = if (st.surplusTime.isNotBlank()) {
-                                            "正在升级 · 剩余 ${st.surplusTime}"
-                                        } else {
-                                            "正在升级中..."
-                                        }
-                                        updateProgressUi(st.percentage, label)
-                                        if (st.percentage >= 100) break
-                                    }
-                                    delay(3_000L)
-                                }
-                            }
-                        }
-
-                        // Strict CTA: New version -> "立即升级" + "取消"; Already up to date -> ONLY "取消"
-                        if (hasNewVersion && info.upgradeTaskId.isNotBlank()) {
-                            val ctaRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                            ctaRow.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(46)))
-                            lateinit var upgradeBtn: TextView
-                            upgradeBtn = primaryBtn("立即升级") {
-                                AppComponents.showConfirmDialog(
-                                    context = context,
-                                    title = "确认开始车辆升级",
-                                    message = "升级期间请确保车辆处于驻车状态且电量充足，过程中请勿操作车辆。",
-                                    confirmText = "立即升级",
-                                    cancelText = "取消"
-                                ) {
-                                    AppHaptics.perform(upgradeBtn, HapticLevel.MEDIUM_CONFIRM)
-                                    upgradeBtn.isEnabled = false
-                                    upgradeBtn.alpha = 0.55f
-                                    upgradeBtn.text = "升级中..."
-                                    updateProgressUi(1, "正在下发升级指令...")
-                                    scope.launch {
-                                        val ok = runCatching {
-                                            withContext(Dispatchers.IO) {
-                                                httpClient.triggerVehicleUpgrade(profile.vin, info.upgradeTaskId, profile.accessToken)
-                                            }
-                                        }.getOrDefault(false)
-                                        if (!sheetActive) return@launch
-                                        if (ok) {
-                                            startSilentProgressPoll(info.upgradeTaskId)
-                                        } else {
-                                            progressBox.visibility = View.GONE
-                                            upgradeBtn.isEnabled = true
-                                            upgradeBtn.alpha = 1f
-                                            upgradeBtn.text = "立即升级"
-                                            toast("触发车辆升级失败，请稍后重试")
-                                        }
-                                    }
-                                }
-                            }
-                            ctaRow.addView(upgradeBtn, weightLp(dp(10), dp(46)))
-                            host.addView(ctaRow, lp(top = dp(16)))
-
-                            if (info.percentage in 1..99) {
-                                updateProgressUi(info.percentage, "正在升级中...")
-                                startSilentProgressPoll(info.upgradeTaskId)
-                            }
-                        } else {
-                            host.addView(secondaryBtn("取消") { dialog.dismiss() }, lp(top = dp(16), height = dp(46)))
-                        }
-                    }.onFailure { err ->
-                        host.addView(errorHint("检查升级失败：${err.message.orEmpty().take(100)}"))
-                        val errRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                        errRow.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(44)))
-                        errRow.addView(primaryBtn("重试") { checkNow() }, weightLp(dp(10), dp(44)))
-                        host.addView(errRow, lp(top = dp(14)))
-                    }
+                    renderUpgradeResult(res, ::checkNow)
                 }
             }
-            checkNow()
+
+            if (prefetchedInfo != null) {
+                renderUpgradeResult(Result.success(prefetchedInfo), ::checkNow)
+            } else {
+                checkNow()
+            }
         }
     }
 

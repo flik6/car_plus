@@ -19,27 +19,24 @@
 
 ---
 
-## 2. 强制图标规范（Pictogrammers MDI Automotive Spec）
+## 2. 强制图标规范（CarPlus Bespoke Automotive + MDI UI Spec）
 
 | 规范项 | 强制标准 |
 | --- | --- |
-| **图标库** | **Pictogrammers Material Design Icons (`@mdi/js`)** — Automotive 分类及配套 `-outline` 图标 |
-| **画布网格** | `24 × 24` 标准 `viewBox` |
-| **绘制模式** | **`Paint.Style.FILL`**（MDI 官方 SVG Path 为闭合填充轮廓，严禁叠加 `STROKE`） |
+| **车控图标库** | **自研极简汽车车控矢量套件**（`AppIcons.kt` 自定义 `24 × 24` Canvas 精密绘制，`1.65u` 统一建筑细线、`Cap.ROUND / Join.ROUND`、快背轿车侧面/前视轮廓，灵感源自极简现代电动智能车控美学） |
+| **通用 UI 图标** | **Pictogrammers Material Design Icons (`@mdi/js`)** 24×24 填充矢量路径（顶栏、箭头、更多、蓝牙、日历、时钟等） |
 | **默认颜色** | `#FFFFFF`（纯白，高对比单色） |
 | **激活颜色** | **`#3D9BFF`**（汽车激活蓝） |
-| **格式** | SVG PathData 矢量绘制（零位图模糊） |
-| **禁用规则** | **严禁混用其他图标库或任何 Emoji 字符** |
+| **禁用规则** | **严禁混用任何 Emoji 字符或位图模糊图标** |
 
-### 2.1 已核验的 38 项 `AppIconType` → `@mdi/js` 官方映射表
+### 2.1 `AppIconType` 分组对照表（40 项）
 
-| 分组 | `AppIconType` → 官方 `@mdi/js` 导出名 |
+| 分组 | `AppIconType` 说明 |
 | --- | --- |
-| **导航与顶栏** | `CHEVRON_DOWN` → `mdiChevronDown`、`CHEVRON_RIGHT` → `mdiChevronRight`、`BACK_ARROW` → `mdiArrowLeft`、`MESSAGE_BUBBLE` → `mdiMessageTextOutline`、`MENU_HAMBURGER` → `mdiMenu` |
-| **核心车控** | `LOCK_CLOSED` → `mdiLockOutline`、`LOCK_OPEN` → `mdiLockOpenVariantOutline`、`FAN_BLADE` → `mdiFan`、`BOLT_FLASH`（闪灯寻车）→ `mdiCarLightHigh`、`TRUNK_OPEN` → `mdiCarHatchback`、`TAILGATE_CLOSE` → `mdiCarBack`、`ENGINE_POWER` → `mdiEngineOutline`、`ENGINE_STOP` → `mdiEngineOffOutline`、`HORN_SOUND` → `mdiBugle` |
-| **车窗与天窗** | `WINDOW_OPEN` → `mdiWindowOpenVariant`、`WINDOW_VENT` → `mdiCarDoor`、`WINDOW_CLOSE` → `mdiWindowClosedVariant`、`SUNROOF_OPEN` → `mdiCarConvertible`、`SUNROOF_TILT` → `mdiSunAngleOutline`、`SUNROOF_CLOSE` → `mdiCarSide` |
-| **主菜单与系统** | `CAR_CONTROLS` → `mdiCarOutline`、`LOCATION_ARROW` → `mdiMapMarkerOutline`、`SHIELD_CHECK` → `mdiShieldCheckOutline`、`KEY_ROUND`（驾驶员）→ `mdiCarKey`、`INFO_CIRCLE` → `mdiInformationOutline`、`BLUETOOTH_ICON` → `mdiBluetooth`、`CLOUD_NET_ICON` → `mdiCloudOutline`、`RADAR` → `mdiRadar`、`CROSSHAIR` → `mdiCrosshairsGps`、`MAP_PIN` → `mdiMapMarkerOutline` |
-| **通用操作** | `CALENDAR` → `mdiCalendarOutline`、`CLOCK` → `mdiClockOutline`、`CHECK` → `mdiCheck`、`CHECK_CIRCLE` → `mdiCheckCircleOutline`、`SWAP_CAR` → `mdiSwapHorizontal`、`ADD_ICON` → `mdiPlus`、`CLOSE_ICON` → `mdiClose`、`LOG_OUT` → `mdiLogout` |
+| **自研核心车控（16 项）** | `LOCK_CLOSED` / `LOCK_OPEN`（建筑感细线门锁）、`FAN_BLADE`（四叶空心涡轮风扇，支持旋转动效）、`BOLT_FLASH`（D 形大灯 + 三道光束）、`TRUNK_OPEN` / `TAILGATE_CLOSE`（快背轿车掀尾箱 + 方向箭头）、`ENGINE_POWER` / `ENGINE_STOP`（极简启停环）、`WINDOW_OPEN` / `WINDOW_VENT` / `WINDOW_CLOSE`（A 柱斜角车门窗 + 升降/微风线条）、`SUNROOF_OPEN` / `SUNROOF_TILT` / `SUNROOF_CLOSE`（轿车车顶线条 + 天窗滑动/翘起/关闭）、`CAR_CONTROLS`（极简前视宽体轿车轮廓）、`HORN_SOUND`（流线喇叭声波） |
+| **导航与溢出菜单** | `CHEVRON_DOWN`、`CHEVRON_RIGHT`、`BACK_ARROW`、`MESSAGE_BUBBLE`、`MENU_HAMBURGER`、`MORE_HORIZ`、`MORE_VERT` |
+| **主菜单与系统** | `LOCATION_ARROW`、`SHIELD_CHECK`、`KEY_ROUND`、`INFO_CIRCLE`、`BLUETOOTH_ICON`、`CLOUD_NET_ICON`、`RADAR`、`CROSSHAIR`、`MAP_PIN` |
+| **通用操作** | `CALENDAR`、`CLOCK`、`CHECK`、`CHECK_CIRCLE`、`SWAP_CAR`、`ADD_ICON`、`CLOSE_ICON`、`LOG_OUT` |
 
 ---
 
@@ -164,15 +161,13 @@
    - 页面直接进入驾驶员列表。列表跟随当前车辆，查看其他车辆的驾驶员前先切换车辆。
    - 一名驾驶员一张单一入口卡片；详情内集中呈现启停、编辑、操作记录及默认收起的危险操作。吸底「＋ 添加驾驶员」。
 5. **`车辆信息`**（`CAR_CONTROLS` / `INFO_CIRCLE`）→ 统一全屏 **`车辆信息`**（`AppTopBar("车辆信息")` + 右上角「编辑 / 保存」，与原「车辆详情」合并为单一页面；首页「车辆信息」、底部车牌与「设置 → 车辆管理」点选车辆均进入此统一页面）：
-   - 顶部车型与认证/默认/控车状态（仅按需展示「切换为当前控车」「设为默认车辆」，**不显示「驾驶员」按钮**）；
-   - 分组 `基本信息`：车牌号、车主姓名、购车时间（默认按 §13 脱敏，点击右上角「编辑」就地切换为底线输入与 `WheelDateTimePicker`）；
+   - 顶部单行 Hero：车型名称 + 紧随其后的紧凑认证状态标签（如 `已认证`/`未认证`/`被授权`，**移除「默认车辆」「当前控车」冗余文字与「驾驶员」按钮**）+ 行尾右对齐 `MORE_HORIZ` 更多菜单（点击展开右对齐锚点下拉菜单，收敛 `取消实名认证` 与 `解除车辆绑定`，均保留二次确认与 6 位安全密码校验）；
+   - 分组 `基本信息`：车牌号、车主姓名、购车时间（默认按 §13 脱敏，点击右上角「编辑」就地切换为底线输入与 `WheelDateTimePicker`），以及当前控车车辆的 **`车辆版本`** 行（删除底部独立「系统 → 车辆升级」区；有新版本时点击弹出车辆升级底部抽屉，已是最新版本时点击仅弹出 Toast 提示已是最新）；
    - 分组 `车辆状态`（当前控车车辆展示）：总里程、四轮胎压（`%.2f` bar）、蓄电池电压、蓝牙钥匙名称；
-   - 分组 `车辆标识`：车架号、发动机号、ICCID、SN 码（默认按 §13 脱敏，轻触复制脱敏值）；
-   - 分组 `系统`（当前控车车辆展示）：`车辆升级 (OTA)`（**不显示「车辆管理」入口**，「车辆管理」统一收口在「设置」中）；
-   - 页底克制无框红字行：`取消实名认证`、`解除车辆绑定`（编辑态隐藏，保留二次确认与 6 位安全密码校验）。
+   - 分组 `车辆标识`：车架号、发动机号、ICCID、SN 码（默认按 §13 脱敏，轻触复制脱敏值）。
 
 > **设置页精简边界**：右上角 `设置 → 账号与安全` 仅保留**登录密码**修改，不再重复放置车控安全密码（PIN）入口。
-> **关于页极简边界（`关于 CarPlus`）**：顶部居中呈现暗色表面圆角品牌徽章（`#1E2026` 表面 + 极细边框 + 纯白 CHERY 标识，禁止刺眼纯白方块直铺暗底）、应用名、单行弱化版本号与简介（禁止蓝色边框胶囊与版本号重复堆砌）；下方复用 `#161719` 无框列表行与 `0.6dp` 细分割线呈现「软件更新」「构建版本」，最新态不展示「重新安装当前版本」；自动过滤 `versionName=`/`versionCode=`/`commit=` 等机器构建元数据行，仅在存在新版本或下载/安装进行时展示更新面板与主按钮。
+> **关于页极简边界（`关于 CarPlus`）**：顶部居中呈现暗色表面圆角品牌徽章（`#1E2026` 表面 + 极细边框 + 纯白 CHERY 标识，禁止刺眼纯白方块直铺暗底）、应用名、单行弱化版本号与简介（禁止蓝色边框胶囊与版本号重复堆砌）；下方复用 `#161719` 无框列表行与 `0.6dp` 细分割线呈现「软件更新」「构建版本」，页面内不平铺冗余更新卡片。点击「软件更新」与「车辆版本」保持完全一致的交互语义：存在新版本（或下载/待安装进行中）时弹出暗色底部抽屉展示版本信息、过滤后的更新说明、下载进度条与下载/安装按钮；已是最新版本时仅弹出 Toast 提示当前已是最新。
 
 ---
 

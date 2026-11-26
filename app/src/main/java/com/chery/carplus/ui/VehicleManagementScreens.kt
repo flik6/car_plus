@@ -17,6 +17,7 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -26,6 +27,7 @@ import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CherySessionExpiredException
 import com.chery.carplus.cloud.VehicleAuthorizationItem
 import com.chery.carplus.cloud.VehicleSummary
+import com.chery.carplus.cloud.VehicleUpgradeInfo
 import com.chery.carplus.profile.VehicleProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -59,10 +61,11 @@ internal class VehicleManagementScreens(
     private val onVehicleUnbound: (vin: String) -> Unit,
     private val onStatusMessage: (String) -> Unit,
     private val vehicleLiveSpecsProvider: (vin: String) -> List<Pair<String, String>> = { emptyList() },
-    private val onOpenVehicleUpgrade: () -> Unit = {}
+    private val onOpenVehicleUpgrade: (VehicleUpgradeInfo?) -> Unit = {}
 ) {
 
     private var activeDialog: Dialog? = null
+    private var activeDropdown: PopupWindow? = null
     private val cachedVehiclesByVin = mutableMapOf<String, VehicleSummary>()
     private var cachedVehicleSession = ""
     private var openVehicleInfoRefresh: (() -> Unit)? = null
@@ -90,6 +93,8 @@ internal class VehicleManagementScreens(
     fun dismissAll() {
         runCatching { activeDialog?.dismiss() }
         activeDialog = null
+        runCatching { activeDropdown?.dismiss() }
+        activeDropdown = null
         openVehicleInfoRefresh = null
         cachedVehiclesByVin.clear()
         cachedVehicleSession = ""
@@ -1302,6 +1307,10 @@ internal class VehicleManagementScreens(
         var isEditing = startInEditMode
         var saving = false
         var currentVehicle: VehicleSummary? = initialVehicle
+        var cachedUpgradeInfo: VehicleUpgradeInfo? = null
+        var upgradeCheckedOnce = false
+        var upgradeChecking = false
+        var upgradeCheckFailed = false
 
         fun renderDetail(vehicle: VehicleSummary) {
             currentVehicle = vehicle
@@ -1316,6 +1325,103 @@ internal class VehicleManagementScreens(
             var plateInputRef: EditText? = null
             var ownerInputRef: EditText? = null
             var getPurchaseDateRef: (() -> String)? = null
+
+            fun launchCancelCertificationFlow() {
+                activeDialog?.dismiss()
+                activeDialog = AppComponents.showConfirmDialog(
+                    context = context,
+                    title = "取消车辆实名认证",
+                    message = "取消认证后将影响车联网通信及远程控车功能，需验证 6 位车控安全密码。确定要取消认证吗？",
+                    confirmText = "继续验证",
+                    cancelText = "取消",
+                    dangerConfirm = true
+                ) {
+                    activeDialog = SixDigitPinSheet.showVerifyPinSheet(
+                        context = context,
+                        title = "验证车控安全密码",
+                        subtitle = "请输入 6 位车控安全密码以取消车辆认证"
+                    ) { pin, showError, dismiss ->
+                        val active = profileProvider()
+                        scope.launch {
+                            val res = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.cancelVehicleCertification(
+                                        accessToken = active.accessToken,
+                                        vin = vehicle.vin,
+                                        iccid = vehicle.iccid,
+                                        pinPlain = pin
+                                    )
+                                }
+                            }
+                            res.onSuccess { ok ->
+                                if (ok) {
+                                    dismiss()
+                                    liveSimStatus = "0"
+                                    toast("已取消车辆实名认证")
+                                    renderDetail(vehicle.copy(simStatus = "0"))
+                                    onUpdated()
+                                } else {
+                                    showError("车控密码验证失败，请重试")
+                                }
+                            }.onFailure { err ->
+                                if (err is CherySessionExpiredException) {
+                                    dismiss()
+                                } else {
+                                    showError(err.message.orEmpty().ifBlank { "取消认证失败" }.take(60))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            fun launchUnbindVehicleFlow() {
+                activeDialog?.dismiss()
+                activeDialog = AppComponents.showConfirmDialog(
+                    context = context,
+                    title = "解除车辆绑定",
+                    message = "解除绑定后，当前账号将移除该车辆的所有远程控车与数字钥匙权限，需验证 6 位车控安全密码。确定继续吗？",
+                    confirmText = "继续解绑",
+                    cancelText = "取消",
+                    dangerConfirm = true
+                ) {
+                    activeDialog = SixDigitPinSheet.showVerifyPinSheet(
+                        context = context,
+                        title = "验证车控安全密码",
+                        subtitle = "请输入 6 位车控安全密码以解除车辆绑定"
+                    ) { pin, showError, dismiss ->
+                        val active = profileProvider()
+                        scope.launch {
+                            val res = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.unbindVehicle(
+                                        accessToken = active.accessToken,
+                                        vin = vehicle.vin,
+                                        pinPlain = pin
+                                    )
+                                }
+                            }
+                            res.onSuccess { ok ->
+                                if (ok) {
+                                    dismiss()
+                                    toast("车辆已解除绑定")
+                                    onPopOverlaySubpage()
+                                    onVehicleUnbound(vehicle.vin)
+                                    onUpdated()
+                                } else {
+                                    showError("车控密码验证失败，请重试")
+                                }
+                            }.onFailure { err ->
+                                if (err is CherySessionExpiredException) {
+                                    dismiss()
+                                } else {
+                                    showError(err.message.orEmpty().ifBlank { "解绑失败" }.take(60))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             fun submitVehicleSave() {
                 if (saving) return
@@ -1399,34 +1505,97 @@ internal class VehicleManagementScreens(
 
             body.removeAllViews()
 
-            // Hero Header: Model name + clean status line + subtle switch/default chips (no Drivers button)
+            // Hero Header: Model name + inline certification tag + trailing "更多" overflow menu
             val hero = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(20), dp(14), dp(20), dp(18))
+                setPadding(dp(20), dp(14), dp(12), dp(16))
             }
-            hero.addView(
+            val heroTopRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            heroTopRow.addView(
                 text(modelTitle, 22f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
-                }
+                },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
             )
-            val statusParts = buildList {
-                if (vehicle.isBoundVehicle) {
-                    add(simStatusAppearance(liveSimStatus).first)
-                } else {
-                    add("被授权")
-                }
-                if (vehicle.isSelected) add("默认车辆")
-                if (isCurrentActive) add("当前控车")
+
+            val (tagText, tagFg, tagBg) = if (vehicle.isBoundVehicle) {
+                simStatusAppearance(liveSimStatus)
+            } else {
+                Triple("被授权", ThemeTokens.ACCENT_LIGHT, ACCENT_TINT_BG)
             }
-            hero.addView(
-                text(statusParts.joinToString(" · "), 13.5f, ThemeTokens.TEXT_SUB),
-                lp(top = dp(5))
+            heroTopRow.addView(
+                TextView(context).apply {
+                    text = tagText
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(tagFg)
+                    background = rounded(tagBg, 6f)
+                    setPadding(dp(8), dp(3), dp(8), dp(3))
+                },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    marginStart = dp(10)
+                }
             )
+            heroTopRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+
+            if (vehicle.isBoundVehicle && !isEditing) {
+                val moreBtn = FrameLayout(context).apply {
+                    isClickable = true
+                    isFocusable = true
+                    contentDescription = "更多车辆操作"
+                    addView(
+                        AppIconView(context, AppIconType.MORE_HORIZ, ThemeTokens.TEXT_SUB),
+                        FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER)
+                    )
+                }
+                MotionSpec.attachPressPhysics(moreBtn, pressedScale = 0.88f)
+                moreBtn.setOnClickListener { anchor ->
+                    activeDropdown?.dismiss()
+                    val options = buildList {
+                        if (liveSimStatus == "1") {
+                            add(
+                                DropdownOption(
+                                    id = "cancel_cert",
+                                    title = "取消实名认证",
+                                    subtitle = "取消后将影响车联网远程控车",
+                                    danger = true
+                                )
+                            )
+                        }
+                        add(
+                            DropdownOption(
+                                id = "unbind_vehicle",
+                                title = "解除车辆绑定",
+                                subtitle = "移除车辆的控车与数字钥匙权限",
+                                danger = true
+                            )
+                        )
+                    }
+                    activeDropdown = AppComponents.showAnchoredDropdown(
+                        context = context,
+                        anchor = anchor,
+                        options = options,
+                        widthDp = 228,
+                        alignEnd = true
+                    ) { selected ->
+                        when (selected.id) {
+                            "cancel_cert" -> launchCancelCertificationFlow()
+                            "unbind_vehicle" -> launchUnbindVehicleFlow()
+                        }
+                    }
+                }
+                heroTopRow.addView(moreBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
+            }
+            hero.addView(heroTopRow, lp())
+
             if (!vehicle.isBoundVehicle && vehicle.authDateListSummary.isNotBlank()) {
                 hero.addView(
                     text("授权时段：${vehicle.authDateListSummary}", 12.5f, ThemeTokens.TEXT_SUB),
-                    lp(top = dp(4))
+                    lp(top = dp(6))
                 )
             }
 
@@ -1478,13 +1647,19 @@ internal class VehicleManagementScreens(
                     )
                 }
                 if (quickRow.childCount > 0) {
-                    hero.addView(quickRow, lp(top = dp(14)))
+                    hero.addView(
+                        quickRow,
+                        LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                            topMargin = dp(14)
+                            marginEnd = dp(8)
+                        }
+                    )
                 }
             }
             body.addView(hero, lp())
             body.addView(AppComponents.createHairline(context, startInsetDp = 20))
 
-            // Section 1: 基本信息 (the 3 editable fields switch cleanly in-place)
+            // Section 1: 基本信息 (the 3 editable fields switch cleanly in-place + 车辆版本 row)
             body.addView(AppComponents.createSectionHeader(context, "基本信息"), lp())
 
             if (isEditing) {
@@ -1536,6 +1711,152 @@ internal class VehicleManagementScreens(
                     lp()
                 )
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+                // 车辆版本 row inside 基本信息: opens upgrade sheet if update exists, else shows toast
+                if (isCurrentActive) {
+                    val versionRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        minimumHeight = dp(52)
+                        setPadding(dp(20), dp(10), dp(20), dp(10))
+                        isClickable = true
+                        isFocusable = true
+                    }
+                    MotionSpec.attachPressPhysics(versionRow, pressedScale = 0.985f, haptic = false)
+                    versionRow.addView(
+                        text("车辆版本", 14.5f, ThemeTokens.TEXT_SUB),
+                        LinearLayout.LayoutParams(dp(96), WRAP_CONTENT)
+                    )
+                    versionRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+
+                    val versionDot = View(context).apply {
+                        background = GradientDrawable().apply {
+                            shape = GradientDrawable.OVAL
+                            setColor(ThemeTokens.ACCENT_LIGHT)
+                        }
+                        visibility = View.GONE
+                    }
+                    versionRow.addView(
+                        versionDot,
+                        LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(6) }
+                    )
+
+                    val versionValueTv = text("检查中...", 14.5f, ThemeTokens.TEXT_SUB).apply {
+                        gravity = Gravity.END
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                    versionRow.addView(versionValueTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+
+                    val versionChevron = AppIconView(context, AppIconType.CHEVRON_RIGHT, Color.parseColor("#5C606A")).apply {
+                        visibility = View.GONE
+                    }
+                    versionRow.addView(
+                        versionChevron,
+                        LinearLayout.LayoutParams(dp(15), dp(15)).apply { marginStart = dp(4) }
+                    )
+
+                    fun refreshVersionRowUi() {
+                        val info = cachedUpgradeInfo
+                        val hasNew = info != null && (info.hasUpgrade || info.upgradeTaskId.isNotBlank())
+                        when {
+                            upgradeChecking -> {
+                                versionDot.visibility = View.GONE
+                                versionChevron.visibility = View.GONE
+                                versionValueTv.text = "检查中..."
+                                versionValueTv.setTextColor(ThemeTokens.TEXT_SUB)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                            }
+                            hasNew -> {
+                                versionDot.visibility = View.VISIBLE
+                                versionChevron.visibility = View.VISIBLE
+                                val verPrefix = info!!.currentVersion.takeIf { it.isNotBlank() }?.let { "$it · " }.orEmpty()
+                                versionValueTv.text = "${verPrefix}可升级"
+                                versionValueTv.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                            }
+                            info != null -> {
+                                versionDot.visibility = View.GONE
+                                versionChevron.visibility = View.GONE
+                                versionValueTv.text = info.currentVersion.ifBlank { "已是最新" }
+                                versionValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                            }
+                            upgradeCheckFailed -> {
+                                versionDot.visibility = View.GONE
+                                versionChevron.visibility = View.VISIBLE
+                                versionValueTv.text = "检查失败，轻触重试"
+                                versionValueTv.setTextColor(ThemeTokens.TEXT_SUB)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                            }
+                            else -> {
+                                versionDot.visibility = View.GONE
+                                versionChevron.visibility = View.GONE
+                                versionValueTv.text = "--"
+                                versionValueTv.setTextColor(ThemeTokens.TEXT_SUB)
+                            }
+                        }
+                    }
+
+                    fun fetchVehicleVersion(openOrToastOnComplete: Boolean) {
+                        if (upgradeChecking) return
+                        val active = profileProvider()
+                        if (active.accessToken.isBlank()) return
+                        upgradeChecking = true
+                        upgradeCheckFailed = false
+                        refreshVersionRowUi()
+                        scope.launch {
+                            val res = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.checkVehicleUpgrade(vehicle.vin, active.accessToken)
+                                }
+                            }
+                            upgradeChecking = false
+                            upgradeCheckedOnce = true
+                            res.onSuccess { info ->
+                                cachedUpgradeInfo = info
+                                upgradeCheckFailed = false
+                                refreshVersionRowUi()
+                                if (openOrToastOnComplete) {
+                                    val hasNew = info.hasUpgrade || info.upgradeTaskId.isNotBlank()
+                                    if (hasNew) {
+                                        onOpenVehicleUpgrade(info)
+                                    } else {
+                                        toast("当前车辆系统已是最新版本")
+                                    }
+                                }
+                            }.onFailure { err ->
+                                upgradeCheckFailed = true
+                                refreshVersionRowUi()
+                                if (openOrToastOnComplete && err !is CherySessionExpiredException) {
+                                    toast("检查车辆版本失败，请稍后重试")
+                                }
+                            }
+                        }
+                    }
+
+                    versionRow.setOnClickListener {
+                        if (upgradeChecking) return@setOnClickListener
+                        val info = cachedUpgradeInfo
+                        if (info != null) {
+                            val hasNew = info.hasUpgrade || info.upgradeTaskId.isNotBlank()
+                            if (hasNew) {
+                                onOpenVehicleUpgrade(info)
+                            } else {
+                                toast("当前车辆系统已是最新版本")
+                            }
+                        } else {
+                            fetchVehicleVersion(openOrToastOnComplete = true)
+                        }
+                    }
+
+                    body.addView(versionRow, lp())
+                    body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                    refreshVersionRowUi()
+                    if (!upgradeCheckedOnce && !upgradeChecking) {
+                        fetchVehicleVersion(openOrToastOnComplete = false)
+                    }
+                }
             }
 
             // Section 2: 车辆状态 (live telemetry specs for active vehicle, hidden during edit mode)
@@ -1572,132 +1893,6 @@ internal class VehicleManagementScreens(
                 buildDetailValueRow("SN 码", SensitiveUiText.identifier(vehicle.sn), copyable = !isEditing, dimmed = isEditing),
                 lp()
             )
-
-            // Section 4: 系统 (OTA upgrade for active vehicle; no Vehicle Management cross-link)
-            if (isCurrentActive && !isEditing) {
-                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
-                body.addView(AppComponents.createSectionHeader(context, "系统"), lp())
-                body.addView(
-                    AppComponents.createListRow(
-                        context = context,
-                        icon = AppIconType.INFO_CIRCLE,
-                        title = "车辆升级",
-                        showChevron = true,
-                        onClick = { onOpenVehicleUpgrade() }
-                    ),
-                    lp()
-                )
-            }
-
-            // Bottom understated destructive actions (hidden during edit mode)
-            if (vehicle.isBoundVehicle && !isEditing) {
-                body.addView(View(context), LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-                if (liveSimStatus == "1") {
-                    body.addView(AppComponents.createHairline(context, startInsetDp = 20))
-                    body.addView(
-                        AppComponents.createActionButton(context, "取消实名认证", ButtonStyle.DANGER_TEXT) {
-                            activeDialog?.dismiss()
-                            activeDialog = AppComponents.showConfirmDialog(
-                                context = context,
-                                title = "取消车辆实名认证",
-                                message = "取消认证后将影响车联网通信及远程控车功能，需验证 6 位车控安全密码。确定要取消认证吗？",
-                                confirmText = "继续验证",
-                                cancelText = "取消",
-                                dangerConfirm = true
-                            ) {
-                                activeDialog = SixDigitPinSheet.showVerifyPinSheet(
-                                    context = context,
-                                    title = "验证车控安全密码",
-                                    subtitle = "请输入 6 位车控安全密码以取消车辆认证"
-                                ) { pin, showError, dismiss ->
-                                    val active = profileProvider()
-                                    scope.launch {
-                                        val res = runCatching {
-                                            withContext(Dispatchers.IO) {
-                                                httpClient.cancelVehicleCertification(
-                                                    accessToken = active.accessToken,
-                                                    vin = vehicle.vin,
-                                                    iccid = vehicle.iccid,
-                                                    pinPlain = pin
-                                                )
-                                            }
-                                        }
-                                        res.onSuccess { ok ->
-                                            if (ok) {
-                                                dismiss()
-                                                liveSimStatus = "0"
-                                                toast("已取消车辆实名认证")
-                                                renderDetail(vehicle.copy(simStatus = "0"))
-                                                onUpdated()
-                                            } else {
-                                                showError("车控密码验证失败，请重试")
-                                            }
-                                        }.onFailure { err ->
-                                            if (err is CherySessionExpiredException) {
-                                                dismiss()
-                                            } else {
-                                                showError(err.message.orEmpty().ifBlank { "取消认证失败" }.take(60))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        lp(top = dp(4), height = dp(52))
-                    )
-                }
-                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
-                body.addView(
-                    AppComponents.createActionButton(context, "解除车辆绑定", ButtonStyle.DANGER_TEXT) {
-                        activeDialog?.dismiss()
-                        activeDialog = AppComponents.showConfirmDialog(
-                            context = context,
-                            title = "解除车辆绑定",
-                            message = "解除绑定后，当前账号将移除该车辆的所有远程控车与数字钥匙权限，需验证 6 位车控安全密码。确定继续吗？",
-                            confirmText = "继续解绑",
-                            cancelText = "取消",
-                            dangerConfirm = true
-                        ) {
-                            activeDialog = SixDigitPinSheet.showVerifyPinSheet(
-                                context = context,
-                                title = "验证车控安全密码",
-                                subtitle = "请输入 6 位车控安全密码以解除车辆绑定"
-                            ) { pin, showError, dismiss ->
-                                val active = profileProvider()
-                                scope.launch {
-                                    val res = runCatching {
-                                        withContext(Dispatchers.IO) {
-                                            httpClient.unbindVehicle(
-                                                accessToken = active.accessToken,
-                                                vin = vehicle.vin,
-                                                pinPlain = pin
-                                            )
-                                        }
-                                    }
-                                    res.onSuccess { ok ->
-                                        if (ok) {
-                                            dismiss()
-                                            toast("车辆已解除绑定")
-                                            onPopOverlaySubpage()
-                                            onVehicleUnbound(vehicle.vin)
-                                            onUpdated()
-                                        } else {
-                                            showError("车控密码验证失败，请重试")
-                                        }
-                                    }.onFailure { err ->
-                                        if (err is CherySessionExpiredException) {
-                                            dismiss()
-                                        } else {
-                                            showError(err.message.orEmpty().ifBlank { "解绑失败" }.take(60))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    lp(top = dp(4), height = dp(52))
-                )
-            }
         }
 
         val refreshHook: () -> Unit = {

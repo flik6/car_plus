@@ -12,6 +12,7 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Outline
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.text.Editable
@@ -23,6 +24,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.Window
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -115,20 +118,22 @@ class SettingsScreen(
     private var activeConfirmDialog: Dialog? = null
     private var activeDropdown: PopupWindow? = null
 
-    // Live UI hooks on ABOUT page
+    // Live UI hooks on ABOUT page & Update Bottom Sheet
     private var aboutUpdateRow: LinearLayout? = null
     private var aboutUpdateDot: View? = null
     private var aboutUpdateValue: TextView? = null
     private var aboutUpdateChevron: View? = null
-    private var aboutUpdateCard: LinearLayout? = null
-    private var aboutStatusTitle: TextView? = null
-    private var aboutStatusSub: TextView? = null
-    private var aboutNotesView: TextView? = null
-    private var aboutProgressBox: LinearLayout? = null
-    private var aboutProgressFill: View? = null
-    private var aboutProgressTrack: FrameLayout? = null
-    private var aboutProgressLabel: TextView? = null
-    private var aboutActionBtn: TextView? = null
+    private var updateSheetDialog: Dialog? = null
+    private var sheetStatusTitle: TextView? = null
+    private var sheetStatusSub: TextView? = null
+    private var sheetNotesView: TextView? = null
+    private var sheetProgressBox: LinearLayout? = null
+    private var sheetProgressFill: View? = null
+    private var sheetProgressTrack: FrameLayout? = null
+    private var sheetProgressLabel: TextView? = null
+    private var sheetActionBtn: TextView? = null
+    private var lastDownloadedBytes: Long = 0L
+    private var lastTotalBytes: Long = 0L
 
     fun buildRootView(): View {
         currentSubPage = SubPage.MAIN
@@ -702,81 +707,25 @@ class SettingsScreen(
         )
 
         updateRow.setOnClickListener {
-            if (isCheckingUpdate || isDownloadingUpdate) return@setOnClickListener
+            if (isCheckingUpdate) return@setOnClickListener
             val ready = downloadedApkFile?.let { it.exists() && it.length() > 0L } == true
-            if (ready || latestCheckResult?.hasUpdate == true) {
-                handleDownloadOrInstallClick()
-            } else {
-                triggerUpdateCheck(force = true)
-            }
-        }
-        body.addView(updateRow, lp())
-
-        // 3. Dynamic Update Card (collapsed when up to date; shown only for updates/downloads)
-        val updateCard = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            background = rounded(ThemeTokens.BG_SURFACE, 12f, ThemeTokens.DIVIDER, 0.7f)
-            setPadding(dp(16), dp(15), dp(16), dp(16))
-            visibility = View.GONE
-        }
-
-        val statusTitle = text("", 14.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD)
-        val statusSub = text("", 12.5f, ThemeTokens.TEXT_SUB)
-        val notesView = text("", 13f, ThemeTokens.TEXT_BODY).apply {
-            setLineSpacing(dpF(3f), 1f)
-            visibility = View.GONE
-        }
-
-        val progressBox = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
-        val progressTrack = FrameLayout(activity).apply {
-            background = rounded(ThemeTokens.BTN_SECONDARY, 2f)
-            clipToOutline = true
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, dpF(2f))
+            val cached = latestCheckResult
+            when {
+                isDownloadingUpdate || ready || cached?.hasUpdate == true -> {
+                    showAppUpdateSheet()
+                }
+                cached != null && !cached.hasUpdate -> {
+                    toast("当前已是最新版本 v$curName")
+                }
+                else -> {
+                    triggerUpdateCheck(force = true, notifyUserOnResult = true)
                 }
             }
         }
-        val progressFill = View(activity).apply {
-            background = rounded(ThemeTokens.ACCENT_BLUE, 2f)
-        }
-        progressTrack.addView(progressFill, FrameLayout.LayoutParams(0, MATCH_PARENT, Gravity.START))
-        val progressLabel = text("准备下载...", 12f, ThemeTokens.TEXT_SUB)
-        progressBox.addView(progressTrack, lp(height = dp(4)))
-        progressBox.addView(progressLabel, lp(top = dp(7)))
-
-        val actionBtn = AppComponents.createActionButton(
-            context = activity,
-            label = "下载并安装",
-            style = ButtonStyle.PRIMARY
-        ) {
-            handleDownloadOrInstallClick()
-        }.apply {
-            visibility = View.GONE
-        }
-
-        updateCard.addView(statusTitle, lp())
-        updateCard.addView(statusSub, lp(top = dp(4)))
-        updateCard.addView(notesView, lp(top = dp(10)))
-        updateCard.addView(progressBox, lp(top = dp(12)))
-        updateCard.addView(actionBtn, lp(top = dp(14), height = dp(44)))
-
-        body.addView(
-            updateCard,
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-                marginStart = dp(20)
-                marginEnd = dp(20)
-                topMargin = dp(4)
-                bottomMargin = dp(16)
-            }
-        )
-
+        body.addView(updateRow, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
 
-        // 4. Build Number Read-Only Row
+        // 3. Build Number Read-Only Row
         val buildRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -798,15 +747,6 @@ class SettingsScreen(
         aboutUpdateDot = updateDot
         aboutUpdateValue = updateValue
         aboutUpdateChevron = updateChevron
-        aboutUpdateCard = updateCard
-        aboutStatusTitle = statusTitle
-        aboutStatusSub = statusSub
-        aboutNotesView = notesView
-        aboutProgressBox = progressBox
-        aboutProgressTrack = progressTrack
-        aboutProgressFill = progressFill
-        aboutProgressLabel = progressLabel
-        aboutActionBtn = actionBtn
 
         scroll.addView(body, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
@@ -853,7 +793,7 @@ class SettingsScreen(
     // Auto Update Check, Download & Install Flow
     // =========================================================================
 
-    private fun triggerUpdateCheck(force: Boolean) {
+    private fun triggerUpdateCheck(force: Boolean, notifyUserOnResult: Boolean = false) {
         if (isCheckingUpdate) return
         if (!force && latestCheckResult != null) {
             refreshMainUpdateBadge()
@@ -873,12 +813,131 @@ class SettingsScreen(
             outcome.onSuccess { res ->
                 latestCheckResult = res
                 updateCheckError = null
+                refreshMainUpdateBadge()
+                renderAboutUpdateState()
+                if (notifyUserOnResult) {
+                    if (res.hasUpdate) {
+                        showAppUpdateSheet()
+                    } else {
+                        val (curName, _) = AppUpdater.getCurrentVersion(activity)
+                        toast("当前已是最新版本 v$curName")
+                    }
+                }
             }.onFailure { err ->
                 updateCheckError = err.message ?: "网络请求失败"
+                refreshMainUpdateBadge()
+                renderAboutUpdateState()
+                if (notifyUserOnResult) {
+                    toast("检查更新失败：${updateCheckError.orEmpty().take(50)}")
+                }
             }
-            refreshMainUpdateBadge()
-            renderAboutUpdateState()
         }
+    }
+
+    private fun showAppUpdateSheet() {
+        updateSheetDialog?.dismiss()
+        val dialog = Dialog(activity)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val sheet = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(ThemeTokens.BG_SURFACE)
+                cornerRadii = floatArrayOf(dpF(20f), dpF(20f), dpF(20f), dpF(20f), 0f, 0f, 0f, 0f)
+            }
+            setPadding(dp(20), dp(12), dp(20), dp(24))
+        }
+
+        // Top drag handle
+        val handle = View(activity).apply {
+            background = rounded(Color.parseColor("#383C46"), 2.5f)
+        }
+        sheet.addView(
+            handle,
+            LinearLayout.LayoutParams(dp(36), dp(4)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = dp(16)
+            }
+        )
+
+        val statusTitle = text("软件更新", 18f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD)
+        val statusSub = text("", 13f, ThemeTokens.TEXT_SUB)
+        val notesView = text("", 13.5f, ThemeTokens.TEXT_BODY).apply {
+            setLineSpacing(dpF(3.5f), 1f)
+            visibility = View.GONE
+        }
+
+        val progressBox = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        val progressTrack = FrameLayout(activity).apply {
+            background = rounded(ThemeTokens.BTN_SECONDARY, 2.5f)
+            clipToOutline = true
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, dpF(2.5f))
+                }
+            }
+        }
+        val progressFill = View(activity).apply {
+            background = rounded(ThemeTokens.ACCENT_BLUE, 2.5f)
+        }
+        progressTrack.addView(progressFill, FrameLayout.LayoutParams(0, MATCH_PARENT, Gravity.START))
+        val progressLabel = text("准备下载...", 12.5f, ThemeTokens.TEXT_SUB)
+        progressBox.addView(progressTrack, lp(height = dp(5)))
+        progressBox.addView(progressLabel, lp(top = dp(8)))
+
+        val ctaRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
+        val cancelBtn = AppComponents.createActionButton(activity, "暂不更新", ButtonStyle.SECONDARY) {
+            dialog.dismiss()
+        }
+        val actionBtn = AppComponents.createActionButton(activity, "下载并安装", ButtonStyle.PRIMARY) {
+            handleDownloadOrInstallClick()
+        }
+        ctaRow.addView(cancelBtn, LinearLayout.LayoutParams(0, dp(46), 1f))
+        ctaRow.addView(
+            actionBtn,
+            LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginStart = dp(10) }
+        )
+
+        sheet.addView(statusTitle, lp())
+        sheet.addView(statusSub, lp(top = dp(5)))
+        sheet.addView(notesView, lp(top = dp(14)))
+        sheet.addView(progressBox, lp(top = dp(16)))
+        sheet.addView(ctaRow, lp(top = dp(20)))
+
+        sheetStatusTitle = statusTitle
+        sheetStatusSub = statusSub
+        sheetNotesView = notesView
+        sheetProgressBox = progressBox
+        sheetProgressTrack = progressTrack
+        sheetProgressFill = progressFill
+        sheetProgressLabel = progressLabel
+        sheetActionBtn = actionBtn
+
+        dialog.setContentView(sheet)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setGravity(Gravity.BOTTOM)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+            setDimAmount(0.55f)
+        }
+        MotionSpec.attachSheetSwipeToDismiss(sheet, null, dialog)
+        dialog.setOnDismissListener {
+            if (updateSheetDialog === dialog) {
+                updateSheetDialog = null
+                clearUpdateSheetHooks()
+            }
+        }
+        updateSheetDialog = dialog
+        renderAboutUpdateState()
+        if (isDownloadingUpdate || downloadedApkFile?.let { it.exists() && it.length() > 0L } == true) {
+            updateProgressBar(lastDownloadedBytes, lastTotalBytes)
+        }
+        dialog.show()
+        MotionSpec.animateSheetEnter(sheet)
     }
 
     private fun handleDownloadOrInstallClick() {
@@ -900,6 +959,8 @@ class SettingsScreen(
 
         isDownloadingUpdate = true
         downloadedApkFile = null
+        lastDownloadedBytes = 0L
+        lastTotalBytes = result.assetSizeBytes
         renderAboutUpdateState()
         updateProgressBar(0L, result.assetSizeBytes)
 
@@ -910,6 +971,8 @@ class SettingsScreen(
                     AppUpdater.downloadApk(activity, result.downloadUrl) { downloaded, total ->
                         val effectiveTotal = if (total > 0L) total else result.assetSizeBytes
                         activity.runOnUiThread {
+                            lastDownloadedBytes = downloaded
+                            lastTotalBytes = effectiveTotal
                             updateProgressBar(downloaded, effectiveTotal)
                         }
                     }
@@ -918,6 +981,8 @@ class SettingsScreen(
             isDownloadingUpdate = false
             downloadOutcome.onSuccess { apkFile ->
                 downloadedApkFile = apkFile
+                lastDownloadedBytes = apkFile.length()
+                lastTotalBytes = apkFile.length()
                 updateProgressBar(apkFile.length(), apkFile.length())
                 renderAboutUpdateState()
                 val started = runCatching { AppUpdater.installApk(activity, apkFile) }.getOrDefault(false)
@@ -948,31 +1013,70 @@ class SettingsScreen(
     }
 
     private fun renderAboutUpdateState() {
-        val updateRow = aboutUpdateRow ?: return
-        val updateDot = aboutUpdateDot ?: return
-        val updateValue = aboutUpdateValue ?: return
-        val updateChevron = aboutUpdateChevron ?: return
-        val updateCard = aboutUpdateCard ?: return
-        val titleTv = aboutStatusTitle ?: return
-        val subTv = aboutStatusSub ?: return
-        val notesTv = aboutNotesView ?: return
-        val progBox = aboutProgressBox ?: return
-        val actionBtn = aboutActionBtn ?: return
-
         val readyToInstall = downloadedApkFile?.let { it.exists() && it.length() > 0L } == true
+
+        // 1. Update the clean single row on the About page
+        val updateRow = aboutUpdateRow
+        val updateDot = aboutUpdateDot
+        val updateValue = aboutUpdateValue
+        val updateChevron = aboutUpdateChevron
+        if (updateRow != null && updateDot != null && updateValue != null && updateChevron != null) {
+            when {
+                isDownloadingUpdate -> {
+                    updateRow.isEnabled = true
+                    updateDot.visibility = View.GONE
+                    updateChevron.visibility = View.VISIBLE
+                    updateValue.text = "下载中..."
+                    updateValue.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                    updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                }
+                isCheckingUpdate -> {
+                    updateRow.isEnabled = false
+                    updateDot.visibility = View.GONE
+                    updateChevron.visibility = View.GONE
+                    updateValue.text = "检查中..."
+                    updateValue.setTextColor(ThemeTokens.TEXT_SUB)
+                    updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                }
+                updateCheckError != null -> {
+                    updateRow.isEnabled = true
+                    updateDot.visibility = View.GONE
+                    updateChevron.visibility = View.VISIBLE
+                    updateValue.text = "检查失败，轻触重试"
+                    updateValue.setTextColor(ThemeTokens.DANGER)
+                    updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                }
+                latestCheckResult != null -> {
+                    val res = latestCheckResult!!
+                    updateRow.isEnabled = true
+                    if (res.hasUpdate || readyToInstall) {
+                        updateDot.visibility = if (readyToInstall) View.GONE else View.VISIBLE
+                        updateChevron.visibility = View.VISIBLE
+                        updateValue.text = if (readyToInstall) "等待安装" else "v${res.latestVersionName} 可更新"
+                        updateValue.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                        updateValue.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    } else {
+                        updateDot.visibility = View.GONE
+                        updateChevron.visibility = View.GONE
+                        updateValue.text = "已是最新版本"
+                        updateValue.setTextColor(ThemeTokens.TEXT_SUB)
+                        updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+                    }
+                }
+            }
+        }
+
+        // 2. Sync open update bottom sheet if visible
+        val titleTv = sheetStatusTitle ?: return
+        val subTv = sheetStatusSub ?: return
+        val notesTv = sheetNotesView ?: return
+        val progBox = sheetProgressBox ?: return
+        val actionBtn = sheetActionBtn ?: return
+        val res = latestCheckResult
 
         when {
             isDownloadingUpdate -> {
-                updateRow.isEnabled = false
-                updateDot.visibility = View.GONE
-                updateChevron.visibility = View.GONE
-                updateValue.text = "下载中"
-                updateValue.setTextColor(ThemeTokens.ACCENT_LIGHT)
-                updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-
-                updateCard.visibility = View.VISIBLE
                 titleTv.text = "正在下载安装包"
-                titleTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
                 subTv.text = "下载完成后将自动调起系统安装器"
                 notesTv.visibility = View.GONE
                 progBox.visibility = View.VISIBLE
@@ -981,69 +1085,28 @@ class SettingsScreen(
                 actionBtn.isEnabled = false
                 actionBtn.alpha = 0.5f
             }
-            isCheckingUpdate -> {
-                updateRow.isEnabled = false
-                updateDot.visibility = View.GONE
-                updateChevron.visibility = View.GONE
-                updateValue.text = "检查中..."
-                updateValue.setTextColor(ThemeTokens.TEXT_SUB)
-                updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-
-                updateCard.visibility = View.GONE
-            }
-            updateCheckError != null -> {
-                updateRow.isEnabled = true
-                updateDot.visibility = View.GONE
-                updateChevron.visibility = View.VISIBLE
-                updateValue.text = "检查失败，轻触重试"
-                updateValue.setTextColor(ThemeTokens.DANGER)
-                updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-
-                updateCard.visibility = View.GONE
-            }
-            latestCheckResult != null -> {
-                val res = latestCheckResult!!
+            res != null -> {
                 val sizeLabel = formatBytes(res.assetSizeBytes)
                 val cleanNotes = sanitizeReleaseNotes(res.releaseNotes)
-                updateRow.isEnabled = true
-
-                if (res.hasUpdate || readyToInstall) {
-                    updateDot.visibility = if (readyToInstall) View.GONE else View.VISIBLE
-                    updateChevron.visibility = View.GONE
-                    updateValue.text = if (readyToInstall) "等待安装" else "v${res.latestVersionName} 可更新"
-                    updateValue.setTextColor(ThemeTokens.ACCENT_LIGHT)
-                    updateValue.typeface = Typeface.create("sans-serif", Typeface.BOLD)
-
-                    updateCard.visibility = View.VISIBLE
-                    titleTv.text = if (readyToInstall) {
-                        "安装包已就绪"
-                    } else {
-                        "新版本 v${res.latestVersionName}"
-                    }
-                    titleTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
-                    subTv.text = buildString {
-                        append("安装包 $sizeLabel")
-                        if (res.publishedAt.isNotBlank()) {
-                            append(" · ")
-                            append(res.publishedAt.take(10))
-                        }
-                    }
-                    notesTv.text = cleanNotes
-                    notesTv.visibility = if (res.hasUpdate && cleanNotes.isNotBlank()) View.VISIBLE else View.GONE
-                    progBox.visibility = if (readyToInstall) View.VISIBLE else View.GONE
-                    actionBtn.visibility = if (readyToInstall || res.downloadUrl.isNotBlank()) View.VISIBLE else View.GONE
-                    actionBtn.text = if (readyToInstall) "立即安装" else "下载并安装"
-                    actionBtn.isEnabled = true
-                    actionBtn.alpha = 1f
+                titleTv.text = if (readyToInstall) {
+                    "安装包已就绪"
                 } else {
-                    updateDot.visibility = View.GONE
-                    updateChevron.visibility = View.GONE
-                    updateValue.text = "已是最新版本"
-                    updateValue.setTextColor(ThemeTokens.TEXT_SUB)
-                    updateValue.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-
-                    updateCard.visibility = View.GONE
+                    "发现新版本 v${res.latestVersionName}"
                 }
+                subTv.text = buildString {
+                    append("安装包 $sizeLabel")
+                    if (res.publishedAt.isNotBlank()) {
+                        append(" · ")
+                        append(res.publishedAt.take(10))
+                    }
+                }
+                notesTv.text = cleanNotes
+                notesTv.visibility = if (cleanNotes.isNotBlank()) View.VISIBLE else View.GONE
+                progBox.visibility = if (readyToInstall) View.VISIBLE else View.GONE
+                actionBtn.visibility = if (readyToInstall || res.downloadUrl.isNotBlank()) View.VISIBLE else View.GONE
+                actionBtn.text = if (readyToInstall) "立即安装" else "下载并安装"
+                actionBtn.isEnabled = true
+                actionBtn.alpha = 1f
             }
         }
     }
@@ -1063,9 +1126,9 @@ class SettingsScreen(
     }
 
     private fun updateProgressBar(downloaded: Long, total: Long) {
-        val track = aboutProgressTrack ?: return
-        val fill = aboutProgressFill ?: return
-        val label = aboutProgressLabel ?: return
+        val track = sheetProgressTrack ?: return
+        val fill = sheetProgressFill ?: return
+        val label = sheetProgressLabel ?: return
 
         val percent = if (total > 0L) {
             ((downloaded * 100L) / total).toInt().coerceIn(0, 100)
@@ -1405,6 +1468,8 @@ class SettingsScreen(
     internal fun dismissTransientOverlays() {
         activeConfirmDialog?.dismiss()
         activeConfirmDialog = null
+        updateSheetDialog?.dismiss()
+        updateSheetDialog = null
         activeDropdown?.dismiss()
         activeDropdown = null
     }
@@ -1415,22 +1480,25 @@ class SettingsScreen(
         mainAboutValueText = null
     }
 
-    private fun clearAboutHooks() {
+    private fun clearUpdateSheetHooks() {
         progressWidthAnimator?.cancel()
         progressWidthAnimator = null
+        sheetStatusTitle = null
+        sheetStatusSub = null
+        sheetNotesView = null
+        sheetProgressBox = null
+        sheetProgressFill = null
+        sheetProgressTrack = null
+        sheetProgressLabel = null
+        sheetActionBtn = null
+    }
+
+    private fun clearAboutHooks() {
+        clearUpdateSheetHooks()
         aboutUpdateRow = null
         aboutUpdateDot = null
         aboutUpdateValue = null
         aboutUpdateChevron = null
-        aboutUpdateCard = null
-        aboutStatusTitle = null
-        aboutStatusSub = null
-        aboutNotesView = null
-        aboutProgressBox = null
-        aboutProgressFill = null
-        aboutProgressTrack = null
-        aboutProgressLabel = null
-        aboutActionBtn = null
     }
 
     companion object {

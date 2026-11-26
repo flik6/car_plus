@@ -68,7 +68,8 @@ data class DropdownOption(
     val id: String,
     val title: String,
     val subtitle: String? = null,
-    val selected: Boolean = false
+    val selected: Boolean = false,
+    val danger: Boolean = false
 )
 
 /**
@@ -760,8 +761,10 @@ object AppComponents {
         anchor: View,
         options: List<DropdownOption>,
         widthDp: Int = 224,
+        alignEnd: Boolean = false,
         onSelect: (DropdownOption) -> Unit
     ): PopupWindow {
+        val popupWidthPx = dp(context, widthDp.toFloat())
         val panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
@@ -776,7 +779,7 @@ object AppComponents {
 
         val popup = PopupWindow(
             panel,
-            dp(context, widthDp.toFloat()),
+            popupWidthPx,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             true
         ).apply {
@@ -796,7 +799,13 @@ object AppComponents {
                 TextView(context).apply {
                     text = opt.title
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
-                    setTextColor(if (opt.selected) ThemeTokens.TEXT_PRIMARY else ThemeTokens.TEXT_BODY)
+                    setTextColor(
+                        when {
+                            opt.danger -> ThemeTokens.DANGER
+                            opt.selected -> ThemeTokens.TEXT_PRIMARY
+                            else -> ThemeTokens.TEXT_BODY
+                        }
+                    )
                     setTypeface(null, if (opt.selected) Typeface.BOLD else Typeface.NORMAL)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
@@ -852,13 +861,14 @@ object AppComponents {
             }
         }
 
-        panel.pivotX = 0f
+        panel.pivotX = if (alignEnd) popupWidthPx.toFloat() else 0f
         panel.pivotY = 0f
         panel.scaleX = 0.92f
         panel.scaleY = 0.92f
         panel.alpha = 0f
 
-        popup.showAsDropDown(anchor, 0, dp(context, 6f))
+        val xOff = if (alignEnd) anchor.width - popupWidthPx else 0
+        popup.showAsDropDown(anchor, xOff, dp(context, 6f))
         panel.animate()
             .scaleX(1f)
             .scaleY(1f)

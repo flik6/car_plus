@@ -360,7 +360,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             onVehicleUnbound = { unboundVin -> handleVehicleUnbound(unboundVin) },
             onStatusMessage = { showHomeStatus(it) },
             vehicleLiveSpecsProvider = { vin -> buildActiveVehicleLiveSpecs(vin) },
-            onOpenVehicleUpgrade = { featureSheets.showVehicleUpgradeSheet() }
+            onOpenVehicleUpgrade = { prefetched -> featureSheets.showVehicleUpgradeSheet(prefetched) }
         )
         featureSheets = VehicleFeatureSheets(
             context = this,
@@ -2919,15 +2919,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             QuickActionId.LOCK -> {
                 val currentlyLocked = activeTelemetry?.doorLocked ?: (carVisual?.vehicleLocked ?: true)
                 if (currentlyLocked) {
+                    carVisual?.triggerActionFeedback("unlock")
                     dispatchSmartVehicleCommand("unlock", "车门解锁")
                 } else {
+                    carVisual?.triggerActionFeedback("lock")
                     dispatchSmartVehicleCommand("lock", "车门锁止")
                 }
             }
             QuickActionId.CLIMATE -> {
                 if (activeTelemetry?.acOn == true) {
+                    carVisual?.triggerActionFeedback("ac_off")
                     dispatchSmartVehicleCommand("ac_off", "关闭空调")
                 } else {
+                    carVisual?.climateTemp = climateTemperatureCelsius
+                    carVisual?.triggerActionFeedback("ac_on")
                     dispatchSmartVehicleCommand(
                         "ac_on",
                         "开启空调",
@@ -2936,41 +2941,53 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
             QuickActionId.FLASH -> {
-                carVisual?.flashLights()
+                carVisual?.triggerActionFeedback("find_car")
                 dispatchSmartVehicleCommand("find_car", "闪灯鸣笛寻车")
             }
             QuickActionId.TRUNK -> {
                 if (activeTelemetry?.trunkOpen == true) {
+                    carVisual?.triggerActionFeedback("tailgate_close")
                     dispatchSmartVehicleCommand("tailgate_close", "关闭后备箱")
                 } else {
+                    carVisual?.triggerActionFeedback("trunk_open")
                     dispatchSmartVehicleCommand("trunk_open", "开启后备箱")
                 }
             }
             QuickActionId.ENGINE -> {
                 if (activeTelemetry?.engineRunning == true) {
+                    carVisual?.triggerActionFeedback("engine_stop")
                     dispatchSmartVehicleCommand("engine_stop", "远程熄火")
                 } else {
+                    carVisual?.triggerActionFeedback("engine_start")
                     dispatchSmartVehicleCommand("engine_start", "远程启动引擎")
                 }
             }
             QuickActionId.WINDOW -> {
                 if (areWindowsOpen(activeTelemetry)) {
+                    carVisual?.triggerActionFeedback("window_close")
                     dispatchSmartVehicleCommand("window_close", "关闭车窗")
                 } else {
+                    carVisual?.triggerActionFeedback("window_open")
                     dispatchSmartVehicleCommand("window_open", "打开车窗")
                 }
             }
             QuickActionId.WINDOW_VENT -> {
+                carVisual?.windowsMode = "vent"
+                carVisual?.triggerActionFeedback("window_ventilate")
                 dispatchSmartVehicleCommand("window_ventilate", "车窗透气")
             }
             QuickActionId.SUNROOF -> {
                 if (isSkylightOpen(activeTelemetry?.skylightState)) {
+                    carVisual?.triggerActionFeedback("skylight_close")
                     dispatchSmartVehicleCommand("skylight_close", "关闭天窗")
                 } else {
+                    carVisual?.triggerActionFeedback("skylight_open")
                     dispatchSmartVehicleCommand("skylight_open", "打开天窗")
                 }
             }
             QuickActionId.SUNROOF_TILT -> {
+                carVisual?.skylightMode = "tilt"
+                carVisual?.triggerActionFeedback("skylight_tilt")
                 dispatchSmartVehicleCommand("skylight_tilt", "天窗翘起")
             }
         }
@@ -3465,13 +3482,28 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val acActive = telemetry?.acOn == true
         val trunkIsOpen = telemetry?.trunkOpen == true
 
+        val skylightIsOpen = isSkylightOpen(telemetry?.skylightState)
+        val skylightIsTilted = isSkylightTilted(telemetry?.skylightState)
+        val resolvedSkylightMode = when {
+            skylightIsTilted -> "tilt"
+            skylightIsOpen -> "open"
+            else -> "closed"
+        }
+        val resolvedWindowsMode = when {
+            areWindowsOpen(telemetry) -> "open"
+            else -> "closed"
+        }
+
         carVisual?.apply {
             modelKey = modelName.ifBlank { "arrizo8" }
             vehicleLocked = effectiveLocked
             doorsOpen = physicalDoorsOpen
             climateOn = acActive
+            climateTemp = climateTemperatureCelsius
             trunkOpen = trunkIsOpen
-            skylightOpen = isSkylightOpen(telemetry?.skylightState)
+            skylightOpen = skylightIsOpen
+            skylightMode = resolvedSkylightMode
+            windowsMode = resolvedWindowsMode
             engineRunning = telemetry?.engineRunning == true
         }
 

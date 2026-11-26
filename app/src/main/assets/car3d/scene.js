@@ -6,11 +6,15 @@
   var DEFAULT_PHI = 1.38;     // Sleek ~79° eye-level automotive showroom angle
   var CAR_CENTER_Y = 0.58;    // True optical vertical center of the 3D vehicle
   var HERO_RADIUS = 8.45;     // Initial fallback radius before first resize
+  var WHEELBASE_M = 2.77;     // Arrizo 8 physical wheelbase (meters)
+  var DEFAULT_WHEEL_R = 0.342;
 
   var renderer, scene, camera, envMap, gltfLoader;
   var currentContainer = null;
+  var currentChassis = null;
   var currentModelKey = null;
   var currentEffects = null;
+  var currentRig = null;
   var renderActive = true;
   var rafId = null;
   var lastTime = 0;
@@ -23,19 +27,86 @@
   var lastViewOffsetW = 0;
   var lastViewOffsetH = 0;
 
-  // Entrance drive-in animation: car drives in from screen-right to center, then rotates to hero 3/4 pose
+  // Damped spring-mass chassis suspension state (body moves independently over grounded wheels)
+  var suspension = {
+    pitch: 0, pitchVel: 0,
+    roll: 0, rollVel: 0,
+    heave: 0, heaveVel: 0
+  };
+
+  function impulseSuspension(dPitch, dRoll, dHeave) {
+    suspension.pitchVel += dPitch;
+    suspension.rollVel += dRoll;
+    suspension.heaveVel += dHeave;
+  }
+
+  function stepSuspension(dt, targetPitch, targetRoll, targetHeave) {
+    var kPitch = 36.0, cPitch = 8.4;
+    var kRoll = 42.0, cRoll = 9.2;
+    var kHeave = 48.0, cHeave = 10.0;
+
+    var accP = kPitch * (targetPitch - suspension.pitch) - cPitch * suspension.pitchVel;
+    var accR = kRoll * (targetRoll - suspension.roll) - cRoll * suspension.rollVel;
+    var accH = kHeave * (targetHeave - suspension.heave) - cHeave * suspension.heaveVel;
+
+    suspension.pitchVel += accP * dt;
+    suspension.rollVel += accR * dt;
+    suspension.heaveVel += accH * dt;
+
+    suspension.pitch += suspension.pitchVel * dt;
+    suspension.roll += suspension.rollVel * dt;
+    suspension.heave += suspension.heaveVel * dt;
+  }
+
+  // Physically grounded curved drive-in parking animation:
+  // Vehicle rolls in from screen-right along a smooth sweeping arc, wheels spin by real arc length,
+  // front wheels steer into the curve then straighten, brake lights glow while decelerating,
+  // and damped spring suspension settles smoothly on stop.
   var entrance = {
     active: false,
     elapsed: 0,
-    driveDuration: 1.05,
-    turnStart: 0.78,
-    turnDuration: 0.78,
-    startDist: 8.2,
-    startYaw: DEFAULT_THETA - Math.PI / 2,
-    rightX: Math.cos(DEFAULT_THETA),
-    rightZ: -Math.sin(DEFAULT_THETA),
-    headGlow: 0
+    duration: 1.72,
+    settleHold: 0.28,
+    p0: null,
+    p1: null,
+    p2: null,
+    p3: null,
+    prevX: 0,
+    prevZ: 0,
+    prevSpeed: 0,
+    prevYaw: 0,
+    wheelSpin: 0,
+    steerAngle: 0,
+    headGlow: 0,
+    brakeGlow: 0,
+    stopPulseFired: false
   };
+
+  function evalCubicBezier(p0, p1, p2, p3, u) {
+    var inv = 1.0 - u;
+    var inv2 = inv * inv;
+    var u2 = u * u;
+    return {
+      x: inv2 * inv * p0.x + 3 * inv2 * u * p1.x + 3 * inv * u2 * p2.x + u2 * u * p3.x,
+      z: inv2 * inv * p0.z + 3 * inv2 * u * p1.z + 3 * inv * u2 * p2.z + u2 * u * p3.z
+    };
+  }
+
+  function evalCubicBezierDeriv(p0, p1, p2, p3, u) {
+    var inv = 1.0 - u;
+    return {
+      x: 3 * inv * inv * (p1.x - p0.x) + 6 * inv * u * (p2.x - p1.x) + 3 * u * u * (p3.x - p2.x),
+      z: 3 * inv * inv * (p1.z - p0.z) + 6 * inv * u * (p2.z - p1.z) + 3 * u * u * (p3.z - p2.z)
+    };
+  }
+
+  function evalCubicBezierSecondDeriv(p0, p1, p2, p3, u) {
+    var inv = 1.0 - u;
+    return {
+      x: 6 * inv * (p2.x - 2 * p1.x + p0.x) + 6 * u * (p3.x - 2 * p2.x + p1.x),
+      z: 6 * inv * (p2.z - 2 * p1.z + p0.z) + 6 * u * (p3.z - 2 * p2.z + p1.z)
+    };
+  }
 
   function startEntranceAnimation() {
     if (!currentContainer || hasCustomDemoAngle) return;
@@ -50,24 +121,53 @@
     orbit.targetPhi = DEFAULT_PHI;
     updateCameraPosition();
 
+    // Screen-right unit vector in world XZ plane for DEFAULT_THETA camera
+    var rx = Math.cos(DEFAULT_THETA);
+    var rz = -Math.sin(DEFAULT_THETA);
+
+    // Curved showroom drive-in path:
+    // Starts off-screen right-rear, enters heading left-forward, then smoothly sweeps into
+    // final parked heading (0, 0, +Z) at origin (0, 0) with exact tangent alignment!
+    entrance.p0 = { x: rx * 7.8, z: rz * 7.8 - 1.2 };
+    entrance.p1 = { x: rx * 3.8, z: rz * 3.8 - 1.8 };
+    entrance.p2 = { x: 0.0, z: -2.45 };
+    entrance.p3 = { x: 0.0, z: 0.0 };
+
     entrance.active = true;
     entrance.elapsed = 0;
-    entrance.startYaw = DEFAULT_THETA - Math.PI / 2;
-    entrance.rightX = Math.cos(DEFAULT_THETA);
-    entrance.rightZ = -Math.sin(DEFAULT_THETA);
-    entrance.headGlow = 0.55;
+    entrance.wheelSpin = 0;
+    entrance.steerAngle = 0;
+    entrance.headGlow = 0.65;
+    entrance.brakeGlow = 0.0;
+    entrance.stopPulseFired = false;
 
-    currentContainer.position.set(entrance.rightX * entrance.startDist, 0, entrance.rightZ * entrance.startDist);
-    currentContainer.rotation.set(0, entrance.startYaw, 0);
+    var d0 = evalCubicBezierDeriv(entrance.p0, entrance.p1, entrance.p2, entrance.p3, 0.0);
+    var initYaw = Math.atan2(d0.x, d0.z);
+    entrance.prevX = entrance.p0.x;
+    entrance.prevZ = entrance.p0.z;
+    entrance.prevSpeed = 0;
+    entrance.prevYaw = initYaw;
+
+    suspension.pitch = 0; suspension.pitchVel = 0;
+    suspension.roll = 0; suspension.rollVel = 0;
+    suspension.heave = 0; suspension.heaveVel = 0;
+
+    currentContainer.position.set(entrance.p0.x, 0, entrance.p0.z);
+    currentContainer.rotation.set(0, initYaw, 0);
   }
 
   function finishEntranceImmediately() {
     if (!entrance.active) return;
     entrance.active = false;
     entrance.headGlow = 0;
+    entrance.brakeGlow = 0;
+    entrance.steerAngle = 0;
     if (currentContainer) {
       currentContainer.position.set(0, 0, 0);
       currentContainer.rotation.set(0, 0, 0);
+    }
+    if (currentRig) {
+      currentRig.setSteering(0);
     }
   }
 
@@ -77,7 +177,10 @@
     doorsOpen: false,
     trunkOpen: false,
     skylightOpen: false,
+    skylightMode: 'closed',   // 'closed' | 'tilt' | 'open'
+    windowsMode: 'closed',    // 'closed' | 'vent' | 'open'
     climateOn: false,
+    climateTemp: 23.0,
     engineRunning: false
   };
 
@@ -120,6 +223,347 @@
   }
 
   /**
+   * Version-independent world-transform-preserving reparent helper.
+   */
+  function reparentKeepWorld(child, newParent) {
+    if (!child || !newParent) return;
+    child.updateMatrixWorld(true);
+    newParent.updateMatrixWorld(true);
+    var invParent = new THREE.Matrix4().copy(newParent.matrixWorld).invert();
+    var localMat = new THREE.Matrix4().multiplyMatrices(invParent, child.matrixWorld);
+    if (child.parent) {
+      child.parent.remove(child);
+    }
+    newParent.add(child);
+    localMat.decompose(child.position, child.quaternion, child.scale);
+    child.updateMatrixWorld(true);
+  }
+
+  /**
+   * Splits a multi-wheel merged BufferGeometry (all 4 wheels in one mesh) into
+   * 4 clean quadrant BufferGeometries (FL, FR, RL, RR) in container-space so each
+   * wheel can roll independently and front wheels can physically steer.
+   */
+  function splitWheelGeometryByQuadrant(mesh, zMid) {
+    var src = mesh.geometry;
+    if (!src || !src.attributes || !src.attributes.position) return null;
+    mesh.updateMatrixWorld(true);
+    var matWorld = mesh.matrixWorld;
+    var normalMat = new THREE.Matrix3().getNormalMatrix(matWorld);
+
+    var posAttr = src.attributes.position;
+    var normAttr = src.attributes.normal || null;
+    var uvAttr = src.attributes.uv || null;
+    var indexAttr = src.index || null;
+
+    var buckets = {
+      FL: { pos: [], norm: [], uv: [] },
+      FR: { pos: [], norm: [], uv: [] },
+      RL: { pos: [], norm: [], uv: [] },
+      RR: { pos: [], norm: [], uv: [] }
+    };
+
+    var v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+    var n0 = new THREE.Vector3(), n1 = new THREE.Vector3(), n2 = new THREE.Vector3();
+
+    var triCount = indexAttr ? Math.floor(indexAttr.count / 3) : Math.floor(posAttr.count / 3);
+    for (var t = 0; t < triCount; t++) {
+      var i0 = indexAttr ? indexAttr.getX(t * 3) : t * 3;
+      var i1 = indexAttr ? indexAttr.getX(t * 3 + 1) : t * 3 + 1;
+      var i2 = indexAttr ? indexAttr.getX(t * 3 + 2) : t * 3 + 2;
+
+      v0.fromBufferAttribute(posAttr, i0).applyMatrix4(matWorld);
+      v1.fromBufferAttribute(posAttr, i1).applyMatrix4(matWorld);
+      v2.fromBufferAttribute(posAttr, i2).applyMatrix4(matWorld);
+
+      var cx = (v0.x + v1.x + v2.x) / 3;
+      var cz = (v0.z + v1.z + v2.z) / 3;
+      var key = (cz > zMid ? 'F' : 'R') + (cx < 0 ? 'L' : 'R');
+      var b = buckets[key];
+
+      b.pos.push(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z);
+
+      if (normAttr) {
+        n0.fromBufferAttribute(normAttr, i0).applyMatrix3(normalMat).normalize();
+        n1.fromBufferAttribute(normAttr, i1).applyMatrix3(normalMat).normalize();
+        n2.fromBufferAttribute(normAttr, i2).applyMatrix3(normalMat).normalize();
+        b.norm.push(n0.x, n0.y, n0.z, n1.x, n1.y, n1.z, n2.x, n2.y, n2.z);
+      }
+      if (uvAttr) {
+        b.uv.push(
+          uvAttr.getX(i0), uvAttr.getY(i0),
+          uvAttr.getX(i1), uvAttr.getY(i1),
+          uvAttr.getX(i2), uvAttr.getY(i2)
+        );
+      }
+    }
+
+    return buckets;
+  }
+
+  function buildCenteredGeometry(bucket, center) {
+    if (!bucket || bucket.pos.length === 0) return null;
+    var geo = new THREE.BufferGeometry();
+    var p = new Float32Array(bucket.pos.length);
+    for (var i = 0; i < bucket.pos.length; i += 3) {
+      p[i] = bucket.pos[i] - center.x;
+      p[i + 1] = bucket.pos[i + 1] - center.y;
+      p[i + 2] = bucket.pos[i + 2] - center.z;
+    }
+    geo.setAttribute('position', new THREE.BufferAttribute(p, 3));
+    if (bucket.norm.length === bucket.pos.length) {
+      geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bucket.norm), 3));
+    } else {
+      geo.computeVertexNormals();
+    }
+    if (bucket.uv.length > 0) {
+      geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(bucket.uv), 2));
+    }
+    return geo;
+  }
+
+  /**
+   * Builds physically articulated sub-assemblies directly from the real Arrizo 8 GLB:
+   * - 4 independent rolling wheels (FL/FR with Ackermann steering knuckles + fixed brake calipers)
+   * - Real hinged rear trunk lid (ar8:mesh_1 .. ar8:mesh_1_7)
+   * - Real front panoramic sunroof panel (ar8:Door_Sunroof: tilt & slide)
+   * - Real 4 side window glass panels (mesh_2_4, mesh_3_2, mesh_4_4, mesh_5_2)
+   */
+  function setupVehicleRig(container, chassisGroup, model) {
+    container.updateMatrixWorld(true);
+
+    var wheelMeshes = [];
+    var trunkNodes = [];
+    var windowNodes = [];
+    var sunroofNode = null;
+
+    var trunkNodeRe = /mesh_1($|_\d)/;
+    var wheelMeshRe = /mesh_0(\.|_|$)/;
+    var windowNodeRe = /mesh_(2_4|3_2|4_4|5_2)(_|$)/;
+
+    model.traverse(function (obj) {
+      var nm = obj.name || '';
+      if (!sunroofNode && nm.toLowerCase().indexOf('sunroof') !== -1 && !obj.isMesh) {
+        sunroofNode = obj;
+      }
+      if (obj.isMesh && wheelMeshRe.test(nm)) {
+        wheelMeshes.push(obj);
+      }
+      if (!obj.isMesh && trunkNodeRe.test(nm)) {
+        trunkNodes.push(obj);
+      }
+      if (obj.isMesh && windowNodeRe.test(nm)) {
+        windowNodes.push(obj);
+      }
+    });
+
+    // 1. Split 4 wheels out of chassisGroup and attach them directly to grounded container
+    var wheelAssemblies = { FL: null, FR: null, RL: null, RR: null };
+    var wheelRadius = DEFAULT_WHEEL_R;
+    if (wheelMeshes.length > 0) {
+      var allWheelsBox = new THREE.Box3();
+      for (var w = 0; w < wheelMeshes.length; w++) {
+        allWheelsBox.expandByObject(wheelMeshes[w]);
+      }
+      var zMid = (allWheelsBox.min.z + allWheelsBox.max.z) * 0.5;
+
+      var splitEntries = [];
+      var quadBounds = {
+        FL: new THREE.Box3(),
+        FR: new THREE.Box3(),
+        RL: new THREE.Box3(),
+        RR: new THREE.Box3()
+      };
+
+      for (var wm = 0; wm < wheelMeshes.length; wm++) {
+        var mesh = wheelMeshes[wm];
+        var buckets = splitWheelGeometryByQuadrant(mesh, zMid);
+        if (!buckets) continue;
+        var matName = (mesh.material && mesh.material.name) ? mesh.material.name : '';
+        var isCaliper = mesh.name.indexOf('mesh_0_4') !== -1 && matName.indexOf('phong10SG1') !== -1;
+        var isTire = mesh.name.indexOf('mesh_0.001') !== -1 && matName.indexOf('phong19SG1') !== -1;
+        splitEntries.push({
+          buckets: buckets,
+          material: mesh.material,
+          isCaliper: isCaliper,
+          isTire: isTire
+        });
+        if (isTire) {
+          ['FL', 'FR', 'RL', 'RR'].forEach(function (q) {
+            var arr = buckets[q].pos;
+            var pt = new THREE.Vector3();
+            for (var p = 0; p < arr.length; p += 3) {
+              pt.set(arr[p], arr[p + 1], arr[p + 2]);
+              quadBounds[q].expandByPoint(pt);
+            }
+          });
+        }
+        mesh.visible = false;
+      }
+
+      // Fallback bounds if tire mesh wasn't matched by name
+      ['FL', 'FR', 'RL', 'RR'].forEach(function (q) {
+        if (quadBounds[q].isEmpty()) {
+          for (var se = 0; se < splitEntries.length; se++) {
+            var arr = splitEntries[se].buckets[q].pos;
+            var pt = new THREE.Vector3();
+            for (var p = 0; p < arr.length; p += 3) {
+              pt.set(arr[p], arr[p + 1], arr[p + 2]);
+              quadBounds[q].expandByPoint(pt);
+            }
+          }
+        }
+      });
+
+      var sampleRadiusSum = 0;
+      var sampleRadiusCount = 0;
+      ['FL', 'FR', 'RL', 'RR'].forEach(function (q) {
+        var b = quadBounds[q];
+        if (b.isEmpty()) return;
+        var center = new THREE.Vector3();
+        b.getCenter(center);
+        var rad = (b.max.y - b.min.y) * 0.5;
+        if (rad > 0.15 && rad < 0.65) {
+          sampleRadiusSum += rad;
+          sampleRadiusCount++;
+        }
+
+        var steerPivot = new THREE.Group();
+        steerPivot.name = 'wheel_steer_' + q;
+        steerPivot.position.copy(center);
+        container.add(steerPivot);
+
+        var rollPivot = new THREE.Group();
+        rollPivot.name = 'wheel_roll_' + q;
+        steerPivot.add(rollPivot);
+
+        for (var se = 0; se < splitEntries.length; se++) {
+          var entry = splitEntries[se];
+          var geo = buildCenteredGeometry(entry.buckets[q], center);
+          if (!geo) continue;
+          var partMesh = new THREE.Mesh(geo, entry.material);
+          if (entry.isCaliper) {
+            steerPivot.add(partMesh);
+          } else {
+            rollPivot.add(partMesh);
+          }
+        }
+        wheelAssemblies[q] = { steerPivot: steerPivot, rollPivot: rollPivot };
+      });
+      if (sampleRadiusCount > 0) {
+        wheelRadius = sampleRadiusSum / sampleRadiusCount;
+      }
+    }
+
+    // 2. Real hinged rear trunk lid assembly (mesh_1 .. mesh_1_7)
+    var trunkPivot = null;
+    if (trunkNodes.length > 0) {
+      var trunkBox = new THREE.Box3();
+      for (var tn = 0; tn < trunkNodes.length; tn++) {
+        trunkBox.expandByObject(trunkNodes[tn]);
+      }
+      if (!trunkBox.isEmpty()) {
+        trunkPivot = new THREE.Group();
+        trunkPivot.name = 'trunk_hinge_pivot';
+        trunkPivot.position.set(
+          (trunkBox.min.x + trunkBox.max.x) * 0.5,
+          trunkBox.max.y - 0.015,
+          trunkBox.max.z - 0.04
+        );
+        chassisGroup.add(trunkPivot);
+        for (var tr = 0; tr < trunkNodes.length; tr++) {
+          reparentKeepWorld(trunkNodes[tr], trunkPivot);
+        }
+      }
+    }
+
+    // 3. Real hinged/sliding sunroof glass panel (ar8:Door_Sunroof)
+    var sunroofPivot = null;
+    var sunroofPivotBase = null;
+    if (sunroofNode) {
+      var skyBox = new THREE.Box3().setFromObject(sunroofNode);
+      if (!skyBox.isEmpty()) {
+        sunroofPivot = new THREE.Group();
+        sunroofPivot.name = 'sunroof_pivot';
+        // Front hinge line so positive rotation.x lifts the rear edge cleanly for tilt!
+        sunroofPivot.position.set(
+          (skyBox.min.x + skyBox.max.x) * 0.5,
+          skyBox.max.y - 0.012,
+          skyBox.max.z - 0.02
+        );
+        sunroofPivotBase = sunroofPivot.position.clone();
+        chassisGroup.add(sunroofPivot);
+        reparentKeepWorld(sunroofNode, sunroofPivot);
+      }
+    }
+
+    // 4. Real 4 side window glass panels (drop cleanly into door panels)
+    var windowItems = [];
+    for (var wi = 0; wi < windowNodes.length; wi++) {
+      var wMesh = windowNodes[wi];
+      var clonedMat = Array.isArray(wMesh.material)
+        ? wMesh.material.map(function (m) { return m.clone(); })
+        : wMesh.material.clone();
+      wMesh.material = clonedMat;
+      var baseOp = Array.isArray(clonedMat) ? clonedMat[0].opacity : clonedMat.opacity;
+      windowItems.push({
+        mesh: wMesh,
+        baseY: wMesh.position.y,
+        baseOpacity: typeof baseOp === 'number' ? baseOp : 0.28,
+        // Convert world-meters drop into mesh parent's local units
+        localPerMeter: 1.0 / Math.max(0.0001, wMesh.getWorldScale(new THREE.Vector3()).y)
+      });
+    }
+
+    return {
+      wheelRadius: wheelRadius,
+      setWheelRoll: function (angleRad) {
+        ['FL', 'FR', 'RL', 'RR'].forEach(function (q) {
+          if (wheelAssemblies[q]) {
+            wheelAssemblies[q].rollPivot.rotation.x = angleRad;
+          }
+        });
+      },
+      setSteering: function (centerSteerRad) {
+        var clamped = clamp(centerSteerRad, -0.52, 0.52);
+        // Subtle Ackermann inner/outer steering geometry
+        var innerGain = 1.08;
+        var outerGain = 0.93;
+        var flAngle = clamped > 0 ? clamped * innerGain : clamped * outerGain;
+        var frAngle = clamped > 0 ? clamped * outerGain : clamped * innerGain;
+        if (wheelAssemblies.FL) wheelAssemblies.FL.steerPivot.rotation.y = flAngle;
+        if (wheelAssemblies.FR) wheelAssemblies.FR.steerPivot.rotation.y = frAngle;
+      },
+      setTrunkOpenProgress: function (p) {
+        if (!trunkPivot) return;
+        // Positive X rotation lifts the rear (-Z) trunk lid upward ~54°
+        trunkPivot.rotation.x = clamp(p, 0, 1) * 0.94;
+      },
+      setSunroofState: function (tiltP, slideP) {
+        if (!sunroofPivot || !sunroofPivotBase) return;
+        var tP = clamp(tiltP, 0, 1);
+        var sP = clamp(slideP, 0, 1);
+        sunroofPivot.rotation.x = tP * 0.17 + sP * 0.045;
+        sunroofPivot.position.y = sunroofPivotBase.y + sP * 0.032 + tP * 0.004;
+        sunroofPivot.position.z = sunroofPivotBase.z - sP * 0.36;
+      },
+      setWindowDropProgress: function (dropMeters) {
+        var clampedDrop = clamp(dropMeters, 0, 0.34);
+        var fadeFactor = 1.0 - smoothstep(0.18, 0.34, clampedDrop) * 0.88;
+        for (var i = 0; i < windowItems.length; i++) {
+          var item = windowItems[i];
+          item.mesh.position.y = item.baseY - clampedDrop * item.localPerMeter;
+          var mats = Array.isArray(item.mesh.material) ? item.mesh.material : [item.mesh.material];
+          for (var m = 0; m < mats.length; m++) {
+            mats[m].transparent = true;
+            mats[m].opacity = item.baseOpacity * fadeFactor;
+          }
+        }
+      }
+    };
+  }
+
+  /**
    * High-contrast automotive photography studio HDR softbox environment map
    * so metallic paint, chrome grille, and tinted glass gleam cleanly on #161719.
    */
@@ -130,7 +574,6 @@
     var envScene = new THREE.Scene();
     envScene.background = new THREE.Color(0x1f2430);
 
-    // Overhead main studio softbox
     var topBox = new THREE.Mesh(
       new THREE.PlaneGeometry(16, 24),
       new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide })
@@ -139,7 +582,6 @@
     topBox.rotation.x = Math.PI / 2;
     envScene.add(topBox);
 
-    // Left key light softbox strip
     var leftStrip = new THREE.Mesh(
       new THREE.PlaneGeometry(18, 3.6),
       new THREE.MeshBasicMaterial({ color: 0xf4f8ff, side: THREE.DoubleSide })
@@ -148,7 +590,6 @@
     leftStrip.rotation.y = -Math.PI / 2;
     envScene.add(leftStrip);
 
-    // Right fill softbox strip
     var rightStrip = new THREE.Mesh(
       new THREE.PlaneGeometry(18, 3.2),
       new THREE.MeshBasicMaterial({ color: 0xe2ecff, side: THREE.DoubleSide })
@@ -157,7 +598,6 @@
     rightStrip.rotation.y = Math.PI / 2;
     envScene.add(rightStrip);
 
-    // Front horizon highlight bar (illuminates grille & hood contours)
     var frontBar = new THREE.Mesh(
       new THREE.PlaneGeometry(14, 2.8),
       new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide })
@@ -165,7 +605,6 @@
     frontBar.position.set(0, 2.2, 9.0);
     envScene.add(frontBar);
 
-    // Rear rim highlight bar (outlines fastback & tail)
     var rearBar = new THREE.Mesh(
       new THREE.PlaneGeometry(14, 2.4),
       new THREE.MeshBasicMaterial({ color: 0xdbe6f8, side: THREE.DoubleSide })
@@ -173,7 +612,6 @@
     rearBar.position.set(0, 2.4, -9.0);
     envScene.add(rearBar);
 
-    // Subtle lower bounce strip so lower doors and wheels stay legible
     var lowerRing = new THREE.Mesh(
       new THREE.CylinderGeometry(10, 10, 1.4, 32, 1, true),
       new THREE.MeshBasicMaterial({ color: 0x6b778c, side: THREE.BackSide })
@@ -225,21 +663,6 @@
     return tex;
   }
 
-  function createGlowTexture(innerRgb, outerRgb) {
-    var canvas = document.createElement('canvas');
-    canvas.width = 128;
-    canvas.height = 128;
-    var ctx = canvas.getContext('2d');
-    var grad = ctx.createRadialGradient(64, 64, 2, 64, 64, 62);
-    grad.addColorStop(0.0, 'rgba(' + innerRgb + ', 1.0)');
-    grad.addColorStop(0.28, 'rgba(' + outerRgb + ', 0.65)');
-    grad.addColorStop(0.65, 'rgba(' + outerRgb + ', 0.14)');
-    grad.addColorStop(1.0, 'rgba(' + outerRgb + ', 0.0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 128, 128);
-    return new THREE.CanvasTexture(canvas);
-  }
-
   function createSleekLightBarTexture(coreRgb, edgeRgb) {
     var canvas = document.createElement('canvas');
     canvas.width = 256;
@@ -247,7 +670,6 @@
     var ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, 256, 64);
 
-    // Ultra-tight horizontal LED beam-lens strip (no round blob)
     ctx.save();
     ctx.translate(128, 32);
     ctx.scale(1.0, 0.24);
@@ -265,14 +687,21 @@
     return new THREE.CanvasTexture(canvas);
   }
 
-  function createInteractiveOverlays(carRoot, gltfScene) {
+  function resolveClimateColorHex(tempC) {
+    var t = typeof tempC === 'number' && isFinite(tempC) ? tempC : 23.0;
+    if (t <= 21.0) return 0x38bdf8;   // Crisp icy cyan-blue
+    if (t <= 23.5) return 0x60a5fa;   // Cool sky blue
+    if (t <= 25.0) return 0xb8d4f8;   // Neutral comfort mist
+    return 0xfb923c;                  // Warm cabin amber
+  }
+
+  function createInteractiveOverlays(chassisRoot, gltfScene, rig) {
     var headBarTex = createSleekLightBarTexture('240, 247, 255', '196, 224, 255');
     var tailBarTex = createSleekLightBarTexture('255, 42, 42', '255, 30, 30');
 
     var headBarSprites = [];
     var tailBarSprites = [];
 
-    // Ultra-tight horizontal white headlamp & red taillight lens accents (zero ground reflections)
     for (var side = -1; side <= 1; side += 2) {
       var hb = new THREE.Sprite(new THREE.SpriteMaterial({
         map: headBarTex,
@@ -284,7 +713,7 @@
       }));
       hb.position.set(side * 0.67, 0.77, 2.16);
       hb.scale.set(0.34, 0.085, 1);
-      carRoot.add(hb);
+      chassisRoot.add(hb);
       headBarSprites.push(hb);
 
       var tb = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -297,11 +726,11 @@
       }));
       tb.position.set(side * 0.66, 0.90, -2.26);
       tb.scale.set(0.34, 0.075, 1);
-      carRoot.add(tb);
+      chassisRoot.add(tb);
       tailBarSprites.push(tb);
     }
 
-    // 3D climate airflow ribbons above cabin roof
+    // 3D climate airflow ribbons (dynamically tinted by target cabin temperature)
     var airflowGroup = new THREE.Group();
     airflowGroup.visible = false;
     var ribbons = [];
@@ -324,30 +753,74 @@
       airflowGroup.add(mesh);
       ribbons.push({ mesh: mesh, mat: mat, phaseOffset: i * 1.1 });
     }
-    carRoot.add(airflowGroup);
+    chassisRoot.add(airflowGroup);
 
-    // Locate sunroof, front headlamp/DRL, and rear taillight materials inside the real GLB
-    var sunroofNode = null;
-    var sunroofBasePos = null;
+    // Subtle rising side-window ventilation airflow streaks (visible during window vent mode)
+    var ventGroup = new THREE.Group();
+    ventGroup.visible = false;
+    var ventStreaks = [];
+    for (var vs = -1; vs <= 1; vs += 2) {
+      for (var vz = 0; vz < 2; vz++) {
+        var zPos = vz === 0 ? 0.36 : -0.48;
+        var vCurve = new THREE.CatmullRomCurve3([
+          new THREE.Vector3(vs * 0.74, 1.24, zPos),
+          new THREE.Vector3(vs * 0.88, 1.40, zPos - 0.14),
+          new THREE.Vector3(vs * 0.95, 1.56, zPos - 0.32)
+        ]);
+        var vMat = new THREE.MeshBasicMaterial({
+          color: 0xa5d8ff,
+          transparent: true,
+          opacity: 0.0,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        });
+        var vMesh = new THREE.Mesh(new THREE.TubeGeometry(vCurve, 20, 0.008, 6, false), vMat);
+        ventGroup.add(vMesh);
+        ventStreaks.push({ mesh: vMesh, mat: vMat, phase: (vs > 0 ? 0 : 1.4) + vz * 0.85 });
+      }
+    }
+    chassisRoot.add(ventGroup);
+
+    // Subtle expanding 3D acoustic horn wave rings from front grille for Find-Car
+    var hornGroup = new THREE.Group();
+    hornGroup.visible = false;
+    var hornRings = [];
+    for (var hr = 0; hr < 2; hr++) {
+      var ringGeo = new THREE.RingGeometry(0.18, 0.215, 48);
+      var ringMat = new THREE.MeshBasicMaterial({
+        color: 0xdbeafe,
+        transparent: true,
+        opacity: 0.0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      });
+      var ringMesh = new THREE.Mesh(ringGeo, ringMat);
+      ringMesh.position.set(0, 0.66, 2.38);
+      hornGroup.add(ringMesh);
+      hornRings.push({ mesh: ringMesh, mat: ringMat, delay: hr * 0.24 });
+    }
+    chassisRoot.add(hornGroup);
+
+    // Locate front headlamp/DRL and rear taillight materials inside the real GLB
     var headMats = [];
     var tailMats = [];
     gltfScene.traverse(function (obj) {
-      if (obj.name && obj.name.toLowerCase().indexOf('sunroof') !== -1 && !sunroofNode) {
-        sunroofNode = obj;
-        sunroofBasePos = obj.position.clone();
-      }
       if (obj.isMesh && obj.material) {
         var isFrontLampMesh = obj.name && obj.name.indexOf('mesh_9_ar8') !== -1;
         if (isFrontLampMesh && !Array.isArray(obj.material)) {
-          // Clone shared chrome/reflector material on front headlamp mesh so only front lamps glow
           obj.material = obj.material.clone();
           headMats.push(obj.material);
         }
         var mats = Array.isArray(obj.material) ? obj.material : [obj.material];
         for (var m = 0; m < mats.length; m++) {
           var mt = mats[m];
-          var isRedTail = (mt.name && mt.name.indexOf('phong10SG1') !== -1) ||
-            (mt.color && mt.color.r > 0.4 && mt.color.g < 0.12 && mt.color.b < 0.12);
+          // Exclude red brake caliper material (mesh_0_4) so calipers never glow like taillights
+          var isCaliperMesh = obj.name && obj.name.indexOf('mesh_0_4') !== -1;
+          var isRedTail = !isCaliperMesh && (
+            (mt.name && mt.name.indexOf('phong10SG1') !== -1) ||
+            (mt.color && mt.color.r > 0.4 && mt.color.g < 0.12 && mt.color.b < 0.12)
+          );
           if (isRedTail && tailMats.indexOf(mt) === -1) {
             tailMats.push(mt);
           }
@@ -358,46 +831,141 @@
     var anim = {
       flashActive: false,
       flashElapsed: 0,
+      flashPattern: 'double', // 'single' (lock) | 'double' (unlock/find_car)
       flashLevel: 0,
-      sunroofProgress: 0
+      hornActive: false,
+      hornElapsed: 0,
+      trunkProgress: 0,
+      sunroofTilt: 0,
+      sunroofSlide: 0,
+      windowDrop: 0,
+      prevTrunkOpen: false,
+      prevEngineRunning: false,
+      prevLocked: true
     };
 
-    // Crisp 2-flash unlocking cadence: 180ms ON -> 140ms OFF -> 180ms ON -> 220ms smooth fade-out (0.72s total)
-    var FLASH_TOTAL = 0.72;
+    var DOUBLE_FLASH_TOTAL = 0.72;
+    var SINGLE_FLASH_TOTAL = 0.42;
 
     function sampleDoubleFlash(tSec) {
-      if (tSec < 0 || tSec >= FLASH_TOTAL) return 0;
-      if (tSec < 0.02) return tSec / 0.02;                // 20ms crisp LED attack
-      if (tSec < 0.18) return 1.0;                        // Flash 1 hold
-      if (tSec < 0.32) return 0.0;                        // 140ms clean off gap
-      if (tSec < 0.34) return (tSec - 0.32) / 0.02;       // 20ms crisp LED attack
-      if (tSec < 0.50) return 1.0;                        // Flash 2 hold
-      var decay = (tSec - 0.50) / 0.22;                   // 220ms smooth fade back to rest
+      if (tSec < 0 || tSec >= DOUBLE_FLASH_TOTAL) return 0;
+      if (tSec < 0.02) return tSec / 0.02;
+      if (tSec < 0.18) return 1.0;
+      if (tSec < 0.32) return 0.0;
+      if (tSec < 0.34) return (tSec - 0.32) / 0.02;
+      if (tSec < 0.50) return 1.0;
+      var decay = (tSec - 0.50) / 0.22;
       return Math.max(0, 1.0 - decay * decay);
+    }
+
+    function sampleSingleFlash(tSec) {
+      if (tSec < 0 || tSec >= SINGLE_FLASH_TOTAL) return 0;
+      if (tSec < 0.02) return tSec / 0.02;
+      if (tSec < 0.20) return 1.0;
+      var decay = (tSec - 0.20) / 0.22;
+      return Math.max(0, 1.0 - decay * decay);
+    }
+
+    function startFlash(pattern) {
+      anim.flashActive = true;
+      anim.flashElapsed = 0;
+      anim.flashPattern = pattern === 'single' ? 'single' : 'double';
+    }
+
+    function triggerFeedback(actionKey) {
+      switch (actionKey) {
+        case 'find_car':
+          startFlash('double');
+          anim.hornActive = true;
+          anim.hornElapsed = 0;
+          impulseSuspension(0.0, 0.0, 0.018);
+          break;
+        case 'unlock':
+          startFlash('double');
+          impulseSuspension(0.0, 0.0, 0.024);
+          break;
+        case 'lock':
+          startFlash('single');
+          impulseSuspension(0.0, 0.0, -0.022);
+          break;
+        case 'engine_start':
+          startFlash('single');
+          // Realistic ignition torque roll & brief chassis thrum
+          impulseSuspension(-0.045, 0.075, 0.032);
+          break;
+        case 'engine_stop':
+          impulseSuspension(0.022, -0.035, -0.018);
+          break;
+        case 'trunk_open':
+          startFlash('single');
+          impulseSuspension(-0.05, 0.0, 0.024);
+          break;
+        case 'tailgate_close':
+          impulseSuspension(0.065, 0.0, -0.036);
+          break;
+        case 'window_ventilate':
+        case 'window_open':
+        case 'window_close':
+        case 'skylight_open':
+        case 'skylight_tilt':
+        case 'skylight_close':
+          impulseSuspension(0.0, 0.0, 0.014);
+          break;
+        case 'ac_on':
+        case 'ac_off':
+          impulseSuspension(0.0, 0.0, 0.012);
+          break;
+        default:
+          startFlash('double');
+          break;
+      }
     }
 
     return {
       triggerFlash: function () {
-        anim.flashActive = true;
-        anim.flashElapsed = 0;
+        startFlash('double');
       },
+      triggerFeedback: triggerFeedback,
       update: function (dt, t, st) {
-        var smooth = 1.0 - Math.exp(-dt * 7.0);
+        var smooth = 1.0 - Math.exp(-dt * 6.8);
+        var slowSmooth = 1.0 - Math.exp(-dt * 4.5);
 
+        // React physically to telemetry state transitions as well
+        if (st.trunkOpen !== anim.prevTrunkOpen) {
+          anim.prevTrunkOpen = st.trunkOpen;
+          impulseSuspension(st.trunkOpen ? -0.045 : 0.055, 0.0, st.trunkOpen ? 0.02 : -0.03);
+        }
+        if (st.engineRunning !== anim.prevEngineRunning) {
+          anim.prevEngineRunning = st.engineRunning;
+          if (st.engineRunning) {
+            impulseSuspension(-0.04, 0.07, 0.028);
+          } else {
+            impulseSuspension(0.02, -0.03, -0.015);
+          }
+        }
+        if (st.vehicleLocked !== anim.prevLocked) {
+          anim.prevLocked = st.vehicleLocked;
+          startFlash(st.vehicleLocked ? 'single' : 'double');
+        }
+
+        // Flash light cadence
         if (anim.flashActive) {
           anim.flashElapsed += dt;
-          if (anim.flashElapsed >= FLASH_TOTAL) {
+          var maxDur = anim.flashPattern === 'single' ? SINGLE_FLASH_TOTAL : DOUBLE_FLASH_TOTAL;
+          if (anim.flashElapsed >= maxDur) {
             anim.flashActive = false;
             anim.flashLevel = 0;
           } else {
-            anim.flashLevel = sampleDoubleFlash(anim.flashElapsed);
+            anim.flashLevel = anim.flashPattern === 'single'
+              ? sampleSingleFlash(anim.flashElapsed)
+              : sampleDoubleFlash(anim.flashElapsed);
           }
         } else {
           anim.flashLevel = 0;
         }
 
         // Front pure cool-white (#F0F7FF) headlamp/DRL emissive + tight lens bar
-        var headRest = Math.max(st.engineRunning ? 0.18 : 0.0, entrance.headGlow * 0.45);
+        var headRest = Math.max(st.engineRunning ? 0.24 : 0.0, entrance.headGlow * 0.55);
         var headLevel = Math.min(1.0, headRest + anim.flashLevel);
         for (var hm = 0; hm < headMats.length; hm++) {
           if (headMats[hm].emissive) {
@@ -405,37 +973,88 @@
             headMats[hm].emissiveIntensity = headLevel * 1.45;
           }
         }
-        var headBarOp = anim.flashLevel * 0.92 + Math.max(st.engineRunning ? 0.22 : 0.0, entrance.headGlow * 0.48);
+        var headBarOp = anim.flashLevel * 0.92 + Math.max(st.engineRunning ? 0.26 : 0.0, entrance.headGlow * 0.52);
         for (var hbIdx = 0; hbIdx < headBarSprites.length; hbIdx++) {
           headBarSprites[hbIdx].material.opacity = clamp(headBarOp, 0, 0.95);
         }
 
-        // Rear pure red (#FF1E1E) taillight emissive + ultra-subtle tight red bar
+        // Rear pure red (#FF1E1E) taillight + real braking glow during drive-in deceleration
         var tailBase = (st.engineRunning ? 0.30 : 0.0) + (st.vehicleLocked ? 0.0 : 0.12);
-        var tailIntensity = 0.15 + tailBase + anim.flashLevel * 1.65;
+        var brakeBoost = entrance.brakeGlow * 1.35;
+        var tailIntensity = 0.15 + tailBase + brakeBoost + anim.flashLevel * 1.65;
         for (var tm = 0; tm < tailMats.length; tm++) {
           if (tailMats[tm].emissive) {
             tailMats[tm].emissive.setHex(0xff1e1e);
             tailMats[tm].emissiveIntensity = tailIntensity;
           }
         }
-        var tailBarOp = anim.flashLevel * 0.68 + (st.engineRunning ? 0.12 : 0.0);
+        var tailBarOp = anim.flashLevel * 0.68 + entrance.brakeGlow * 0.62 + (st.engineRunning ? 0.14 : 0.0);
         for (var tbIdx = 0; tbIdx < tailBarSprites.length; tbIdx++) {
-          tailBarSprites[tbIdx].material.opacity = clamp(tailBarOp, 0, 0.75);
+          tailBarSprites[tbIdx].material.opacity = clamp(tailBarOp, 0, 0.85);
         }
 
-        // Sunroof smooth open/vent offset
-        if (sunroofNode && sunroofBasePos) {
-          var targetSky = st.skylightOpen ? 1.0 : 0.0;
-          anim.sunroofProgress = lerp(anim.sunroofProgress, targetSky, smooth);
-          sunroofNode.position.y = sunroofBasePos.y + anim.sunroofProgress * 0.06;
+        // Expanding 3D acoustic horn wave rings
+        if (anim.hornActive) {
+          anim.hornElapsed += dt;
+          hornGroup.visible = true;
+          var anyAlive = false;
+          for (var rIdx = 0; rIdx < hornRings.length; rIdx++) {
+            var hrObj = hornRings[rIdx];
+            var localT = (anim.hornElapsed - hrObj.delay) / 0.68;
+            if (localT >= 0 && localT <= 1.0) {
+              anyAlive = true;
+              var ease = 1.0 - Math.pow(1.0 - localT, 2.4);
+              var sc = 1.0 + ease * 5.2;
+              hrObj.mesh.scale.set(sc, sc * 0.72, 1);
+              hrObj.mesh.position.z = 2.38 + ease * 0.85;
+              hrObj.mat.opacity = Math.sin(localT * Math.PI) * 0.42;
+            } else {
+              hrObj.mat.opacity = 0;
+            }
+          }
+          if (!anyAlive && anim.hornElapsed > 0.95) {
+            anim.hornActive = false;
+            hornGroup.visible = false;
+          }
         }
 
-        // Climate 3D airflow ribbons
+        // Articulated real 3D trunk lid
+        var targetTrunk = st.trunkOpen ? 1.0 : 0.0;
+        anim.trunkProgress = lerp(anim.trunkProgress, targetTrunk, slowSmooth);
+        if (rig) rig.setTrunkOpenProgress(anim.trunkProgress);
+
+        // Articulated real 3D sunroof (tilt vs slide open vs closed)
+        var effectiveSkyMode = st.skylightMode || (st.skylightOpen ? 'open' : 'closed');
+        var targetTilt = effectiveSkyMode === 'tilt' ? 1.0 : 0.0;
+        var targetSlide = effectiveSkyMode === 'open' ? 1.0 : 0.0;
+        anim.sunroofTilt = lerp(anim.sunroofTilt, targetTilt, smooth);
+        anim.sunroofSlide = lerp(anim.sunroofSlide, targetSlide, slowSmooth);
+        if (rig) rig.setSunroofState(anim.sunroofTilt, anim.sunroofSlide);
+
+        // Articulated 4 real side windows (closed / vent 4.5cm / open 30cm)
+        var targetDrop = st.windowsMode === 'open' ? 0.30 : (st.windowsMode === 'vent' ? 0.052 : 0.0);
+        anim.windowDrop = lerp(anim.windowDrop, targetDrop, slowSmooth);
+        if (rig) rig.setWindowDropProgress(anim.windowDrop);
+
+        // Side-window ventilation breeze streaks
+        var showVent = st.windowsMode === 'vent';
+        ventGroup.visible = showVent;
+        if (showVent) {
+          for (var vi = 0; vi < ventStreaks.length; vi++) {
+            var vsObj = ventStreaks[vi];
+            var vp = 0.5 + 0.5 * Math.sin(t * 2.8 + vsObj.phase);
+            vsObj.mat.opacity = 0.14 + vp * 0.32;
+            vsObj.mesh.position.y = Math.sin(t * 2.2 + vsObj.phase) * 0.018;
+          }
+        }
+
+        // Climate 3D airflow ribbons tinted by temperature
         airflowGroup.visible = !!st.climateOn;
         if (st.climateOn) {
+          var climHex = resolveClimateColorHex(st.climateTemp);
           for (var r = 0; r < ribbons.length; r++) {
             var rb = ribbons[r];
+            rb.mat.color.setHex(climHex);
             var pulse = 0.5 + 0.5 * Math.sin(t * 3.4 + rb.phaseOffset);
             rb.mat.opacity = 0.22 + pulse * 0.48;
             rb.mesh.position.y = Math.sin(t * 2.2 + rb.phaseOffset) * 0.03;
@@ -456,7 +1075,9 @@
     if (currentContainer) {
       scene.remove(currentContainer);
       currentContainer = null;
+      currentChassis = null;
       currentEffects = null;
+      currentRig = null;
     }
 
     var container = new THREE.Group();
@@ -464,7 +1085,13 @@
     currentContainer = container;
     scene.add(container);
 
-    // Contact shadow on Y=0
+    // Sprung chassis group sits inside container so suspension moves body while wheels stay on Y=0
+    var chassisGroup = new THREE.Group();
+    chassisGroup.name = 'car_chassis_' + cfg.key;
+    currentChassis = chassisGroup;
+    container.add(chassisGroup);
+
+    // Contact shadow on Y=0 follows vehicle position & yaw cleanly
     var shadowTex = createContactShadowTexture();
     var shadowPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(3.05, 6.05).rotateX(-Math.PI / 2),
@@ -479,7 +1106,6 @@
         if (currentContainer !== container) return;
         var model = gltf.scene;
 
-        // Enhance PBR materials with our studio environment map
         model.traverse(function (child) {
           if (child.isMesh && child.material) {
             var mats = Array.isArray(child.material) ? child.material : [child.material];
@@ -487,7 +1113,6 @@
               var mat = mats[i];
               mat.envMap = envMap;
               mat.envMapIntensity = 1.65;
-              // Gently lift very dark metallic paint readability on dark #161719 backdrop
               if (mat.metalness > 0.65 && mat.roughness < 0.12 && mat.color) {
                 mat.envMapIntensity = 2.1;
               }
@@ -496,12 +1121,10 @@
           }
         });
 
-        // Compute raw bounding box to normalize scale, orientation, and ground contact
         var box = new THREE.Box3().setFromObject(model);
         var size = new THREE.Vector3();
         box.getSize(size);
 
-        // Ensure vehicle length aligns with Z axis
         if (size.x > size.z * 1.15) {
           model.rotation.y += Math.PI / 2;
         }
@@ -509,7 +1132,6 @@
           model.rotation.y += cfg.yawOffset;
         }
 
-        // Recompute bounds after orientation alignment
         model.updateMatrixWorld(true);
         box.setFromObject(model);
         box.getSize(size);
@@ -518,7 +1140,6 @@
         var scale = targetLen / maxHorizontal;
         model.scale.multiplyScalar(scale);
 
-        // Center horizontally at (0, 0) and rest wheels flush on Y=0
         model.updateMatrixWorld(true);
         box.setFromObject(model);
         var center = new THREE.Vector3();
@@ -527,11 +1148,11 @@
         model.position.z -= center.z;
         model.position.y -= box.min.y;
 
-        container.add(model);
-        currentEffects = createInteractiveOverlays(container, model);
+        chassisGroup.add(model);
+        currentRig = setupVehicleRig(container, chassisGroup, model);
+        currentEffects = createInteractiveOverlays(chassisGroup, model, currentRig);
         resize();
 
-        // Dynamic drive-in from screen-right to center, then rotate smoothly to default 3/4 hero angle
         if (!hasCustomDemoAngle) {
           startEntranceAnimation();
         }
@@ -630,11 +1251,10 @@
   }
 
   function clampPhi(p) {
-    return clamp(p, 0.14, 1.44); // Allows clean top-down view without flipping or clipping
+    return clamp(p, 0.14, 1.44);
   }
 
   function bindPointerControls(domEl) {
-    // Single-finger 360° orbit with physical angular momentum + 260ms single/double tap detection
     var touchTrackingTap = false;
     domEl.addEventListener('touchstart', function (e) {
       if (e.touches.length === 1) {
@@ -765,13 +1385,10 @@
     var effectiveHalfV = Math.atan(Math.tan(halfV) * vr);
     var hFovRad = 2 * Math.atan(Math.tan(halfV) * Math.max(aspect, 0.6));
 
-    // Top-down vertical fit strictly inside visible window [0, vr * h] (zero bottom occlusion)
     var rTop = 2.72 / Math.sin(effectiveHalfV);
-    // 3/4 hero fit: ~80% horizontal fill + balanced margin inside visible window
     var distH = 2.74 / Math.sin(hFovRad / 2);
     var rHero = Math.max(6.4 / Math.max(vr, 0.72), distH);
 
-    // Smooth phi-driven pullback from 3/4 hero (phi=1.24) to top-down (phi=0.14)
     var topFactor = smoothstep(DEFAULT_PHI, 0.14, phi);
     return lerp(rHero, rTop, topFactor);
   }
@@ -808,7 +1425,7 @@
     lastResizeH = h;
     var aspect = w / Math.max(1, h);
     camera.aspect = aspect;
-    lastViewOffsetY = -1; // force viewOffset refresh with new dimensions
+    lastViewOffsetY = -1;
     applyCameraViewOffset();
     var visRatio = lerp(collapsedVisibleRatio, 1.0, smoothDeckProgress);
     var fitR = computeDynamicRadius(orbit.targetPhi, aspect, visRatio);
@@ -868,37 +1485,110 @@
     orbit.radius += (orbit.targetRadius - orbit.radius) * damp;
     updateCameraPosition();
 
-    // Update vehicle drive-in + showroom rotate entrance animation
+    // Compute physical suspension targets
+    var targetPitch = 0.0;
+    var targetRoll = 0.0;
+    var targetHeave = 0.0;
+
+    // Physically realistic curved drive-in parking motion
     if (entrance.active && currentContainer) {
       entrance.elapsed += dt;
-      var totalDur = entrance.turnStart + entrance.turnDuration;
+      var rawT = clamp(entrance.elapsed / entrance.duration, 0, 1);
+      // Smooth automotive braking velocity profile: brisk entry -> progressive brake stop
+      var u = 1.0 - Math.pow(1.0 - rawT, 2.75);
 
-      // Phase 1: drive from screen-right (+R * startDist) smoothly to center (0, 0, 0)
-      var driveU = clamp(entrance.elapsed / entrance.driveDuration, 0, 1);
-      var driveEase = 1.0 - Math.pow(1.0 - driveU, 3.2);
-      var remDist = entrance.startDist * (1.0 - driveEase);
-      currentContainer.position.set(entrance.rightX * remDist, 0, entrance.rightZ * remDist);
+      var pos = evalCubicBezier(entrance.p0, entrance.p1, entrance.p2, entrance.p3, u);
+      var d1 = evalCubicBezierDeriv(entrance.p0, entrance.p1, entrance.p2, entrance.p3, u);
+      var d2 = evalCubicBezierSecondDeriv(entrance.p0, entrance.p1, entrance.p2, entrance.p3, u);
 
-      // Subtle suspension brake settle pitch near stop
-      var brakePitch = driveU < 1.0 ? Math.sin(driveU * Math.PI) * (1.0 - driveU) * 0.016 : 0;
+      var dx = pos.x - entrance.prevX;
+      var dz = pos.z - entrance.prevZ;
+      var ds = Math.sqrt(dx * dx + dz * dz);
+      var speed = dt > 0.0001 ? ds / dt : 0;
+      var accel = dt > 0.0001 ? (speed - entrance.prevSpeed) / dt : 0;
+      entrance.prevX = pos.x;
+      entrance.prevZ = pos.z;
+      entrance.prevSpeed = speed;
 
-      // Phase 2: smoothly rotate yaw from side-profile facing left to default 3/4 hero angle (0)
-      var turnU = clamp((entrance.elapsed - entrance.turnStart) / entrance.turnDuration, 0, 1);
-      var turnEase = turnU < 0.5
-        ? 4 * turnU * turnU * turnU
-        : 1 - Math.pow(-2 * turnU + 2, 3) / 2;
-      var curYaw = lerp(entrance.startYaw, 0.0, turnEase);
-      currentContainer.rotation.set(brakePitch, curYaw, 0);
+      var yaw = Math.atan2(d1.x, d1.z);
+      currentContainer.position.set(pos.x, 0, pos.z);
+      currentContainer.rotation.set(0, yaw, 0);
 
-      // Soft headlamp DRL glow while driving in, gently fading out once parked
-      entrance.headGlow = turnU < 0.85 ? 0.55 * (1.0 - turnU * 0.7) : 0.16 * (1.0 - (turnU - 0.85) / 0.15);
+      // True wheel rolling rotation from exact ground arc distance (positive X rolls forward toward +Z)
+      var wheelR = currentRig ? currentRig.wheelRadius : DEFAULT_WHEEL_R;
+      entrance.wheelSpin += ds / Math.max(0.18, wheelR);
+      if (currentRig) {
+        currentRig.setWheelRoll(entrance.wheelSpin);
+      }
 
-      if (entrance.elapsed >= totalDur) {
+      // Signed path curvature kappa = (d1.z * d2.x - d1.x * d2.z) / |d1|^3
+      var speedParamSq = d1.x * d1.x + d1.z * d1.z;
+      var kappa = speedParamSq > 0.0001
+        ? (d1.z * d2.x - d1.x * d2.z) / Math.pow(speedParamSq, 1.5)
+        : 0;
+
+      // Bicycle-model front-wheel steering angle, gently straightening to 0° as car parks
+      var straightFade = 1.0 - smoothstep(0.76, 0.99, rawT);
+      var desiredSteer = Math.atan(WHEELBASE_M * kappa) * straightFade;
+      entrance.steerAngle = lerp(entrance.steerAngle, desiredSteer, 1.0 - Math.exp(-dt * 12.0));
+      if (currentRig) {
+        currentRig.setSteering(entrance.steerAngle);
+      }
+
+      // Suspension brake dive (positive pitch tilts nose down toward +Z) & lateral body roll
+      if (rawT < 1.0) {
+        var brakeFactor = clamp(-accel * 0.0036, 0.0, 0.024);
+        var lateralAccel = speed * speed * kappa;
+        targetPitch = brakeFactor;
+        targetRoll = clamp(-lateralAccel * 0.0042, -0.022, 0.022);
+        targetHeave = -brakeFactor * 0.45;
+      } else if (!entrance.stopPulseFired) {
+        // Luxurious damped spring rebound the instant wheels lock to a halt
+        entrance.stopPulseFired = true;
+        impulseSuspension(-0.085, 0.0, 0.012);
+      }
+
+      // Brake lights glow red while actively decelerating, then release ~220ms after stop
+      if (rawT < 0.96) {
+        var brakingStrength = smoothstep(0.18, 0.45, rawT) * (1.0 - smoothstep(0.92, 1.0, rawT) * 0.15);
+        entrance.brakeGlow = lerp(entrance.brakeGlow, brakingStrength, 1.0 - Math.exp(-dt * 14.0));
+      } else {
+        var releaseT = clamp((entrance.elapsed - entrance.duration) / entrance.settleHold, 0, 1);
+        entrance.brakeGlow = (1.0 - releaseT) * 0.82;
+      }
+
+      // Crisp DRLs softly fade back to idle after parking
+      entrance.headGlow = rawT < 0.85
+        ? 0.65 * (1.0 - rawT * 0.45)
+        : 0.36 * (1.0 - clamp((entrance.elapsed - entrance.duration * 0.85) / (entrance.duration * 0.15 + entrance.settleHold), 0, 1));
+
+      if (entrance.elapsed >= entrance.duration + entrance.settleHold) {
         entrance.active = false;
         entrance.headGlow = 0;
+        entrance.brakeGlow = 0;
+        entrance.steerAngle = 0;
         currentContainer.position.set(0, 0, 0);
         currentContainer.rotation.set(0, 0, 0);
+        if (currentRig) {
+          currentRig.setSteering(0);
+        }
       }
+    }
+
+    // Subtle physical engine-running chassis idle micro-vibration
+    var engineVibY = 0;
+    var engineVibRoll = 0;
+    if (state.engineRunning && !entrance.active) {
+      engineVibY = Math.sin(elapsed * 46.0) * 0.0012 + Math.sin(elapsed * 29.0) * 0.0007;
+      engineVibRoll = Math.sin(elapsed * 34.0) * 0.0016;
+    }
+
+    // Integrate damped spring suspension and apply strictly to sprung chassisGroup (wheels stay grounded!)
+    stepSuspension(dt, targetPitch, targetRoll, targetHeave);
+    if (currentChassis) {
+      currentChassis.rotation.x = suspension.pitch;
+      currentChassis.rotation.z = suspension.roll + engineVibRoll;
+      currentChassis.position.y = suspension.heave + engineVibY;
     }
 
     if (currentEffects && typeof currentEffects.update === 'function') {
@@ -938,7 +1628,6 @@
     envMap = createStudioEnvironment(renderer);
     scene.environment = envMap;
 
-    // Studio key, fill, rim & under-bounce lights
     scene.add(new THREE.HemisphereLight(0xf2f6ff, 0x262c38, 1.05));
 
     var keyLight = new THREE.DirectionalLight(0xffffff, 1.55);
@@ -955,7 +1644,6 @@
 
     gltfLoader = new THREE.GLTFLoader();
 
-    // Optional preview query params
     try {
       var params = new URLSearchParams(window.location.search || '');
       var demo = params.get('demo');
@@ -969,6 +1657,8 @@
         state.doorsOpen = true;
         state.trunkOpen = true;
         state.skylightOpen = true;
+        state.skylightMode = 'open';
+        state.windowsMode = 'vent';
         state.climateOn = true;
         state.engineRunning = true;
         orbit.theta = orbit.targetTheta = 0.84;
@@ -1003,13 +1693,32 @@
       if (typeof patch.vehicleLocked === 'boolean') state.vehicleLocked = patch.vehicleLocked;
       if (typeof patch.doorsOpen === 'boolean') state.doorsOpen = patch.doorsOpen;
       if (typeof patch.trunkOpen === 'boolean') state.trunkOpen = patch.trunkOpen;
-      if (typeof patch.skylightOpen === 'boolean') state.skylightOpen = patch.skylightOpen;
+      if (typeof patch.skylightOpen === 'boolean') {
+        state.skylightOpen = patch.skylightOpen;
+        if (typeof patch.skylightMode !== 'string') {
+          state.skylightMode = patch.skylightOpen ? 'open' : 'closed';
+        }
+      }
+      if (typeof patch.skylightMode === 'string' && patch.skylightMode) {
+        state.skylightMode = patch.skylightMode;
+      }
+      if (typeof patch.windowsMode === 'string' && patch.windowsMode) {
+        state.windowsMode = patch.windowsMode;
+      }
       if (typeof patch.climateOn === 'boolean') state.climateOn = patch.climateOn;
+      if (typeof patch.climateTemp === 'number' && isFinite(patch.climateTemp)) {
+        state.climateTemp = patch.climateTemp;
+      }
       if (typeof patch.engineRunning === 'boolean') state.engineRunning = patch.engineRunning;
     },
     flashLights: function () {
       if (currentEffects && currentEffects.triggerFlash) {
         currentEffects.triggerFlash();
+      }
+    },
+    triggerActionFeedback: function (actionKey) {
+      if (currentEffects && currentEffects.triggerFeedback) {
+        currentEffects.triggerFeedback(String(actionKey || ''));
       }
     },
     resetCamera: function () {

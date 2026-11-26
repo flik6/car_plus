@@ -62,6 +62,14 @@ class VehicleVisualView @JvmOverloads constructor(
             }
         }
 
+    var climateTemp: Double = 23.0
+        set(value) {
+            if (field != value) {
+                field = value
+                pushStateToScene()
+            }
+        }
+
     var trunkOpen: Boolean = false
         set(value) {
             if (field != value) {
@@ -74,6 +82,24 @@ class VehicleVisualView @JvmOverloads constructor(
         set(value) {
             if (field != value) {
                 field = value
+                pushStateToScene()
+            }
+        }
+
+    var skylightMode: String = "closed"
+        set(value) {
+            val normalized = value.ifBlank { "closed" }
+            if (field != normalized) {
+                field = normalized
+                pushStateToScene()
+            }
+        }
+
+    var windowsMode: String = "closed"
+        set(value) {
+            val normalized = value.ifBlank { "closed" }
+            if (field != normalized) {
+                field = normalized
                 pushStateToScene()
             }
         }
@@ -219,6 +245,12 @@ class VehicleVisualView @JvmOverloads constructor(
         evalJs("window.Car3D && window.Car3D.flashLights();")
     }
 
+    fun triggerActionFeedback(actionKey: String) {
+        if (isDestroyed || !sceneReady) return
+        val safeKey = JSONObject.quote(actionKey)
+        evalJs("window.Car3D && window.Car3D.triggerActionFeedback && window.Car3D.triggerActionFeedback($safeKey);")
+    }
+
     fun resetCamera() {
         deckProgress = 0f
         if (isDestroyed || !sceneReady) return
@@ -290,7 +322,10 @@ class VehicleVisualView @JvmOverloads constructor(
             put("doorsOpen", doorsOpen)
             put("trunkOpen", trunkOpen)
             put("skylightOpen", skylightOpen)
+            put("skylightMode", skylightMode)
+            put("windowsMode", windowsMode)
             put("climateOn", climateOn)
+            put("climateTemp", climateTemp)
             put("engineRunning", engineRunning)
         }
         evalJs("window.Car3D && window.Car3D.setState($payload);")
