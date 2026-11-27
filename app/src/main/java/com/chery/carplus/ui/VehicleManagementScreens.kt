@@ -1708,6 +1708,11 @@ internal class VehicleManagementScreens(
                 )
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
                 body.addView(
+                    buildBorderlessInfoRow("动力类型", vehicle.powertrain.label),
+                    lp()
+                )
+                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(
                     buildBorderlessInfoRow("车主姓名", SensitiveUiText.personName(vehicle.hostName)),
                     lp()
                 )
@@ -1717,6 +1722,61 @@ internal class VehicleManagementScreens(
                     lp()
                 )
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+                // 车机流量套餐 (zyhl 967)
+                if (isCurrentActive) {
+                    val trafficRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        minimumHeight = dp(52)
+                        setPadding(dp(20), dp(10), dp(20), dp(10))
+                    }
+                    trafficRow.addView(
+                        text("车机流量", 14.5f, ThemeTokens.TEXT_SUB),
+                        LinearLayout.LayoutParams(dp(96), WRAP_CONTENT)
+                    )
+                    trafficRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+                    val trafficValueTv = text("查询中...", 14.5f, ThemeTokens.TEXT_SUB).apply {
+                        gravity = Gravity.END
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                    trafficRow.addView(trafficValueTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+                    body.addView(trafficRow, lp())
+                    body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+                    scope.launch {
+                        val active = profileProvider()
+                        if (active.accessToken.isBlank()) {
+                            trafficValueTv.text = "--"
+                            return@launch
+                        }
+                        val traffic = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.fetchVehicleTrafficPackage(vehicle.vin, active.accessToken)
+                            }
+                        }.getOrNull()
+                        if (traffic == null) {
+                            trafficValueTv.text = "暂不可用"
+                            return@launch
+                        }
+                        val formatted = when {
+                            traffic.unlimited -> {
+                                val used = traffic.usedTraffic.takeIf { it.isNotBlank() }?.let { "已用 ${it}MB · " }.orEmpty()
+                                "${used}无限流量"
+                            }
+                            traffic.totalTraffic.isNotBlank() -> {
+                                val used = traffic.usedTraffic.ifBlank { "0" }
+                                "${used} / ${traffic.totalTraffic} MB"
+                            }
+                            traffic.usedTraffic.isNotBlank() -> "已用 ${traffic.usedTraffic} MB"
+                            else -> "未开通套餐"
+                        }
+                        val dueSuffix = traffic.dueDate.takeIf { it.isNotBlank() }?.let { " · 至 ${it.take(10)}" }.orEmpty()
+                        trafficValueTv.text = formatted + dueSuffix
+                        trafficValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
+                    }
+                }
 
                 // 车辆版本 row inside 基本信息: opens upgrade sheet if update exists, else shows toast
                 if (isCurrentActive) {

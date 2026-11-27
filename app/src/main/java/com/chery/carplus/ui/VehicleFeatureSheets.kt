@@ -39,6 +39,7 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.webkit.WebViewAssetLoader
 import com.chery.carplus.R
 import com.chery.carplus.cloud.AntiTheftStatus
+import com.chery.carplus.cloud.ChargingScheduleItem
 import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CherySessionExpiredException
 import com.chery.carplus.cloud.GeofenceItem
@@ -46,6 +47,7 @@ import com.chery.carplus.cloud.InGeekCloudProvisioner
 import com.chery.carplus.cloud.TripDayGroup
 import com.chery.carplus.cloud.TripRecordItem
 import com.chery.carplus.cloud.VehicleAuthorizationItem
+import com.chery.carplus.cloud.VehiclePowertrain
 import com.chery.carplus.cloud.VehicleSummary
 import com.chery.carplus.cloud.VehicleTelemetry
 import com.chery.carplus.cloud.VehicleUpgradeInfo
@@ -3267,6 +3269,583 @@ internal class VehicleFeatureSheets(
             if (secondaryDialog === sheet) secondaryDialog = null
         }
         secondaryDialog = sheet
+    }
+
+    /**
+     * Resets a forgotten 6-digit vehicle control PIN using VIN/SN/ICCID + SMS (zyhl 922 + 920/921 + 124).
+     */
+    fun showResetPinByVehicleSheet(
+        profile: VehicleProfile,
+        defaultSn: String = "",
+        defaultIccid: String = ""
+    ) {
+        showModalDialog("忘记 PIN 码（重置）") { box, dialog ->
+            var smsJob: Job? = null
+            var submitting = false
+            box.addView(
+                text("核验车辆识别码（VIN / SN / ICCID）与手机短信后，可重新设置 6 位云端控车 PIN 码。", 12.5f, TEXT_SUB).apply {
+                    setLineSpacing(0f, 1.35f)
+                },
+                lp(top = dp(4))
+            )
+
+            val vinEt = modalInput("17 位车架号 VIN", InputType.TYPE_CLASS_TEXT).apply {
+                if (profile.vin.isNotBlank()) setText(profile.vin)
+            }
+            val snEt = modalInput("T-Box 序列号 SN", InputType.TYPE_CLASS_TEXT).apply {
+                if (defaultSn.isNotBlank()) setText(defaultSn)
+            }
+            val iccidEt = modalInput("车载 SIM 卡 ICCID", InputType.TYPE_CLASS_TEXT).apply {
+                if (defaultIccid.isNotBlank()) setText(defaultIccid)
+            }
+            val mobileEt = modalInput("账号手机号", InputType.TYPE_CLASS_PHONE).apply {
+                if (profile.mobileNo.isNotBlank()) setText(profile.mobileNo)
+            }
+
+            val codeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            val codeEt = modalInput("短信验证码", InputType.TYPE_CLASS_NUMBER)
+            lateinit var sendBtn: TextView
+            sendBtn = secondaryBtn("获取验证码") {
+                if (smsJob?.isActive == true) return@secondaryBtn
+                val m = mobileEt.text.toString().trim()
+                if (m.length < 11) {
+                    toast("请输入正确手机号")
+                    return@secondaryBtn
+                }
+                sendBtn.isEnabled = false
+                sendBtn.alpha = 0.55f
+                sendBtn.text = "发送中..."
+                scope.launch {
+                    val sent = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.sendSmsCode(m, type = CheryHttpClient.SMS_TYPE_FORGET_PASSWORD)
+                        }
+                    }.getOrDefault(false)
+                    if (!dialog.isShowing) return@launch
+                    if (sent) {
+                        toast("验证码已发送")
+                        smsJob = scope.launch {
+                            for (sec in 60 downTo 1) {
+                                sendBtn.isEnabled = false
+                                sendBtn.alpha = 0.55f
+                                sendBtn.text = "${sec}s"
+                                delay(1_000L)
+                            }
+                            sendBtn.isEnabled = true
+                            sendBtn.alpha = 1f
+                            sendBtn.text = "获取验证码"
+                        }
+                    } else {
+                        sendBtn.isEnabled = true
+                        sendBtn.alpha = 1f
+                        sendBtn.text = "获取验证码"
+                        toast("验证码发送失败")
+                    }
+                }
+            }
+            codeRow.addView(codeEt, LinearLayout.LayoutParams(0, dp(46), 1f))
+            codeRow.addView(sendBtn, LinearLayout.LayoutParams(dp(104), dp(46)).apply { marginStart = dp(8) })
+
+            val newPinEt = modalInput(
+                "新 6 位数字 PIN 码",
+                InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            ).apply {
+                filters = arrayOf(android.text.InputFilter.LengthFilter(6))
+            }
+
+            box.addView(vinEt, lp(top = dp(12), height = dp(44)))
+            box.addView(snEt, lp(top = dp(8), height = dp(44)))
+            box.addView(iccidEt, lp(top = dp(8), height = dp(44)))
+            box.addView(mobileEt, lp(top = dp(8), height = dp(44)))
+            box.addView(codeRow, lp(top = dp(8)))
+            box.addView(newPinEt, lp(top = dp(8), height = dp(44)))
+
+            val errorText = text("", 12.5f, ThemeTokens.DANGER).apply { visibility = View.GONE }
+            box.addView(errorText, lp(top = dp(8)))
+
+            val btns = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            box.addView(btns, lp(top = dp(16)))
+            btns.addView(secondaryBtn("取消") { if (!submitting) dialog.dismiss() }, weightLp(0, dp(44)))
+            lateinit var submitBtn: TextView
+            submitBtn = primaryBtn("验证并重置") {
+                if (submitting) return@primaryBtn
+                val v = vinEt.text.toString().trim().uppercase(Locale.US)
+                val s = snEt.text.toString().trim()
+                val ic = iccidEt.text.toString().trim()
+                val m = mobileEt.text.toString().trim()
+                val c = codeEt.text.toString().trim()
+                val np = newPinEt.text.toString().trim()
+                if (v.length != 17 || s.isBlank() || ic.isBlank() || m.length < 11 || c.isBlank() || np.length != 6) {
+                    errorText.text = "请完整填写 17 位 VIN、SN、ICCID、手机号、验证码及 6 位新 PIN 码"
+                    errorText.visibility = View.VISIBLE
+                    return@primaryBtn
+                }
+                submitting = true
+                errorText.visibility = View.GONE
+                submitBtn.isEnabled = false
+                submitBtn.alpha = 0.65f
+                submitBtn.text = "提交中..."
+                scope.launch {
+                    val stepResult = runCatching {
+                        withContext(Dispatchers.IO) {
+                            val idOk = httpClient.verifyVehicleIdentityForReset(v, s, ic, profile.accessToken)
+                            if (!idOk) return@withContext "车辆 VIN / SN / ICCID 校验未通过"
+                            val ok = httpClient.resetVehicleControlPinByVehicleInfo(
+                                vin = v,
+                                sn = s,
+                                iccid = ic,
+                                telephone = m,
+                                validateCode = c,
+                                newPin = np,
+                                accessToken = profile.accessToken
+                            )
+                            if (ok) "" else "短信验证码校验或 PIN 码重置失败，请核对后重试"
+                        }
+                    }.getOrElse { it.message.orEmpty().ifBlank { "重置请求失败，请检查网络" } }
+                    if (!dialog.isShowing) return@launch
+                    if (stepResult.isEmpty()) {
+                        smsJob?.cancel()
+                        onPinUpdated(np)
+                        dialog.dismiss()
+                        toast("PIN 码已重置")
+                    } else {
+                        submitting = false
+                        submitBtn.isEnabled = true
+                        submitBtn.alpha = 1f
+                        submitBtn.text = "验证并重置"
+                        errorText.text = stepResult
+                        errorText.visibility = View.VISIBLE
+                    }
+                }
+            }
+            btns.addView(submitBtn, weightLp(dp(10), dp(44)))
+            dialog.setOnDismissListener { smsJob?.cancel() }
+        }
+    }
+
+    /**
+     * Speed-limit reminder sheet (zyhl 950 + 970 instruction 1203; 60–120 km/h or off).
+     */
+    fun showSpeedLimitSheet(
+        profile: VehicleProfile,
+        currentEnabled: Boolean,
+        currentSpeedKmh: Int,
+        resolvePin: (String, (String) -> Unit) -> Unit,
+        onUpdated: (Boolean, Int) -> Unit
+    ) {
+        val minSpeed = 60
+        val maxSpeed = 120
+        var selectedSpeed = currentSpeedKmh.coerceIn(minSpeed, maxSpeed)
+        showSheet("限速提醒") { sheet, dialog ->
+            sheet.addView(
+                text("开启后当车辆行驶速度超过设定阈值时，系统将主动推送超速提醒（60–120 km/h）。", 13f, TEXT_SUB).apply {
+                    setLineSpacing(0f, 1.4f)
+                },
+                lp(top = dp(6))
+            )
+
+            val valueTv = text("$selectedSpeed km/h", 30f, TEXT_PRIMARY, Typeface.BOLD).apply {
+                gravity = Gravity.CENTER
+            }
+            sheet.addView(valueTv, lp(top = dp(20), bottom = dp(10)))
+
+            val seekBar = SeekBar(context).apply {
+                max = maxSpeed - minSpeed
+                progress = selectedSpeed - minSpeed
+                progressTintList = ColorStateList.valueOf(ThemeTokens.ACCENT_LIGHT)
+                thumbTintList = ColorStateList.valueOf(ThemeTokens.TEXT_PRIMARY)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                        selectedSpeed = minSpeed + progress
+                        valueTv.text = "$selectedSpeed km/h"
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) = Unit
+                    override fun onStopTrackingTouch(sb: SeekBar?) = Unit
+                })
+            }
+            sheet.addView(seekBar, lp(top = dp(4), bottom = dp(4)))
+
+            val boundsRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            boundsRow.addView(text("60 km/h", 12f, TEXT_SUB), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            boundsRow.addView(text("120 km/h", 12f, TEXT_SUB).apply { gravity = Gravity.END }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            sheet.addView(boundsRow, lp(bottom = dp(18)))
+
+            fun submitSpeed(targetEnabled: Boolean, targetSpeed: Int) {
+                val desc = if (targetEnabled) "开启限速提醒（${targetSpeed} km/h）" else "关闭限速提醒"
+                resolvePin(desc) { verifiedPin ->
+                    scope.launch {
+                        val ok = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.setSpeedLimitReminder(
+                                    vin = profile.vin,
+                                    speedKmh = if (targetEnabled) targetSpeed else 0,
+                                    pin = verifiedPin,
+                                    accessToken = profile.accessToken
+                                )
+                            }
+                        }.getOrDefault(false)
+                        if (ok) {
+                            onUpdated(targetEnabled, if (targetEnabled) targetSpeed else 0)
+                            if (dialog.isShowing) dialog.dismiss()
+                            toast(if (targetEnabled) "已设置限速提醒：$targetSpeed km/h" else "已关闭限速提醒")
+                        } else {
+                            toast("限速提醒设置失败，请稍后重试")
+                        }
+                    }
+                }
+            }
+
+            sheet.addView(primaryBtn("保存并开启限速提醒") {
+                submitSpeed(true, selectedSpeed)
+            }, lp(height = dp(48)))
+
+            if (currentEnabled) {
+                sheet.addView(secondaryBtn("关闭限速提醒") {
+                    submitSpeed(false, 0)
+                }, lp(top = dp(10), height = dp(46)))
+            }
+        }
+    }
+
+    /**
+     * EV / PHEV scheduled charging sheet (zyhl 974 + 970 instruction 1110).
+     */
+    fun showChargingScheduleSheet(
+        profile: VehicleProfile,
+        telemetry: VehicleTelemetry?,
+        powertrain: VehiclePowertrain,
+        resolvePin: (String, (String) -> Unit) -> Unit
+    ) {
+        showSheet("充电与预约充电") { sheet, dialog ->
+            // Live energy / charging summary card
+            val statusCard = cardBox().apply {
+                val batStr = telemetry?.batteryPercent?.let { "${it.toInt()}%" } ?: "--%"
+                val rangeStr = when {
+                    telemetry?.electricRangeKm != null -> "纯电续航 ${telemetry.electricRangeKm!!.toInt()} km"
+                    telemetry?.remainingRangeKm != null -> "剩余续航 ${telemetry.remainingRangeKm!!.toInt()} km"
+                    else -> "续航待同步"
+                }
+                val stateLabel = when {
+                    telemetry?.isCharging == true -> "正在充电"
+                    telemetry?.isChargingGunConnected == true -> "已插充电枪（待机）"
+                    else -> "未连接充电枪"
+                }
+                addView(text(stateLabel, 15.5f, if (telemetry?.isCharging == true) ThemeTokens.ACCENT_LIGHT else TEXT_PRIMARY, Typeface.BOLD))
+                val detailParts = mutableListOf(powertrain.label, "电量 $batStr", rangeStr)
+                telemetry?.remainingCharge?.takeIf { it.isNotBlank() && it != "0" }?.let {
+                    detailParts += "剩余时间 $it"
+                }
+                addView(text(detailParts.joinToString(" · "), 12.5f, TEXT_SUB), lp(top = dp(6)))
+            }
+            sheet.addView(statusCard, lp(top = dp(8)))
+
+            val scheduleHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            sheet.addView(scheduleHost, lp(top = dp(14)))
+            scheduleHost.addView(text("正在读取预约充电计划...", 13f, TEXT_SUB).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(20), 0, dp(20))
+            })
+
+            var currentSchedules: List<ChargingScheduleItem> = emptyList()
+            var masterEnabled = telemetry?.chargeAppintStatus == "1"
+
+            lateinit var renderSchedules: () -> Unit
+
+            fun persistSchedules(nextMaster: Boolean, nextList: List<ChargingScheduleItem>, actionDesc: String) {
+                resolvePin(actionDesc) { verifiedPin ->
+                    scope.launch {
+                        val ok = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.saveChargingSchedules(
+                                    vin = profile.vin,
+                                    masterEnabled = nextMaster,
+                                    schedules = nextList,
+                                    pin = verifiedPin,
+                                    accessToken = profile.accessToken
+                                )
+                            }
+                        }.getOrDefault(false)
+                        if (ok) {
+                            masterEnabled = nextMaster
+                            currentSchedules = nextList
+                            if (dialog.isShowing) renderSchedules()
+                            toast("预约充电设置已下发")
+                        } else {
+                            toast("预约充电同步失败，请稍后重试")
+                        }
+                    }
+                }
+            }
+
+            fun openEditScheduleDialog(existingIndex: Int?) {
+                val existing = existingIndex?.let { currentSchedules.getOrNull(it) }
+                var startTimeStr = existing?.startTime?.takeIf { it.contains(":") } ?: "23:00"
+                var durationHours = existing?.durationHours ?: 4
+                val selectedDays = (existing?.days ?: listOf(1, 2, 3, 4, 5, 6, 7)).toMutableSet()
+                val dayLabels = listOf("一", "二", "三", "四", "五", "六", "日")
+
+                showModalDialog(if (existing == null) "新增预约充电" else "编辑预约充电") { box, mDialog ->
+                    val (timeField, getTime) = AppComponents.createDateTimePickerField(
+                        context = context,
+                        hint = "选择开始时间",
+                        initialValue = startTimeStr,
+                        mode = DateTimeMode.TIME,
+                        title = "充电开始时间"
+                    )
+                    box.addView(text("开始时间", 12.5f, TEXT_SUB), lp(top = dp(8)))
+                    box.addView(timeField, lp(top = dp(4)))
+
+                    val durLabel = text("充电时长：$durationHours 小时", 13.5f, TEXT_PRIMARY, Typeface.BOLD)
+                    box.addView(durLabel, lp(top = dp(14)))
+                    val durSeek = SeekBar(context).apply {
+                        max = 11
+                        progress = (durationHours - 1).coerceIn(0, 11)
+                        progressTintList = ColorStateList.valueOf(ThemeTokens.ACCENT_LIGHT)
+                        thumbTintList = ColorStateList.valueOf(ThemeTokens.TEXT_PRIMARY)
+                        setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                                durationHours = progress + 1
+                                durLabel.text = "充电时长：$durationHours 小时"
+                            }
+                            override fun onStartTrackingTouch(sb: SeekBar?) = Unit
+                            override fun onStopTrackingTouch(sb: SeekBar?) = Unit
+                        })
+                    }
+                    box.addView(durSeek, lp(top = dp(6)))
+
+                    box.addView(text("重复周期", 12.5f, TEXT_SUB), lp(top = dp(14)))
+                    val daysRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                    dayLabels.forEachIndexed { idx, lbl ->
+                        val dayNum = idx + 1
+                        val pill = text(lbl, 12.5f, TEXT_PRIMARY, Typeface.BOLD).apply {
+                            gravity = Gravity.CENTER
+                            isClickable = true
+                            isFocusable = true
+                            fun refreshPill() {
+                                val active = dayNum in selectedDays
+                                background = rounded(
+                                    if (active) ThemeTokens.ACCENT_BLUE else ThemeTokens.BTN_SECONDARY,
+                                    8f
+                                )
+                                setTextColor(if (active) ThemeTokens.TEXT_PRIMARY else TEXT_SUB)
+                            }
+                            refreshPill()
+                            setOnClickListener {
+                                if (dayNum in selectedDays && selectedDays.size > 1) {
+                                    selectedDays.remove(dayNum)
+                                } else {
+                                    selectedDays.add(dayNum)
+                                }
+                                refreshPill()
+                            }
+                        }
+                        daysRow.addView(pill, LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                            if (idx > 0) marginStart = dp(4)
+                        })
+                    }
+                    box.addView(daysRow, lp(top = dp(8)))
+
+                    val btns = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                    box.addView(btns, lp(top = dp(18)))
+                    btns.addView(secondaryBtn("取消") { mDialog.dismiss() }, weightLp(0, dp(44)))
+                    btns.addView(primaryBtn("保存") {
+                        val picked = getTime().ifBlank { startTimeStr }
+                        val newItem = ChargingScheduleItem(
+                            chargeId = existing?.chargeId.orEmpty(),
+                            startTime = picked,
+                            durationHours = durationHours,
+                            days = selectedDays.sorted(),
+                            enabled = true
+                        )
+                        val updatedList = currentSchedules.toMutableList()
+                        if (existingIndex != null && existingIndex in updatedList.indices) {
+                            updatedList[existingIndex] = newItem
+                        } else {
+                            updatedList.add(newItem)
+                        }
+                        mDialog.dismiss()
+                        persistSchedules(true, updatedList, "保存预约充电计划")
+                    }, weightLp(dp(10), dp(44)))
+                }
+            }
+
+            renderSchedules = {
+                scheduleHost.removeAllViews()
+                val masterRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, dp(10))
+                }
+                masterRow.addView(
+                    text("预约充电总开关", 14.5f, TEXT_PRIMARY, Typeface.BOLD),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                )
+                val masterSwitch = ToggleSwitch(context).apply {
+                    setChecked(masterEnabled, animate = false)
+                    onToggleAttempt = { target ->
+                        persistSchedules(target, currentSchedules, if (target) "开启预约充电" else "关闭预约充电")
+                    }
+                }
+                masterRow.addView(masterSwitch)
+                scheduleHost.addView(masterRow)
+
+                if (currentSchedules.isEmpty()) {
+                    scheduleHost.addView(text("暂无预约充电计划，点击下方新增低谷电定时计划", 12.5f, TEXT_SUB).apply {
+                        gravity = Gravity.CENTER
+                        setPadding(0, dp(14), 0, dp(14))
+                    })
+                } else {
+                    val dayNames = arrayOf("", "周一", "周二", "周三", "周四", "周五", "周六", "周日")
+                    currentSchedules.forEachIndexed { idx, item ->
+                        val rowCard = cardBox().apply {
+                            val top = LinearLayout(context).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                            }
+                            top.addView(
+                                text("${item.startTime.ifBlank { "--:--" }} · ${item.durationHours}小时", 15f, TEXT_PRIMARY, Typeface.BOLD),
+                                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                            )
+                            val sw = ToggleSwitch(context).apply {
+                                setChecked(item.enabled, animate = false)
+                                onToggleAttempt = { target ->
+                                    val updated = currentSchedules.mapIndexed { i, it ->
+                                        if (i == idx) it.copy(enabled = target) else it
+                                    }
+                                    persistSchedules(updated.any { it.enabled }, updated, "更新预约充电计划")
+                                }
+                            }
+                            top.addView(sw)
+                            addView(top)
+                            val repeatText = if (item.days.size == 7) {
+                                "每天"
+                            } else if (item.days.isEmpty()) {
+                                "单次"
+                            } else {
+                                item.days.mapNotNull { dayNames.getOrNull(it) }.joinToString("、")
+                            }
+                            addView(text(repeatText, 12.5f, TEXT_SUB), lp(top = dp(4)))
+                            setOnClickListener { openEditScheduleDialog(idx) }
+                        }
+                        scheduleHost.addView(rowCard, lp(top = dp(8)))
+                    }
+                }
+
+                scheduleHost.addView(primaryBtn("新增预约充电") {
+                    openEditScheduleDialog(null)
+                }, lp(top = dp(14), height = dp(46)))
+            }
+
+            scope.launch {
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        httpClient.fetchChargingSchedules(profile.vin, profile.accessToken)
+                    }
+                }.getOrNull()
+                if (!dialog.isShowing) return@launch
+                if (res != null) {
+                    masterEnabled = res.masterEnabled
+                    currentSchedules = res.items
+                }
+                renderSchedules()
+            }
+        }
+    }
+
+    /**
+     * Departure / travel pre-conditioning schedule sheet (zyhl 143 + 970 instruction 1111; ICE/PHEV/EV).
+     */
+    fun showTravelScheduleSheet(
+        profile: VehicleProfile,
+        airType: Int = 1,
+        resolvePin: (String, (String) -> Unit) -> Unit
+    ) {
+        showSheet("预约出行") { sheet, dialog ->
+            sheet.addView(
+                text("设定出发时刻后，车辆将在出行前自动提前调节座舱温度（油/混/电车型均支持）。", 13f, TEXT_SUB).apply {
+                    setLineSpacing(0f, 1.4f)
+                },
+                lp(top = dp(6))
+            )
+
+            val host = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            sheet.addView(host, lp(top = dp(14)))
+            host.addView(text("正在读取预约出行配置...", 13f, TEXT_SUB).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(20), 0, dp(20))
+            })
+
+            fun render(enabled: Boolean, startTime: String) {
+                host.removeAllViews()
+                var isOn = enabled
+                val initialTime = startTime.takeIf { it.contains(":") } ?: "08:00"
+                val (timeField, getTime) = AppComponents.createDateTimePickerField(
+                    context = context,
+                    hint = "选择出发时间",
+                    initialValue = initialTime,
+                    mode = DateTimeMode.TIME,
+                    title = "预约出发时间"
+                )
+                val swRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, dp(12))
+                }
+                swRow.addView(text("启用预约出行", 15f, TEXT_PRIMARY, Typeface.BOLD), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                val sw = ToggleSwitch(context).apply {
+                    setChecked(isOn, animate = false)
+                    onToggleAttempt = { target ->
+                        isOn = target
+                        setChecked(target, animate = true)
+                    }
+                }
+                swRow.addView(sw)
+                host.addView(swRow)
+                host.addView(text("出发时间", 12.5f, TEXT_SUB))
+                host.addView(timeField, lp(top = dp(6), bottom = dp(18)))
+
+                host.addView(primaryBtn("保存预约出行") {
+                    val pickedTime = getTime().ifBlank { initialTime }
+                    val desc = if (isOn) "开启预约出行（$pickedTime）" else "关闭预约出行"
+                    resolvePin(desc) { verifiedPin ->
+                        scope.launch {
+                            val ok = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.saveTravelSchedule(
+                                        vin = profile.vin,
+                                        enabled = isOn,
+                                        startTimeHhMm = pickedTime,
+                                        airType = airType,
+                                        pin = verifiedPin,
+                                        accessToken = profile.accessToken
+                                    )
+                                }
+                            }.getOrDefault(false)
+                            if (ok) {
+                                if (dialog.isShowing) dialog.dismiss()
+                                toast(if (isOn) "预约出行已设置：$pickedTime" else "已关闭预约出行")
+                            } else {
+                                toast("预约出行同步失败，请稍后重试")
+                            }
+                        }
+                    }
+                }, lp(height = dp(48)))
+            }
+
+            scope.launch {
+                val summary = runCatching {
+                    withContext(Dispatchers.IO) {
+                        httpClient.fetchTravelSchedules(profile.vin, profile.accessToken)
+                    }
+                }.getOrNull()
+                if (!dialog.isShowing) return@launch
+                val first = summary?.items?.firstOrNull()
+                render(
+                    enabled = summary?.masterEnabled ?: (first?.enabled == true),
+                    startTime = first?.startTime.orEmpty().ifBlank { "08:00" }
+                )
+            }
+        }
     }
 
     // =========================================================================

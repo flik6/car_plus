@@ -75,6 +75,7 @@ class SettingsScreen(
     private val onPickAvatarImage: (onPicked: (Uri) -> Unit) -> Unit,
     private val onLogout: () -> Unit,
     private val fetchCloudUserInfo: (suspend () -> CheryUserInfo?)? = null,
+    private val updateCloudProfileField: (suspend (updateType: String, content: String) -> Boolean)? = null,
     private val onOpenDebugDiagnostics: (() -> Unit)? = null
 ) {
 
@@ -677,17 +678,53 @@ class SettingsScreen(
         )
         body.addView(avatarHeader, lp())
 
-        // Wire top-right Save action
+        // Wire top-right Save action (persists locally and syncs changed fields via zyhl 113)
         saveActionBtn.setOnClickListener {
             if (!saveEnabled) return@setOnClickListener
             AppHaptics.perform(saveActionBtn, HapticLevel.MEDIUM_CONFIRM)
+            val prev = savedSnapshot
             val updated = currentDraft()
             saveAccountProfile(updated)
             savedSnapshot = updated
             avatarDirty = false
             refreshAvatarSlot(updated.nickname.ifBlank { updated.username })
             updateSaveState()
-            toast("个人资料已保存")
+
+            val updater = updateCloudProfileField
+            if (updater == null) {
+                toast("个人资料已保存")
+                return@setOnClickListener
+            }
+            val cloudUpdates = mutableListOf<Pair<String, String>>()
+            if (updated.nickname != prev.nickname && updated.nickname.isNotBlank()) {
+                cloudUpdates += "0" to updated.nickname
+            }
+            if (updated.gender != prev.gender) {
+                val sexCode = when (updated.gender) {
+                    "男" -> "1"
+                    "女" -> "2"
+                    else -> "0"
+                }
+                cloudUpdates += "1" to sexCode
+            }
+            if (updated.email != prev.email) {
+                cloudUpdates += "2" to updated.email
+            }
+            if (updated.region != prev.region) {
+                cloudUpdates += "3" to updated.region
+            }
+            if (cloudUpdates.isEmpty()) {
+                toast("个人资料已保存")
+                return@setOnClickListener
+            }
+            scope.launch {
+                val allOk = withContext(Dispatchers.IO) {
+                    cloudUpdates.all { (type, value) ->
+                        runCatching { updater(type, value) }.getOrDefault(false)
+                    }
+                }
+                toast(if (allOk) "个人资料已同步至云端" else "已保存在本地，部分字段云端同步失败")
+            }
         }
 
         // 2. Borderless Form Rows with Hairline Dividers

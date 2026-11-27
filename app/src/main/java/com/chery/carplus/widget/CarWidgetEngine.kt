@@ -16,6 +16,7 @@ import android.widget.Toast
 import com.chery.carplus.R
 import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.RemoteCommand
+import com.chery.carplus.cloud.VehiclePowertrain
 import com.chery.carplus.cloud.VehicleTelemetry
 import com.chery.carplus.profile.VehicleProfileStore
 import com.chery.carplus.ui.MainActivity
@@ -44,7 +45,12 @@ data class CarWidgetSnapshot(
     val plateNo: String = "",
     val fuelPercent: Int = 0,
     val hasFuelData: Boolean = false,
+    val batteryPercent: Int = 0,
+    val hasBatteryData: Boolean = false,
+    val powertrainCode: String = VehiclePowertrain.ICE.code,
+    val isCharging: Boolean = false,
     val rangeKm: Int = -1,
+    val electricRangeKm: Int = -1,
     val odometerKm: Int = -1,
     val doorLocked: Boolean = true,
     val engineRunning: Boolean = false,
@@ -54,7 +60,11 @@ data class CarWidgetSnapshot(
     val primaryStatus: String = "状态待同步",
     val updatedAtMs: Long = 0L,
     val transientHint: String = ""
-)
+) {
+    val powertrain: VehiclePowertrain
+        get() = VehiclePowertrain.fromEngineTypeCode(powertrainCode)
+            ?: VehiclePowertrain.resolve("", modelName, null)
+}
 
 object CarWidgetStateStore {
     private const val PREFS_NAME = "carplus_widget_state"
@@ -62,7 +72,12 @@ object CarWidgetStateStore {
     private const val KEY_PLATE_NO = "plate_no"
     private const val KEY_FUEL_PERCENT = "fuel_percent"
     private const val KEY_HAS_FUEL = "has_fuel"
+    private const val KEY_BATTERY_PERCENT = "battery_percent"
+    private const val KEY_HAS_BATTERY = "has_battery"
+    private const val KEY_POWERTRAIN = "powertrain_code"
+    private const val KEY_IS_CHARGING = "is_charging"
     private const val KEY_RANGE_KM = "range_km"
+    private const val KEY_ELECTRIC_RANGE_KM = "electric_range_km"
     private const val KEY_ODO_KM = "odo_km"
     private const val KEY_LOCKED = "door_locked"
     private const val KEY_ENGINE = "engine_running"
@@ -80,7 +95,12 @@ object CarWidgetStateStore {
             plateNo = prefs.getString(KEY_PLATE_NO, "").orEmpty(),
             fuelPercent = prefs.getInt(KEY_FUEL_PERCENT, 0).coerceIn(0, 100),
             hasFuelData = prefs.getBoolean(KEY_HAS_FUEL, false),
+            batteryPercent = prefs.getInt(KEY_BATTERY_PERCENT, 0).coerceIn(0, 100),
+            hasBatteryData = prefs.getBoolean(KEY_HAS_BATTERY, false),
+            powertrainCode = prefs.getString(KEY_POWERTRAIN, VehiclePowertrain.ICE.code).orEmpty(),
+            isCharging = prefs.getBoolean(KEY_IS_CHARGING, false),
             rangeKm = prefs.getInt(KEY_RANGE_KM, -1),
+            electricRangeKm = prefs.getInt(KEY_ELECTRIC_RANGE_KM, -1),
             odometerKm = prefs.getInt(KEY_ODO_KM, -1),
             doorLocked = prefs.getBoolean(KEY_LOCKED, true),
             engineRunning = prefs.getBoolean(KEY_ENGINE, false),
@@ -100,7 +120,12 @@ object CarWidgetStateStore {
             .putString(KEY_PLATE_NO, snapshot.plateNo)
             .putInt(KEY_FUEL_PERCENT, snapshot.fuelPercent.coerceIn(0, 100))
             .putBoolean(KEY_HAS_FUEL, snapshot.hasFuelData)
+            .putInt(KEY_BATTERY_PERCENT, snapshot.batteryPercent.coerceIn(0, 100))
+            .putBoolean(KEY_HAS_BATTERY, snapshot.hasBatteryData)
+            .putString(KEY_POWERTRAIN, snapshot.powertrainCode)
+            .putBoolean(KEY_IS_CHARGING, snapshot.isCharging)
             .putInt(KEY_RANGE_KM, snapshot.rangeKm)
+            .putInt(KEY_ELECTRIC_RANGE_KM, snapshot.electricRangeKm)
             .putInt(KEY_ODO_KM, snapshot.odometerKm)
             .putBoolean(KEY_LOCKED, snapshot.doorLocked)
             .putBoolean(KEY_ENGINE, snapshot.engineRunning)
@@ -201,20 +226,32 @@ object CarWidgetManager {
         primaryStatus: String? = null
     ) {
         val current = CarWidgetStateStore.load(context)
-        val fuel = telemetry?.fuelPercent ?: telemetry?.electricitySurplus?.toDoubleOrNull()
+        val uiPrefs = context.applicationContext.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+        val cachedEngineType = uiPrefs.getString("engineType", "").orEmpty()
+        val resolvedModel = modelName.ifBlank { current.modelName }
+        val powertrain = VehiclePowertrain.resolve(cachedEngineType, resolvedModel, telemetry)
+        val fuel = telemetry?.fuelPercent
+        val battery = telemetry?.batteryPercent
+        val isCharging = powertrain.hasElectricDrive && telemetry?.isCharging == true
         val resolvedStatus = primaryStatus ?: when {
-            telemetry?.engineRunning == true -> "已启动"
+            isCharging -> "充电中"
+            telemetry?.engineRunning == true -> if (powertrain == VehiclePowertrain.EV) "已上电" else "已启动"
             telemetry?.engineRunning == false -> "已驻车"
             telemetry?.doorLocked == true -> "已锁止"
             telemetry?.doorLocked == false -> "已解锁"
             else -> current.primaryStatus
         }
         val next = CarWidgetSnapshot(
-            modelName = modelName.ifBlank { current.modelName },
+            modelName = resolvedModel,
             plateNo = plateNo.ifBlank { telemetry?.licensePlate.orEmpty().ifBlank { current.plateNo } },
             fuelPercent = fuel?.roundToInt()?.coerceIn(0, 100) ?: current.fuelPercent,
             hasFuelData = fuel != null || current.hasFuelData,
+            batteryPercent = battery?.roundToInt()?.coerceIn(0, 100) ?: current.batteryPercent,
+            hasBatteryData = battery != null || current.hasBatteryData,
+            powertrainCode = powertrain.code,
+            isCharging = isCharging,
             rangeKm = telemetry?.remainingRangeKm?.takeIf { it > 0.0 }?.roundToInt() ?: current.rangeKm,
+            electricRangeKm = telemetry?.electricRangeKm?.roundToInt() ?: current.electricRangeKm,
             odometerKm = telemetry?.odometerKm?.takeIf { it > 0.0 }?.roundToInt() ?: current.odometerKm,
             doorLocked = telemetry?.doorLocked ?: current.doorLocked,
             engineRunning = telemetry?.engineRunning ?: current.engineRunning,
@@ -284,13 +321,31 @@ object CarWidgetManager {
         rv.setTextViewText(R.id.widget_model_name, s.modelName)
 
         // Status Line (transient feedback takes priority while executing command)
+        val primaryBarPercent = when (s.powertrain) {
+            VehiclePowertrain.EV -> if (s.hasBatteryData) s.batteryPercent else -1
+            VehiclePowertrain.PHEV -> when {
+                s.hasBatteryData -> s.batteryPercent
+                s.hasFuelData -> s.fuelPercent
+                else -> -1
+            }
+            VehiclePowertrain.ICE -> if (s.hasFuelData) s.fuelPercent else -1
+        }
         val statusText = if (s.transientHint.isNotBlank()) {
             s.transientHint
         } else {
             when (style) {
                 CarWidgetStyle.BAR, CarWidgetStyle.COMPACT -> {
-                    val fuelPart = if (s.hasFuelData) "${s.fuelPercent}%" else "--%"
-                    "${s.primaryStatus} · $fuelPart"
+                    val energyPart = when (s.powertrain) {
+                        VehiclePowertrain.EV -> if (s.hasBatteryData) "电 ${s.batteryPercent}%" else "--%"
+                        VehiclePowertrain.PHEV -> when {
+                            s.hasBatteryData && s.hasFuelData -> "电${s.batteryPercent}% 油${s.fuelPercent}%"
+                            s.hasBatteryData -> "电 ${s.batteryPercent}%"
+                            s.hasFuelData -> "油 ${s.fuelPercent}%"
+                            else -> "--%"
+                        }
+                        VehiclePowertrain.ICE -> if (s.hasFuelData) "${s.fuelPercent}%" else "--%"
+                    }
+                    "${s.primaryStatus} · $energyPart"
                 }
                 CarWidgetStyle.MEDIUM, CarWidgetStyle.LARGE -> s.primaryStatus
             }
@@ -307,12 +362,12 @@ object CarWidgetManager {
             rv.setTextViewText(R.id.widget_update_time, timeLabel)
         }
 
-        // Fuel Bar (COMPACT & MEDIUM)
+        // Fuel / Battery Bar (COMPACT & MEDIUM)
         if (style == CarWidgetStyle.COMPACT || style == CarWidgetStyle.MEDIUM) {
-            rv.setProgressBar(R.id.widget_fuel_bar, 100, if (s.hasFuelData) s.fuelPercent else 0, false)
+            rv.setProgressBar(R.id.widget_fuel_bar, 100, if (primaryBarPercent >= 0) primaryBarPercent else 0, false)
         }
 
-        // Plate badge & detailed fuel text (MEDIUM & LARGE)
+        // Plate badge & detailed energy text (MEDIUM & LARGE)
         if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
             if (s.plateNo.isNotBlank()) {
                 rv.setViewVisibility(R.id.widget_plate_badge, View.VISIBLE)
@@ -320,9 +375,27 @@ object CarWidgetManager {
             } else {
                 rv.setViewVisibility(R.id.widget_plate_badge, View.GONE)
             }
-            val fuelStr = if (s.hasFuelData) "${s.fuelPercent}%" else "--%"
             val rangeStr = if (s.rangeKm > 0) "${s.rangeKm}km" else "--km"
-            rv.setTextViewText(R.id.widget_fuel_text, "$fuelStr · $rangeStr")
+            val energyDetail = when (s.powertrain) {
+                VehiclePowertrain.EV -> {
+                    val batStr = if (s.hasBatteryData) "电 ${s.batteryPercent}%" else "--%"
+                    val evRange = if (s.electricRangeKm > 0) "${s.electricRangeKm}km" else rangeStr
+                    "$batStr · $evRange"
+                }
+                VehiclePowertrain.PHEV -> {
+                    val parts = mutableListOf<String>()
+                    if (s.hasBatteryData) parts += "电 ${s.batteryPercent}%"
+                    if (s.hasFuelData) parts += "油 ${s.fuelPercent}%"
+                    if (parts.isEmpty()) parts += "--%"
+                    parts += rangeStr
+                    parts.joinToString(" · ")
+                }
+                VehiclePowertrain.ICE -> {
+                    val fuelStr = if (s.hasFuelData) "${s.fuelPercent}%" else "--%"
+                    "$fuelStr · $rangeStr"
+                }
+            }
+            rv.setTextViewText(R.id.widget_fuel_text, energyDetail)
         }
 
         // Large Dashboard extra telemetry cells

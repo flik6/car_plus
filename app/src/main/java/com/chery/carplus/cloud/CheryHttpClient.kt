@@ -55,6 +55,52 @@ data class SdkTokenInfo(
     val rawJson: String
 )
 
+enum class VehiclePowertrain(val code: String, val label: String) {
+    ICE("3", "燃油车"),
+    PHEV("2", "插电混动"),
+    EV("1", "纯电动");
+
+    val hasElectricDrive: Boolean get() = this == EV || this == PHEV
+    val hasFuelEngine: Boolean get() = this == ICE || this == PHEV
+
+    companion object {
+        fun fromEngineTypeCode(raw: String): VehiclePowertrain? = when (raw.trim()) {
+            "1" -> EV
+            "2" -> PHEV
+            "3" -> ICE
+            else -> null
+        }
+
+        fun resolve(
+            engineType: String = "",
+            modelName: String = "",
+            telemetry: VehicleTelemetry? = null
+        ): VehiclePowertrain {
+            fromEngineTypeCode(engineType)?.let { return it }
+            val hasElec = telemetry != null && (
+                telemetry.batteryPercent != null ||
+                    telemetry.electricRangeKm != null ||
+                    telemetry.chargingFlag == "1" ||
+                    telemetry.chargingGun == "1"
+                )
+            val hasFuel = telemetry?.fuelPercent != null
+            if (hasElec && hasFuel) return PHEV
+            if (hasElec && !hasFuel) return EV
+
+            val upper = modelName.trim().uppercase(Locale.US)
+            if (upper.isNotBlank()) {
+                if (upper.contains("PHEV") || upper.contains("C-DM") || upper.contains("CDM") ||
+                    upper.contains("混动") || upper.contains("插混") || upper.contains("增程")
+                ) return PHEV
+                if (upper.contains("纯电") || upper.contains("小蚂蚁") || upper.contains("冰淇淋") ||
+                    upper.contains("舒享家") || Regex("(^|[^A-Z])(EV|EQ\\d?)([^A-Z]|$)").containsMatchIn(upper)
+                ) return EV
+            }
+            return ICE
+        }
+    }
+}
+
 data class VehicleSummary(
     val vin: String,
     val bleMac: String,
@@ -94,10 +140,13 @@ data class VehicleSummary(
     val autMethod: String = "0",
     val simStatus: String = "1",
     val isBoundVehicle: Boolean = true,
-    val authDateListSummary: String = ""
+    val authDateListSummary: String = "",
+    val engineType: String = "",
+    val openAir: String = ""
 ) {
     val isSelected: Boolean get() = selected == "1"
     val modelName: String get() = firstNonBlank(vehicleName, seriesName, standardName)
+    val powertrain: VehiclePowertrain get() = VehiclePowertrain.resolve(engineType, modelName, null)
 }
 
 /**
@@ -157,7 +206,69 @@ data class VehicleTelemetry(
     val seq: String = "",
     val result: String = "",
     val msg: String = "",
-    val licensePlate: String = ""
+    val licensePlate: String = "",
+    val averageFuel: String = "",
+    val averageElectricity: String = "",
+    val electricityMileage: String = "",
+    val chargingFlag: String = "",
+    val chargingGun: String = "",
+    val remainingCharge: String = "",
+    val chargeAppintStatus: String = "",
+    val dSeatHeatingState: String = "",
+    val pSeatHeatingState: String = "",
+    val dSeatVentilateState: String = "",
+    val pSeatVentilateState: String = "",
+    val fWinHeatingState: String = "",
+    val rWinHeatingState: String = "",
+    val airPurification: String = "",
+    val lFrontTyreTemp: String = "",
+    val rFrontTyreTemp: String = "",
+    val lRearTyreTemp: String = "",
+    val rRearTyreTemp: String = "",
+    val tripSwitchStatus: String = ""
+) {
+    val isCharging: Boolean get() = chargingFlag.trim() == "1"
+    val isChargingGunConnected: Boolean get() = chargingGun.trim() == "1"
+    val batteryPercent: Double?
+        get() = electricitySurplus.trim().toDoubleOrNull()?.takeIf { it in 0.0..100.0 }
+    val electricRangeKm: Double?
+        get() = electricityMileage.trim().toDoubleOrNull()?.takeIf { it > 0.0 }
+}
+
+data class VehicleTrafficInfo(
+    val usedTraffic: String = "",
+    val totalTraffic: String = "",
+    val unlimited: Boolean = false,
+    val packageState: String = "",
+    val dueDate: String = "",
+    val rawJson: String = ""
+)
+
+data class ChargingScheduleItem(
+    val chargeId: String = "",
+    val startTime: String = "",
+    val durationHours: Int = 1,
+    val days: List<Int> = emptyList(),
+    val enabled: Boolean = false,
+    val rawJson: String = ""
+)
+
+data class ChargingScheduleSummary(
+    val masterEnabled: Boolean = false,
+    val items: List<ChargingScheduleItem> = emptyList(),
+    val rawJson: String = ""
+)
+
+data class TravelScheduleItem(
+    val startTime: String = "",
+    val enabled: Boolean = false,
+    val rawJson: String = ""
+)
+
+data class TravelScheduleSummary(
+    val masterEnabled: Boolean = false,
+    val items: List<TravelScheduleItem> = emptyList(),
+    val rawJson: String = ""
 )
 
 enum class RemoteCommand {
@@ -1428,7 +1539,9 @@ class CheryHttpClient(
             autMethod = autMethod,
             simStatus = firstNonBlank(item.optString("simStatus"), "1"),
             isBoundVehicle = autMethod == "0" || autMethod.isBlank(),
-            authDateListSummary = parseAuthorizationDateSummary(dateList)
+            authDateListSummary = parseAuthorizationDateSummary(dateList),
+            engineType = firstNonBlank(item.optString("engineType"), item.optString("fuelType")),
+            openAir = item.optString("openAir").trim()
         )
     }
 
@@ -1635,7 +1748,29 @@ class CheryHttpClient(
             seq = status.optString("seq"),
             result = status.optString("result"),
             msg = status.optString("msg"),
-            licensePlate = licensePlate
+            licensePlate = licensePlate,
+            averageFuel = status.optString("averageFuel"),
+            averageElectricity = status.optString("averageElectricity"),
+            electricityMileage = firstNonBlank(
+                status.optString("electricitymileage"),
+                status.optString("electricityMileage")
+            ),
+            chargingFlag = status.optString("chargingFlag"),
+            chargingGun = status.optString("chargingGun"),
+            remainingCharge = status.optString("remainingCharge"),
+            chargeAppintStatus = status.optString("chargeAppintStatus"),
+            dSeatHeatingState = status.optString("dSeatHeatingState"),
+            pSeatHeatingState = status.optString("pSeatHeatingState"),
+            dSeatVentilateState = status.optString("dSeatVentilateState"),
+            pSeatVentilateState = status.optString("pSeatVentilateState"),
+            fWinHeatingState = status.optString("fWinHeatingState"),
+            rWinHeatingState = status.optString("rWinHeatingState"),
+            airPurification = status.optString("airPurification"),
+            lFrontTyreTemp = status.optString("lFrontTyreTemp"),
+            rFrontTyreTemp = status.optString("rFrontTyreTemp"),
+            lRearTyreTemp = status.optString("lRearTyreTemp"),
+            rRearTyreTemp = status.optString("rRearTyreTemp"),
+            tripSwitchStatus = status.optString("tripSwitchStatus")
         )
     }
 
@@ -1669,7 +1804,13 @@ class CheryHttpClient(
         RemoteCommand.FIND_CAR -> CommandSpec("1101", JSONObject())
         RemoteCommand.ENGINE_START -> CommandSpec(
             "1103",
-            JSONObject().put("0002", 1)
+            JSONObject().apply {
+                put("0002", 1)
+                val duration = params["controlTime"]?.trim()?.toIntOrNull()
+                if (duration == 5 || duration == 10 || duration == 15) {
+                    put("300D", duration)
+                }
+            }
         )
         RemoteCommand.ENGINE_STOP -> CommandSpec(
             "1103",
@@ -1688,7 +1829,32 @@ class CheryHttpClient(
             JSONObject().apply {
                 put("0002", 1)
                 put("3001", parseIntParam(params, 24, "temperature", "airTemperature", "temp"))
-                put("3028", parseIntParam(params, 1, "airType"))
+                put("3010", parseIntParam(params, 1, "airType"))
+                val duration = params["controlTime"]?.trim()?.toIntOrNull()
+                if (duration == 5 || duration == 10 || duration == 15) {
+                    put("300D", duration)
+                }
+                params["airPM"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                    put("300F", it)
+                }
+                params["frontDefrost"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                    put("3013", it)
+                }
+                params["rearDefrost"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                    put("3014", it)
+                }
+                params["driverHeating"]?.trim()?.toIntOrNull()?.let {
+                    put("3015", if (it > 0) 2 else 0)
+                }
+                params["passengerHeating"]?.trim()?.toIntOrNull()?.let {
+                    put("3016", if (it > 0) 2 else 0)
+                }
+                params["driverVent"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                    put("3029", it)
+                }
+                params["passengerVent"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                    put("302A", it)
+                }
             },
             isSetTemp = "1"
         )
@@ -1697,6 +1863,9 @@ class CheryHttpClient(
             JSONObject().apply {
                 put("0002", 0)
                 put("3001", 0)
+                params["airType"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                    put("3010", it)
+                }
             }
         )
         RemoteCommand.WINDOW_OPEN -> CommandSpec(
@@ -2593,6 +2762,299 @@ class CheryHttpClient(
             accessToken = accessToken
         )
         return zyhlEnvelopeSucceeded(envelope)
+    }
+
+    /** Verifies vehicle VIN/SN/ICCID before resetting a forgotten PIN (zyhl 922). */
+    fun verifyVehicleIdentityForReset(
+        vin: String,
+        sn: String,
+        iccid: String,
+        accessToken: String = ""
+    ): Boolean {
+        val response = postEnvelope(
+            serviceType = "922",
+            data = JSONObject().apply {
+                put("vin", vin.trim().uppercase(Locale.US))
+                put("sn", sn.trim())
+                put("iccid", iccid.trim())
+            },
+            globalId = resolveAuthToken(accessToken)
+        )
+        return isSuccessCode(response.resultCode)
+    }
+
+    /** Resets a forgotten 6-digit vehicle PIN via 921(type="2") + 124 (DataReq124). */
+    fun resetVehicleControlPinByVehicleInfo(
+        vin: String,
+        sn: String,
+        iccid: String,
+        telephone: String,
+        validateCode: String,
+        newPin: String,
+        accessToken: String = ""
+    ): Boolean {
+        val cleanMobile = telephone.trim()
+        val cleanCode = validateCode.trim()
+        val verifyResp = verifySmsCodeZyhlResponse(
+            mobileNo = cleanMobile,
+            smsCode = cleanCode,
+            type = SMS_TYPE_FORGET_PASSWORD
+        )
+        if (!isSuccessCode(verifyResp.resultCode)) return false
+        val envelope = executeZyhlService(
+            serviceType = "124",
+            data = JSONObject().apply {
+                put("vin", vin.trim().uppercase(Locale.US))
+                put("sn", sn.trim())
+                put("iccid", iccid.trim())
+                put("telephone", cleanMobile)
+                put("validateCode", cleanCode)
+                put("password", hashPasswordOrPin(newPin.trim()))
+            },
+            accessToken = accessToken
+        )
+        return zyhlEnvelopeSucceeded(envelope)
+    }
+
+    /** Updates one cloud user profile field via zyhl 113 (0=nickname, 1=sex, 2=email, 3=region). */
+    fun updateUserProfileField(
+        updateType: String,
+        content: String,
+        accessToken: String = ""
+    ): Boolean {
+        val envelope = executeZyhlService(
+            serviceType = "113",
+            data = JSONObject().apply {
+                put("updateType", updateType.trim())
+                put("content", content.trim())
+            },
+            accessToken = accessToken
+        )
+        return zyhlEnvelopeSucceeded(envelope)
+    }
+
+    /** Sets or disables speed-limit reminder via zyhl 970 instruction 1203 (4005: 0=off, 60..120=km/h). */
+    fun setSpeedLimitReminder(
+        vin: String,
+        speedKmh: Int,
+        pin: String,
+        accessToken: String = ""
+    ): Boolean {
+        val payload = JSONObject().apply {
+            put("vin", vin.trim().uppercase(Locale.US))
+            put("instruction", "1203")
+            put("paras", JSONObject().put("4005", if (speedKmh <= 0) 0 else speedKmh.coerceIn(60, 120)))
+            put("passwordType", PASSWORD_TYPE_VEHICLE)
+            if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
+        }
+        val env = executeZyhlService("970", payload, accessToken)
+        return zyhlEnvelopeSucceeded(env)
+    }
+
+    /** Toggles cabin auto air-ventilation via zyhl 975 (DataReq975). */
+    fun setAutoAirVentilation(
+        vin: String,
+        enabled: Boolean,
+        accessToken: String = ""
+    ): Boolean {
+        val env = executeZyhlService(
+            serviceType = "975",
+            data = JSONObject().apply {
+                put("vin", vin.trim().uppercase(Locale.US))
+                put("openAir", if (enabled) "1" else "0")
+            },
+            accessToken = accessToken
+        )
+        return zyhlEnvelopeSucceeded(env)
+    }
+
+    /** Queries vehicle connected data-traffic package via zyhl 967 (DataResp967). */
+    fun fetchVehicleTrafficPackage(
+        vin: String,
+        accessToken: String = ""
+    ): VehicleTrafficInfo {
+        val env = executeZyhlService(
+            serviceType = "967",
+            data = JSONObject().put("vin", vin.trim().uppercase(Locale.US)),
+            accessToken = accessToken
+        )
+        val data = zyhlDataObject(env)
+        return VehicleTrafficInfo(
+            usedTraffic = jsonText(data, "usedTraffic"),
+            totalTraffic = jsonText(data, "totalTraffic"),
+            unlimited = jsonText(data, "unlimited") == "1",
+            packageState = jsonText(data, "packageState"),
+            dueDate = jsonText(data, "dueDate"),
+            rawJson = data.toString()
+        )
+    }
+
+    /** Queries EV/PHEV scheduled charging entries via zyhl 974 (DataResp974). */
+    fun fetchChargingSchedules(
+        vin: String,
+        accessToken: String = ""
+    ): ChargingScheduleSummary {
+        val env = executeZyhlService(
+            serviceType = "974",
+            data = JSONObject().put("vin", vin.trim().uppercase(Locale.US)),
+            accessToken = accessToken
+        )
+        val data = zyhlDataObject(env)
+        val items = objectList(data.optJSONArray("chargeAppintlist")).map { item ->
+            val days = objectList(item.optJSONArray("dateList")).mapNotNull { d ->
+                jsonText(d, "date").toIntOrNull()?.takeIf { it in 1..7 }
+            }.distinct().sorted()
+            ChargingScheduleItem(
+                chargeId = jsonText(item, "chargeId"),
+                startTime = jsonText(item, "beStarttime"),
+                durationHours = jsonText(item, "chargingTime").toIntOrNull()?.coerceIn(1, 24) ?: 2,
+                days = days,
+                enabled = jsonText(item, "chargeAppintStatus") == "1",
+                rawJson = item.toString()
+            )
+        }
+        return ChargingScheduleSummary(
+            masterEnabled = jsonText(data, "chargeAppintStatus") == "1",
+            items = items,
+            rawJson = data.toString()
+        )
+    }
+
+    /** Saves EV/PHEV charging schedules via zyhl 970 instruction 1110 (3A04 + 3A19). */
+    fun saveChargingSchedules(
+        vin: String,
+        masterEnabled: Boolean,
+        schedules: List<ChargingScheduleItem>,
+        pin: String,
+        accessToken: String = ""
+    ): Boolean {
+        val dayCodes = arrayOf("01", "02", "03", "04", "05", "06", "07")
+        val listArr = JSONArray()
+        schedules.forEach { item ->
+            val mins = parseHhMmToMinutes(item.startTime)
+            if (mins >= 0) {
+                val entry = JSONObject().apply {
+                    put("3A05", mins)
+                    put("3A1A", item.durationHours.coerceIn(1, 24))
+                    val daysArr = JSONArray()
+                    item.days.filter { it in 1..7 }.distinct().sorted().forEach { d ->
+                        daysArr.put(dayCodes[d - 1])
+                    }
+                    put("3A1B", daysArr)
+                    put("3A04", if (item.enabled) 1 else 0)
+                }
+                listArr.put(entry)
+            }
+        }
+        val payload = JSONObject().apply {
+            put("vin", vin.trim().uppercase(Locale.US))
+            put("instruction", "1110")
+            put(
+                "paras",
+                JSONObject().apply {
+                    put("3A04", if (masterEnabled) 1 else 0)
+                    put("3A19", listArr)
+                }
+            )
+            put("passwordType", PASSWORD_TYPE_VEHICLE)
+            if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
+        }
+        val env = executeZyhlService("970", payload, accessToken)
+        return zyhlEnvelopeSucceeded(env)
+    }
+
+    /** Queries departure/travel pre-conditioning schedules via zyhl 143 (DataResp143). */
+    fun fetchTravelSchedules(
+        vin: String,
+        accessToken: String = ""
+    ): TravelScheduleSummary {
+        val env = executeZyhlService(
+            serviceType = "143",
+            data = JSONObject().put("vin", vin.trim().uppercase(Locale.US)),
+            accessToken = accessToken
+        )
+        val data = zyhlDataObject(env)
+        val items = objectList(data.optJSONArray("travellist")).map { item ->
+            TravelScheduleItem(
+                startTime = firstNonBlank(jsonText(item, "travelStartTime"), jsonText(item, "travelStart")),
+                enabled = jsonText(item, "travelStatus") == "1",
+                rawJson = item.toString()
+            )
+        }
+        val master = jsonText(data, "travelStatus") == "1" || jsonText(data, "status") == "1"
+        return TravelScheduleSummary(
+            masterEnabled = master,
+            items = items,
+            rawJson = data.toString()
+        )
+    }
+
+    /** Saves departure/travel pre-conditioning schedule via zyhl 970 instruction 1111 (0002 + 3010 + 302E). */
+    fun saveTravelSchedule(
+        vin: String,
+        enabled: Boolean,
+        startTimeHhMm: String,
+        airType: Int = 1,
+        pin: String,
+        accessToken: String = ""
+    ): Boolean {
+        val mins = parseHhMmToMinutes(startTimeHhMm)
+        val entry = JSONObject().apply {
+            if (mins >= 0) put("302D", mins)
+            put("0002", if (enabled) 1 else 0)
+        }
+        val payload = JSONObject().apply {
+            put("vin", vin.trim().uppercase(Locale.US))
+            put("instruction", "1111")
+            put(
+                "paras",
+                JSONObject().apply {
+                    put("0002", if (enabled) 1 else 0)
+                    put("3010", airType.coerceIn(0, 1))
+                    put("302E", JSONArray().put(entry))
+                }
+            )
+            put("passwordType", PASSWORD_TYPE_VEHICLE)
+            if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
+        }
+        val env = executeZyhlService("970", payload, accessToken)
+        return zyhlEnvelopeSucceeded(env)
+    }
+
+    /** Sends a navigation POI destination to the vehicle head-unit via zyhl 943. */
+    fun sendPoiToVehicle(
+        vin: String,
+        name: String,
+        address: String,
+        lat: String,
+        lon: String,
+        telephone: String = "",
+        accessToken: String = ""
+    ): Boolean {
+        val env = executeZyhlService(
+            serviceType = "943",
+            data = JSONObject().apply {
+                put("vin", vin.trim().uppercase(Locale.US))
+                put("name", name.trim())
+                put("address", address.trim())
+                put("latitude", lat.trim())
+                put("longitude", lon.trim())
+                put("poiid", "")
+                put("telephone", telephone.trim())
+                put("time", System.currentTimeMillis().toString())
+            },
+            accessToken = accessToken
+        )
+        return zyhlEnvelopeSucceeded(env)
+    }
+
+    private fun parseHhMmToMinutes(hhMm: String): Int {
+        val parts = hhMm.trim().split(":")
+        if (parts.size < 2) return -1
+        val h = parts[0].toIntOrNull() ?: return -1
+        val m = parts[1].toIntOrNull() ?: return -1
+        if (h !in 0..23 || m !in 0..59) return -1
+        return h * 60 + m
     }
 
     /** Queries remote authorizations through zyhl service 901. */

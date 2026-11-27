@@ -57,6 +57,7 @@ import com.chery.carplus.cloud.CherySessionExpiredException
 import com.chery.carplus.cloud.InGeekCloudProvisioner
 import com.chery.carplus.cloud.RemoteCommand
 import com.chery.carplus.cloud.RemoteCommandResult
+import com.chery.carplus.cloud.VehiclePowertrain
 import com.chery.carplus.cloud.VehicleSummary
 import com.chery.carplus.cloud.VehicleTelemetry
 import com.chery.carplus.profile.VehicleProfile
@@ -301,6 +302,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var quickDeckExpanded = false
     private var quickDeckEditMode = false
     private var climateRowSubtitle: TextView? = null
+    private var chargingMenuRow: View? = null
+    private var chargingRowSubtitle: TextView? = null
     private var locationRowSubtitle: TextView? = null
     private var securityDotView: StatusDotView? = null
     private var securityRowSubtitle: TextView? = null
@@ -1296,15 +1299,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
                 managementScreens.rememberVehicleSummaries(vehicles, saved.accessToken)
                 if (primary != null) {
-                    uiPrefs.edit()
-                        .putString(KEY_MODEL_NAME, vehicleModelName(primary))
-                        .putString(KEY_PLATE_NO, primary.plateNo)
-                        .apply()
+                    persistVehicleMetadata(primary)
                 } else {
-                    uiPrefs.edit()
-                        .remove(KEY_MODEL_NAME)
-                        .remove(KEY_PLATE_NO)
-                        .apply()
+                    clearVehicleMetadata()
                 }
                 cloudTripTrackEnabled = primary?.isTracksOpen ?: user.isTracksOpen
                 currentProfile = saved
@@ -1889,10 +1886,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 profileStore.saveProfile(updatedProfile, activate = true)
             }
             val displayName = vehicleModelName(chosen)
-            uiPrefs.edit()
-                .putString(KEY_MODEL_NAME, displayName)
-                .putString(KEY_PLATE_NO, chosen.plateNo.trim())
-                .apply()
+            persistVehicleMetadata(chosen)
             cloudTripTrackEnabled = chosen.isTracksOpen ?: cloudTripTrackEnabled
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
@@ -1963,10 +1957,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 profileStore.saveProfile(newProfile, activate = true)
             }
             val displayName = vehicleModelName(chosen)
-            uiPrefs.edit()
-                .putString(KEY_MODEL_NAME, displayName)
-                .putString(KEY_PLATE_NO, chosen.plateNo.trim())
-                .apply()
+            persistVehicleMetadata(chosen)
             cloudTripTrackEnabled = chosen.isTracksOpen ?: cloudTripTrackEnabled
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
@@ -2175,6 +2166,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 if (active.accessToken.isBlank()) null
                 else runCatching { httpClient.fetchUserInfo(active.accessToken) }.getOrNull()
             },
+            updateCloudProfileField = { updateType, content ->
+                val active = profileStore.getActiveProfile()
+                if (active.accessToken.isBlank()) false
+                else runCatching {
+                    httpClient.updateUserProfileField(updateType, content, active.accessToken)
+                }.getOrDefault(false)
+            },
             onOpenDebugDiagnostics = { openDebugDiagnosticsScreen() }
         )
         settingsScreen = screen
@@ -2195,20 +2193,137 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             .start()
     }
 
-    private fun formatEnergyDisplay(telemetry: VehicleTelemetry?): String {
-        val energy = telemetry?.fuelPercent ?: telemetry?.electricitySurplus?.toDoubleOrNull()
-        val range = telemetry?.remainingRangeKm
-        return if (!energyShowsRange) {
-            when {
-                energy != null -> "${energy.roundToInt()}%"
-                range != null && range > 0 -> "${range.roundToInt()} km"
-                else -> "--%"
+    private fun persistVehicleMetadata(vehicle: VehicleSummary) {
+        uiPrefs.edit()
+            .putString(KEY_MODEL_NAME, vehicleModelName(vehicle))
+            .putString(KEY_PLATE_NO, vehicle.plateNo.trim())
+            .putString(KEY_ENGINE_TYPE, vehicle.engineType.trim())
+            .putString(KEY_AIR_TYPE, vehicle.airType.trim())
+            .putString(KEY_TEMP_LO, vehicle.tempLo.trim())
+            .putString(KEY_TEMP_HI, vehicle.tempHi.trim())
+            .putString(KEY_OPEN_AIR, vehicle.openAir.trim())
+            .putString(KEY_VEHICLE_SN, vehicle.sn.trim())
+            .putString(KEY_VEHICLE_ICCID, vehicle.iccid.trim())
+            .apply()
+    }
+
+    private fun clearVehicleMetadata() {
+        uiPrefs.edit()
+            .remove(KEY_MODEL_NAME)
+            .remove(KEY_PLATE_NO)
+            .remove(KEY_ENGINE_TYPE)
+            .remove(KEY_AIR_TYPE)
+            .remove(KEY_TEMP_LO)
+            .remove(KEY_TEMP_HI)
+            .remove(KEY_OPEN_AIR)
+            .remove(KEY_VEHICLE_SN)
+            .remove(KEY_VEHICLE_ICCID)
+            .apply()
+    }
+
+    private fun activePowertrain(telemetry: VehicleTelemetry? = activeTelemetry): VehiclePowertrain {
+        val engineType = uiPrefs.getString(KEY_ENGINE_TYPE, "").orEmpty()
+        val modelName = uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty()
+        return VehiclePowertrain.resolve(engineType, modelName, telemetry)
+    }
+
+    private fun resolveVehiclePinForAction(actionLabel: String, onPinReady: (String) -> Unit) {
+        val profile = profileStore.getActiveProfile()
+        if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+            Toast.makeText(this, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val cachedPin = sessionVehiclePin.ifBlank { profile.controlPin }
+        val needPin = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) || cachedPin.length != 6
+        if (!needPin) {
+            onPinReady(cachedPin)
+            return
+        }
+        appDialog?.dismiss()
+        appDialog = SixDigitPinSheet.showVerifyPinSheet(
+            context = this,
+            title = "输入 PIN 码",
+            subtitle = "请输入 6 位云端 PIN 码以执行「$actionLabel」"
+        ) { pin, showError, dismiss ->
+            lifecycleScope.launch {
+                val verified = runCatching {
+                    withContext(Dispatchers.IO) {
+                        httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
+                    }
+                }.getOrDefault(false)
+                if (verified) {
+                    sessionVehiclePin = pin
+                    currentProfile = profileStore.saveProfile(
+                        profile.copy(controlPin = pin),
+                        activate = true
+                    )
+                    dismiss()
+                    onPinReady(pin)
+                } else {
+                    showError("云端 PIN 码错误，请重试")
+                }
             }
-        } else {
-            when {
-                range != null && range > 0 -> "${range.roundToInt()} km"
-                energy != null -> "${energy.roundToInt()}%"
-                else -> "-- km"
+        }
+    }
+
+    private fun formatEnergyDisplay(telemetry: VehicleTelemetry?): String {
+        val powertrain = activePowertrain(telemetry)
+        val fuel = telemetry?.fuelPercent
+        val battery = telemetry?.batteryPercent
+        val range = telemetry?.remainingRangeKm
+        val evRange = telemetry?.electricRangeKm
+        return when (powertrain) {
+            VehiclePowertrain.EV -> {
+                if (!energyShowsRange) {
+                    val prefix = if (telemetry?.isCharging == true) "充电中 " else "电 "
+                    when {
+                        battery != null -> "$prefix${battery.roundToInt()}%"
+                        evRange != null -> "${evRange.roundToInt()} km"
+                        range != null && range > 0 -> "${range.roundToInt()} km"
+                        else -> "--%"
+                    }
+                } else {
+                    val r = evRange ?: range
+                    when {
+                        r != null && r > 0 -> "${r.roundToInt()} km"
+                        battery != null -> "电 ${battery.roundToInt()}%"
+                        else -> "-- km"
+                    }
+                }
+            }
+            VehiclePowertrain.PHEV -> {
+                if (!energyShowsRange) {
+                    when {
+                        battery != null && fuel != null -> "电 ${battery.roundToInt()}% · 油 ${fuel.roundToInt()}%"
+                        battery != null -> "电 ${battery.roundToInt()}%"
+                        fuel != null -> "油 ${fuel.roundToInt()}%"
+                        else -> "--%"
+                    }
+                } else {
+                    when {
+                        evRange != null && range != null && range > 0 ->
+                            "电 ${evRange.roundToInt()} · 综 ${range.roundToInt()} km"
+                        range != null && range > 0 -> "${range.roundToInt()} km"
+                        evRange != null -> "纯电 ${evRange.roundToInt()} km"
+                        else -> "-- km"
+                    }
+                }
+            }
+            VehiclePowertrain.ICE -> {
+                val energy = fuel ?: battery
+                if (!energyShowsRange) {
+                    when {
+                        energy != null -> "${energy.roundToInt()}%"
+                        range != null && range > 0 -> "${range.roundToInt()} km"
+                        else -> "--%"
+                    }
+                } else {
+                    when {
+                        range != null && range > 0 -> "${range.roundToInt()} km"
+                        energy != null -> "${energy.roundToInt()}%"
+                        else -> "-- km"
+                    }
+                }
             }
         }
     }
@@ -2337,6 +2452,25 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 title = "修改 PIN 码",
                 showChevron = true
             ) { featureSheets.showPinManagementModal(profileStore.getActiveProfile()) },
+            lp()
+        )
+        content.addView(AppComponents.createHairline(this, startInsetDp = 58))
+
+        // Row 2b: 忘记 PIN 码（车辆识别码 + 短信重置 922 + 124）
+        content.addView(
+            AppComponents.createListRow(
+                context = this,
+                icon = AppIconType.INFO_CIRCLE,
+                title = "忘记 PIN 码",
+                subtitle = "通过 VIN / SN / ICCID 与短信验证码重置云端 PIN 码",
+                showChevron = true
+            ) {
+                featureSheets.showResetPinByVehicleSheet(
+                    profile = profileStore.getActiveProfile(),
+                    defaultSn = uiPrefs.getString(KEY_VEHICLE_SN, "").orEmpty(),
+                    defaultIccid = uiPrefs.getString(KEY_VEHICLE_ICCID, "").orEmpty()
+                )
+            },
             lp()
         )
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
@@ -2472,7 +2606,36 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
 
-        // Fetch live anti-theft remind state on Security screen open
+        // Row 3b: 限速提醒 (zyhl 950 + 970 instruction 1203; 60–120 km/h)
+        var speedLimitEnabledState = false
+        var speedLimitKmhState = 100
+        val speedLimitValueTv = text("读取中...", 13f, TEXT_SECONDARY)
+        content.addView(
+            AppComponents.createListRow(
+                context = this,
+                icon = AppIconType.CLOCK,
+                title = "限速提醒",
+                subtitle = "车速超过设定值时推送超速提醒",
+                trailingView = speedLimitValueTv,
+                showChevron = true
+            ) {
+                featureSheets.showSpeedLimitSheet(
+                    profile = profileStore.getActiveProfile(),
+                    currentEnabled = speedLimitEnabledState,
+                    currentSpeedKmh = speedLimitKmhState,
+                    resolvePin = { desc, cb -> resolveVehiclePinForAction(desc, cb) }
+                ) { enabled, speedKmh ->
+                    speedLimitEnabledState = enabled
+                    if (speedKmh > 0) speedLimitKmhState = speedKmh
+                    speedLimitValueTv.text = if (enabled && speedKmh > 0) "$speedKmh km/h" else "已关闭"
+                    speedLimitValueTv.setTextColor(if (enabled) ThemeTokens.ACCENT_LIGHT else TEXT_SECONDARY)
+                }
+            },
+            lp()
+        )
+        content.addView(AppComponents.createHairline(this, startInsetDp = 58))
+
+        // Fetch live anti-theft & speed-limit remind state on Security screen open
         lifecycleScope.launch {
             val active = profileStore.getActiveProfile()
             val status = if (active.vin.isNotBlank() && active.accessToken.isNotBlank()) {
@@ -2489,6 +2652,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             if (status != null) {
                 theftEnabledState = status.theftRemindEnabled
                 theftSwitch.setChecked(status.theftRemindEnabled, animate = false)
+                speedLimitEnabledState = status.speedLimitEnabled
+                val parsedSpeed = status.speedLimitKmh.trim().toIntOrNull() ?: 0
+                if (parsedSpeed in 60..120) speedLimitKmhState = parsedSpeed
+                speedLimitValueTv.text = if (status.speedLimitEnabled && parsedSpeed > 0) "$parsedSpeed km/h" else "已关闭"
+                speedLimitValueTv.setTextColor(if (status.speedLimitEnabled) ThemeTokens.ACCENT_LIGHT else TEXT_SECONDARY)
+            } else {
+                speedLimitValueTv.text = "已关闭"
             }
         }
 
@@ -3502,6 +3672,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         climateRowSubtitle = tempRow.second
         list.addView(tempRow.first)
 
+        // Row 1b: 充电与预约充电 (strictly visible ONLY for EV & PHEV vehicles)
+        val chargeRow = createMenuRowWithRefs(
+            icon = AppIconType.BOLT_FLASH,
+            title = "充电",
+            initialSubtitle = "未插充电枪 · 预约充电",
+            withStatusDot = false
+        ) {
+            featureSheets.showChargingScheduleSheet(
+                profile = profileStore.getActiveProfile(),
+                telemetry = activeTelemetry,
+                powertrain = activePowertrain(),
+                resolvePin = { desc, cb -> resolveVehiclePinForAction(desc, cb) }
+            )
+        }
+        chargingMenuRow = chargeRow.first.apply {
+            visibility = if (activePowertrain().hasElectricDrive) View.VISIBLE else View.GONE
+        }
+        chargingRowSubtitle = chargeRow.second
+        list.addView(chargeRow.first)
+
         // Row 2: 地点 (全屏实时位置与历史行程子页；街道信息未获取前不展示占位文案)
         val locRow = createMenuRowWithRefs(
             icon = AppIconType.LOCATION_ARROW,
@@ -3568,25 +3758,61 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         page.addView(footerBox, lp())
     }
 
-    private fun formatHomeFooterMetric(telemetry: VehicleTelemetry?, index: Int): String = when (index % 4) {
-        0 -> {
-            val plateNo = firstNonBlank(
-                telemetry?.licensePlate.orEmpty(),
-                uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
-            )
-            if (plateNo.isNotBlank()) plateNo else "未设置车牌"
-        }
-        1 -> {
-            val odo = telemetry?.odometerKm?.takeIf { it > 0.0 }
-            if (odo != null) "总里程 ${String.format(Locale.US, "%,d", odo.roundToInt())} km" else "总里程 -- km"
-        }
-        2 -> {
-            val range = telemetry?.remainingRangeKm?.takeIf { it > 0.0 }
-            if (range != null) "剩余续航 ${range.roundToInt()} km" else "剩余续航 -- km"
-        }
-        else -> {
-            val fuel = telemetry?.fuelPercent ?: telemetry?.electricitySurplus?.toDoubleOrNull()
-            if (fuel != null) "剩余油量 ${fuel.roundToInt()}%" else "剩余油量 --%"
+    private fun formatHomeFooterMetric(telemetry: VehicleTelemetry?, index: Int): String {
+        val powertrain = activePowertrain(telemetry)
+        return when (index % 4) {
+            0 -> {
+                val plateNo = firstNonBlank(
+                    telemetry?.licensePlate.orEmpty(),
+                    uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
+                )
+                if (plateNo.isNotBlank()) plateNo else "未设置车牌"
+            }
+            1 -> {
+                val odo = telemetry?.odometerKm?.takeIf { it > 0.0 }
+                if (odo != null) "总里程 ${String.format(Locale.US, "%,d", odo.roundToInt())} km" else "总里程 -- km"
+            }
+            2 -> {
+                val range = telemetry?.remainingRangeKm?.takeIf { it > 0.0 }
+                val evRange = telemetry?.electricRangeKm
+                when (powertrain) {
+                    VehiclePowertrain.EV -> {
+                        val r = evRange ?: range
+                        if (r != null) "剩余续航 ${r.roundToInt()} km" else "剩余续航 -- km"
+                    }
+                    VehiclePowertrain.PHEV -> when {
+                        evRange != null && range != null ->
+                            "纯电 ${evRange.roundToInt()} km · 综合 ${range.roundToInt()} km"
+                        range != null -> "综合续航 ${range.roundToInt()} km"
+                        evRange != null -> "纯电续航 ${evRange.roundToInt()} km"
+                        else -> "剩余续航 -- km"
+                    }
+                    VehiclePowertrain.ICE ->
+                        if (range != null) "剩余续航 ${range.roundToInt()} km" else "剩余续航 -- km"
+                }
+            }
+            else -> when (powertrain) {
+                VehiclePowertrain.EV -> {
+                    val bat = telemetry?.batteryPercent
+                    val avgElec = telemetry?.averageElectricity?.trim()?.takeIf { it.isNotBlank() && it != "0" && it != "255" }
+                    val base = if (bat != null) "剩余电量 ${bat.roundToInt()}%" else "剩余电量 --%"
+                    if (avgElec != null) "$base · 电耗 ${avgElec} kWh" else base
+                }
+                VehiclePowertrain.PHEV -> {
+                    val bat = telemetry?.batteryPercent
+                    val fuel = telemetry?.fuelPercent
+                    val parts = mutableListOf<String>()
+                    if (bat != null) parts += "电量 ${bat.roundToInt()}%"
+                    if (fuel != null) parts += "油量 ${fuel.roundToInt()}%"
+                    if (parts.isEmpty()) "油电状态 --%" else parts.joinToString(" · ")
+                }
+                VehiclePowertrain.ICE -> {
+                    val fuel = telemetry?.fuelPercent
+                    val avgFuel = telemetry?.averageFuel?.trim()?.takeIf { it.isNotBlank() && it != "0" && it != "255" }
+                    val base = if (fuel != null) "剩余油量 ${fuel.roundToInt()}%" else "剩余油量 --%"
+                    if (avgFuel != null) "$base · 油耗 ${avgFuel} L" else base
+                }
+            }
         }
     }
 
@@ -3868,17 +4094,37 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
         }
 
-        val energy = telemetry?.fuelPercent ?: telemetry?.electricitySurplus?.toDoubleOrNull()
-        val range = telemetry?.remainingRangeKm
+        val powertrain = activePowertrain(telemetry)
+        val energy = when (powertrain) {
+            VehiclePowertrain.EV -> telemetry?.batteryPercent ?: telemetry?.fuelPercent
+            VehiclePowertrain.PHEV -> telemetry?.batteryPercent ?: telemetry?.fuelPercent
+            VehiclePowertrain.ICE -> telemetry?.fuelPercent ?: telemetry?.batteryPercent
+        }
         batteryPillView?.apply {
             levelPercent = energy?.roundToInt() ?: 0
-            isChargingOrActive = telemetry?.engineRunning == true
+            isChargingOrActive = (powertrain.hasElectricDrive && telemetry?.isCharging == true) ||
+                telemetry?.engineRunning == true
         }
         energyTextView?.text = formatEnergyDisplay(telemetry)
 
+        chargingMenuRow?.visibility = if (powertrain.hasElectricDrive) View.VISIBLE else View.GONE
+        if (powertrain.hasElectricDrive) {
+            val chargeStateText = when {
+                telemetry?.isCharging == true -> {
+                    val rem = telemetry.remainingCharge.takeIf { it.isNotBlank() && it != "0" }
+                    if (rem != null) "充电中 · 剩余 $rem" else "充电中"
+                }
+                telemetry?.isChargingGunConnected == true -> "已插充电枪"
+                else -> "未插充电枪"
+            }
+            val apptText = if (telemetry?.chargeAppintStatus == "1") "预约充电已开启" else "预约充电"
+            chargingRowSubtitle?.text = "$chargeStateText · $apptText"
+        }
+
         val locked = telemetry?.doorLocked
         val primaryMotionState = when {
-            telemetry?.engineRunning == true -> "已启动"
+            powertrain.hasElectricDrive && telemetry?.isCharging == true -> "充电中"
+            telemetry?.engineRunning == true -> if (powertrain == VehiclePowertrain.EV) "已上电" else "已启动"
             telemetry?.engineRunning == false -> "已驻车"
             locked == true -> "已锁止"
             locked == false -> "已解锁"
@@ -4542,10 +4788,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             val saved = withContext(Dispatchers.IO) {
                 profileStore.saveProfile(updatedProfile, activate = true)
             }
-            uiPrefs.edit()
-                .putString(KEY_MODEL_NAME, item.displayName)
-                .putString(KEY_PLATE_NO, item.plateNo)
-                .apply()
+            if (cloud != null) {
+                persistVehicleMetadata(cloud)
+            } else {
+                uiPrefs.edit()
+                    .putString(KEY_MODEL_NAME, item.displayName)
+                    .putString(KEY_PLATE_NO, item.plateNo)
+                    .apply()
+            }
 
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
@@ -4671,10 +4921,24 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun showClimateSheet() {
-        val cabin = cabinTemperature(activeTelemetry)
-        val acActive = activeTelemetry?.acOn == true
+        val t = activeTelemetry
+        val cabin = cabinTemperature(t)
+        val acActive = t?.acOn == true
+        val minTemp = uiPrefs.getString(KEY_TEMP_LO, "").orEmpty().toDoubleOrNull()?.coerceIn(14.0, 20.0) ?: 16.0
+        val maxTemp = uiPrefs.getString(KEY_TEMP_HI, "").orEmpty().toDoubleOrNull()?.coerceIn(26.0, 34.0) ?: 32.0
+        climateTemperatureCelsius = climateTemperatureCelsius.coerceIn(minTemp, maxTemp)
 
-        showBottomSheet("温度") { sheet, dialog ->
+        var selectedDuration = 10
+        var frontDefrost = t?.fWinHeatingState == "1"
+        var rearDefrost = t?.rWinHeatingState == "1"
+        var airPm = t?.airPurification == "1"
+        var driverHeat = t?.dSeatHeatingState == "1" || t?.dSeatHeatingState == "2"
+        var passHeat = t?.pSeatHeatingState == "1" || t?.pSeatHeatingState == "2"
+        var driverVent = !driverHeat && t?.dSeatVentilateState == "1"
+        var passVent = !passHeat && t?.pSeatVentilateState == "1"
+        val airTypeInt = uiPrefs.getString(KEY_AIR_TYPE, "1").orEmpty().toIntOrNull()?.coerceIn(0, 1) ?: 1
+
+        showBottomSheet("温度与座舱舒适") { sheet, dialog ->
             val sub = buildString {
                 append(if (acActive) "空调运行中" else "空调已关闭")
                 if (cabin != null) append("  ·  车内 ${cabin.roundToInt()}°C")
@@ -4687,11 +4951,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
             }
-            sheet.addView(stepper, lp(top = dp(24), bottom = dp(24)))
+            sheet.addView(stepper, lp(top = dp(18), bottom = dp(14)))
 
             val minus = sheetCircleButton("−") {
                 AppHaptics.perform(sheetClimateTempView, HapticLevel.LIGHT_TICK)
-                climateTemperatureCelsius = (climateTemperatureCelsius - 0.5).coerceAtLeast(16.0)
+                climateTemperatureCelsius = (climateTemperatureCelsius - 0.5).coerceAtLeast(minTemp)
                 sheetClimateTempView?.text = formatTemp(climateTemperatureCelsius)
             }
             sheetClimateTempView = text(formatTemp(climateTemperatureCelsius), 34f, TEXT_PRIMARY, Typeface.BOLD).apply {
@@ -4700,26 +4964,186 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             val plus = sheetCircleButton("+") {
                 AppHaptics.perform(sheetClimateTempView, HapticLevel.LIGHT_TICK)
-                climateTemperatureCelsius = (climateTemperatureCelsius + 0.5).coerceAtMost(32.0)
+                climateTemperatureCelsius = (climateTemperatureCelsius + 0.5).coerceAtMost(maxTemp)
                 sheetClimateTempView?.text = formatTemp(climateTemperatureCelsius)
             }
             stepper.addView(minus, LinearLayout.LayoutParams(dp(48), dp(48)))
             stepper.addView(sheetClimateTempView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
             stepper.addView(plus, LinearLayout.LayoutParams(dp(48), dp(48)))
 
+            // Runtime duration selector (5 / 10 / 15 min -> 300D)
+            val durRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val durViews = mutableListOf<Pair<Int, TextView>>()
+            listOf(5, 10, 15).forEachIndexed { idx, mins ->
+                val chip = text("${mins} 分钟", 12.5f, TEXT_PRIMARY, Typeface.BOLD).apply {
+                    gravity = Gravity.CENTER
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener {
+                        selectedDuration = mins
+                        durViews.forEach { (m, tv) ->
+                            val on = m == selectedDuration
+                            tv.background = rounded(if (on) ThemeTokens.ACCENT_BLUE else TILE_BG, 9f)
+                            tv.setTextColor(if (on) TEXT_PRIMARY else TEXT_SECONDARY)
+                        }
+                    }
+                }
+                durViews += mins to chip
+                durRow.addView(chip, LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                    if (idx > 0) marginStart = dp(8)
+                })
+            }
+            durViews.forEach { (m, tv) ->
+                val on = m == selectedDuration
+                tv.background = rounded(if (on) ThemeTokens.ACCENT_BLUE else TILE_BG, 9f)
+                tv.setTextColor(if (on) TEXT_PRIMARY else TEXT_SECONDARY)
+            }
+            sheet.addView(durRow, lp(bottom = dp(12)))
+
+            // Cabin comfort toggle chips (defrost / air purification / seat heating & ventilation)
+            fun styleComfortChip(tv: TextView, active: Boolean) {
+                tv.background = rounded(if (active) TILE_ACTIVE_BG else TILE_BG, 10f, if (active) ACCENT_BLUE else Color.TRANSPARENT, if (active) 1f else 0f)
+                tv.setTextColor(if (active) TEXT_PRIMARY else TEXT_SECONDARY)
+            }
+
+            lateinit var driverHeatChip: TextView
+            lateinit var driverVentChip: TextView
+            lateinit var passHeatChip: TextView
+            lateinit var passVentChip: TextView
+
+            fun makeChip(label: String, initial: Boolean, onTap: (TextView) -> Unit): TextView =
+                text(label, 12.5f, TEXT_PRIMARY).apply {
+                    gravity = Gravity.CENTER
+                    isClickable = true
+                    isFocusable = true
+                    styleComfortChip(this, initial)
+                    setOnClickListener { onTap(this) }
+                }
+
+            val rowA = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val frontDefrostChip = makeChip("前挡除霜", frontDefrost) { tv ->
+                frontDefrost = !frontDefrost
+                styleComfortChip(tv, frontDefrost)
+            }
+            val rearDefrostChip = makeChip("后挡加热", rearDefrost) { tv ->
+                rearDefrost = !rearDefrost
+                styleComfortChip(tv, rearDefrost)
+            }
+            val airPmChip = makeChip("空气净化", airPm) { tv ->
+                airPm = !airPm
+                styleComfortChip(tv, airPm)
+            }
+            rowA.addView(frontDefrostChip, LinearLayout.LayoutParams(0, dp(36), 1f))
+            rowA.addView(rearDefrostChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(8) })
+            rowA.addView(airPmChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(8) })
+            sheet.addView(rowA, lp(bottom = dp(8)))
+
+            val rowB = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            driverHeatChip = makeChip("主驾加热", driverHeat) { tv ->
+                driverHeat = !driverHeat
+                if (driverHeat) {
+                    driverVent = false
+                    styleComfortChip(driverVentChip, false)
+                }
+                styleComfortChip(tv, driverHeat)
+            }
+            passHeatChip = makeChip("副驾加热", passHeat) { tv ->
+                passHeat = !passHeat
+                if (passHeat) {
+                    passVent = false
+                    styleComfortChip(passVentChip, false)
+                }
+                styleComfortChip(tv, passHeat)
+            }
+            driverVentChip = makeChip("主驾通风", driverVent) { tv ->
+                driverVent = !driverVent
+                if (driverVent) {
+                    driverHeat = false
+                    styleComfortChip(driverHeatChip, false)
+                }
+                styleComfortChip(tv, driverVent)
+            }
+            passVentChip = makeChip("副驾通风", passVent) { tv ->
+                passVent = !passVent
+                if (passVent) {
+                    passHeat = false
+                    styleComfortChip(passHeatChip, false)
+                }
+                styleComfortChip(tv, passVent)
+            }
+            rowB.addView(driverHeatChip, LinearLayout.LayoutParams(0, dp(36), 1f))
+            rowB.addView(passHeatChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
+            rowB.addView(driverVentChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
+            rowB.addView(passVentChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
+            sheet.addView(rowB, lp(bottom = dp(12)))
+
+            // Cabin auto ventilation toggle (zyhl 975) + Travel schedule shortcut (143 + 1111)
+            val extrasRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(2), dp(4), dp(2), dp(12))
+            }
+            val autoAirInitial = uiPrefs.getString(KEY_OPEN_AIR, "0") == "1"
+            extrasRow.addView(text("座舱自动换气", 13.5f, TEXT_PRIMARY), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            val autoAirSwitch = ToggleSwitch(this).apply {
+                setChecked(autoAirInitial, animate = false)
+                onToggleAttempt = { target ->
+                    val profile = profileStore.getActiveProfile()
+                    lifecycleScope.launch {
+                        val ok = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.setAutoAirVentilation(profile.vin, target, profile.accessToken)
+                            }
+                        }.getOrDefault(false)
+                        if (ok) {
+                            uiPrefs.edit().putString(KEY_OPEN_AIR, if (target) "1" else "0").apply()
+                            setChecked(target, animate = true)
+                            Toast.makeText(this@MainActivity, if (target) "已开启座舱自动换气" else "已关闭座舱自动换气", Toast.LENGTH_SHORT).show()
+                        } else {
+                            setChecked(!target, animate = true)
+                            Toast.makeText(this@MainActivity, "当前车型暂不支持或同步失败", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+            extrasRow.addView(autoAirSwitch)
+            sheet.addView(extrasRow)
+
             sheet.addView(primaryActionButton("开启空调") {
+                val extra = buildMap {
+                    put("airType", airTypeInt.toString())
+                    put("controlTime", selectedDuration.toString())
+                    if (airPm) put("airPM", "1")
+                    if (frontDefrost) put("frontDefrost", "1")
+                    if (rearDefrost) put("rearDefrost", "1")
+                    if (driverHeat) put("driverHeating", "1")
+                    if (passHeat) put("passengerHeating", "1")
+                    if (driverVent) put("driverVent", "1")
+                    if (passVent) put("passengerVent", "1")
+                }
                 dialog.dismiss()
                 dispatchSmartVehicleCommand(
                     "ac_on",
                     "开启空调 (${formatTemp(climateTemperatureCelsius)})",
-                    temperatureCelsius = climateTemperatureCelsius
+                    temperatureCelsius = climateTemperatureCelsius,
+                    extraParams = extra
                 )
             }, lp(height = dp(48)))
 
-            sheet.addView(secondaryActionButton("关闭空调") {
+            val bottomBtns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            bottomBtns.addView(secondaryActionButton("关闭空调") {
                 dialog.dismiss()
-                dispatchSmartVehicleCommand("ac_off", "关闭空调")
-            }, lp(top = dp(12), height = dp(48)))
+                dispatchSmartVehicleCommand("ac_off", "关闭空调", extraParams = mapOf("airType" to airTypeInt.toString()))
+            }, weightedLp(0, dp(46)))
+            bottomBtns.addView(secondaryActionButton("预约出行") {
+                dialog.dismiss()
+                featureSheets.showTravelScheduleSheet(
+                    profile = profileStore.getActiveProfile(),
+                    airType = airTypeInt,
+                    resolvePin = { desc, cb -> resolveVehiclePinForAction(desc, cb) }
+                )
+            }, weightedLp(dp(10), dp(46)))
+            sheet.addView(bottomBtns, lp(top = dp(10)))
         }
     }
 
@@ -4815,7 +5239,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun dispatchSmartVehicleCommand(
         actionKey: String,
         label: String,
-        temperatureCelsius: Double? = null
+        temperatureCelsius: Double? = null,
+        extraParams: Map<String, String> = emptyMap()
     ) {
         val profile = profileStore.getActiveProfile().also { currentProfile = it }
         if (profile.vin.isBlank()) {
@@ -4824,9 +5249,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
         val requirePinEveryTime = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true)
-        val bleRoute = bleController.isSessionReady() ||
-            bleController.isVehicleNearby ||
-            bleNearby
+        val hasAdvancedHttpParams = extraParams.keys.any {
+            it in setOf("airPM", "frontDefrost", "rearDefrost", "driverHeating", "passengerHeating", "driverVent", "passengerVent", "controlTime")
+        }
+        val bleRoute = !hasAdvancedHttpParams && (
+            bleController.isSessionReady() ||
+                bleController.isVehicleNearby ||
+                bleNearby
+            )
 
         if (bleRoute) {
             if (!requirePinEveryTime) {
@@ -4855,7 +5285,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             )
                             dismiss()
                             if (!executeBleActionImmediate(actionKey, label, temperatureCelsius)) {
-                                sendHttpVehicleCommand(profile, actionKey, label, temperatureCelsius, pin)
+                                sendHttpVehicleCommand(profile, actionKey, label, temperatureCelsius, pin, extraParams)
                             }
                         } else {
                             showError("云端 PIN 码错误，请重试")
@@ -4868,10 +5298,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         val cachedPin = sessionVehiclePin.ifBlank { profile.controlPin }
         if (requirePinEveryTime || cachedPin.isBlank()) {
-            showVehiclePinSheet(profile, actionKey, label, temperatureCelsius)
+            showVehiclePinSheet(profile, actionKey, label, temperatureCelsius, extraParams)
         } else {
             sessionVehiclePin = cachedPin
-            sendHttpVehicleCommand(profile, actionKey, label, temperatureCelsius, cachedPin)
+            sendHttpVehicleCommand(profile, actionKey, label, temperatureCelsius, cachedPin, extraParams)
         }
     }
 
@@ -4879,7 +5309,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         profile: VehicleProfile,
         actionKey: String,
         label: String,
-        temperatureCelsius: Double?
+        temperatureCelsius: Double?,
+        extraParams: Map<String, String> = emptyMap()
     ) {
         appDialog?.dismiss()
         val dialog = SixDigitPinSheet.showVerifyPinSheet(
@@ -4892,11 +5323,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 showError("暂不支持该远程控制动作")
                 return@showVerifyPinSheet
             }
-            val params = if (temperatureCelsius != null) {
-                val rounded = temperatureCelsius.roundToInt().toString()
-                mapOf("temperature" to rounded, "airTemperature" to rounded)
-            } else {
-                emptyMap()
+            val params = buildMap {
+                putAll(extraParams)
+                if (temperatureCelsius != null) {
+                    val rounded = temperatureCelsius.roundToInt().toString()
+                    put("temperature", rounded)
+                    put("airTemperature", rounded)
+                }
             }
             lifecycleScope.launch {
                 val res = runCatching {
@@ -4949,17 +5382,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         actionKey: String,
         label: String,
         temperatureCelsius: Double?,
-        pin: String
+        pin: String,
+        extraParams: Map<String, String> = emptyMap()
     ) {
         val command = remoteCommandFor(actionKey) ?: run {
             showHomeStatus("暂不支持该远程控制动作")
             return
         }
-        val params = if (temperatureCelsius != null) {
-            val rounded = temperatureCelsius.roundToInt().toString()
-            mapOf("temperature" to rounded, "airTemperature" to rounded)
-        } else {
-            emptyMap()
+        val params = buildMap {
+            putAll(extraParams)
+            if (temperatureCelsius != null) {
+                val rounded = temperatureCelsius.roundToInt().toString()
+                put("temperature", rounded)
+                put("airTemperature", rounded)
+            }
         }
         showHomeStatus("正在下发：$label...")
         lifecycleScope.launch {
@@ -6151,6 +6587,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private const val KEY_PRIVACY_ACCEPTED = "privacyAccepted"
         private const val KEY_MODEL_NAME = "modelName"
         private const val KEY_PLATE_NO = "plateNo"
+        private const val KEY_ENGINE_TYPE = "engineType"
+        private const val KEY_AIR_TYPE = "airType"
+        private const val KEY_TEMP_LO = "tempLo"
+        private const val KEY_TEMP_HI = "tempHi"
+        private const val KEY_OPEN_AIR = "openAir"
+        private const val KEY_VEHICLE_SN = "vehicleSn"
+        private const val KEY_VEHICLE_ICCID = "vehicleIccid"
         private const val KEY_QUICK_ACTIONS = "quick_actions"
         private const val DEFAULT_QUICK_ACTIONS = "LOCK,CLIMATE,FLASH,TRUNK"
         private const val KEY_REQUIRE_PIN_EVERY_TIME = "require_pin_every_time"
