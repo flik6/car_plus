@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-27",
+  "cdnBase": "https://cdn.jsdelivr.net/gh/flik6/car_plus@main/models",
+  "models": {
+    "arrizo8": {
+      "key": "arrizo8",
+      "displayName": "艾瑞泽8",
+      "bodyType": "sedan",
+      "file": "arrizo8.glb",
+      "version": 1,
+      "sha256": "1d113e65f03f19bc38215eecf5000c6938dd729893d74b19beaaf848ebf29df4",
+      "sizeBytes": 17696616,
+      "targetLength": 4.78,
+      "wheelbase": 2.77,
+      "yawOffset": 0
+    },
+    "tiggo8": {
+      "key": "tiggo8",
+      "displayName": "瑞虎8",
+      "bodyType": "suv",
+      "file": "tiggo8.glb",
+      "version": 1,
+      "sha256": "d50d4e3758711fe782a83386f31182de807779b6852fdadaeae699f4c5b1f807",
+      "sizeBytes": 13744724,
+      "targetLength": 4.72,
+      "wheelbase": 2.71,
+      "yawOffset": 0
+    }
+  }
+}

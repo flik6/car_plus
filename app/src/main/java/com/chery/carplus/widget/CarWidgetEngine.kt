@@ -25,7 +25,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
 
 enum class CarWidgetStyle(val layoutRes: Int) {
@@ -140,6 +144,52 @@ object CarWidgetManager {
     private val COLOR_WHITE = Color.parseColor("#FFFFFF")
     private val COLOR_LABEL_IDLE = Color.parseColor("#B8BCC6")
     private val COLOR_ACTIVE = Color.parseColor("#3D9BFF")
+    private val lastAutoSyncAttemptMs = AtomicLong(0L)
+    private val bgSyncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Silently refreshes cloud vehicle telemetry when the system triggers periodic
+     * widget `onUpdate` (every 30 min) and the cached snapshot is stale (>= 15 min).
+     */
+    fun triggerBackgroundSyncIfStale(context: Context, minStaleMs: Long = 15L * 60L * 1000L) {
+        val appCtx = context.applicationContext
+        val now = System.currentTimeMillis()
+        val snap = CarWidgetStateStore.load(appCtx)
+        if (snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) return
+
+        val prevAttempt = lastAutoSyncAttemptMs.get()
+        if (now - prevAttempt < 60_000L) return
+        if (!lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) return
+
+        val store = VehicleProfileStore(appCtx)
+        val profile = store.getActiveProfile()
+        if (profile.vin.isBlank() || profile.accessToken.isBlank()) return
+
+        bgSyncScope.launch {
+            val client = CheryHttpClient(defaultDeviceId = store.defaultDeviceId())
+            val telemetry = runCatching {
+                client.fetchVehicleStatus(
+                    vin = profile.vin,
+                    accessToken = profile.accessToken,
+                    sdkToken = profile.sdkToken,
+                    userId = profile.userId
+                )
+            }.getOrNull() ?: return@launch
+
+            val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+            val cachedModel = VehicleDisplayNames.normalizeCachedName(
+                uiPrefs.getString("modelName", snap.modelName).orEmpty(),
+                uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
+            )
+            val cachedPlate = uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
+            syncFromTelemetry(
+                context = appCtx,
+                modelName = cachedModel,
+                plateNo = cachedPlate,
+                telemetry = telemetry
+            )
+        }
+    }
 
     fun syncFromTelemetry(
         context: Context,
@@ -241,13 +291,20 @@ object CarWidgetManager {
                     val fuelPart = if (s.hasFuelData) "${s.fuelPercent}%" else "--%"
                     "${s.primaryStatus} · $fuelPart"
                 }
-                CarWidgetStyle.MEDIUM, CarWidgetStyle.LARGE -> {
-                    val timePart = formatRelativeTime(s.updatedAtMs)
-                    if (timePart.isNotBlank()) "${s.primaryStatus} · $timePart" else s.primaryStatus
-                }
+                CarWidgetStyle.MEDIUM, CarWidgetStyle.LARGE -> s.primaryStatus
             }
         }
         rv.setTextViewText(R.id.widget_status_line, statusText)
+
+        // Exact sync timestamp placed right beside the Refresh button (never freezes on "刚刚更新")
+        if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
+            val timeLabel = if (s.transientHint.startsWith("正在刷新")) {
+                "刷新中..."
+            } else {
+                formatSyncTimestamp(s.updatedAtMs)
+            }
+            rv.setTextViewText(R.id.widget_update_time, timeLabel)
+        }
 
         // Fuel Bar (COMPACT & MEDIUM)
         if (style == CarWidgetStyle.COMPACT || style == CarWidgetStyle.MEDIUM) {
@@ -375,14 +432,17 @@ object CarWidgetManager {
         return PendingIntent.getBroadcast(context, requestCode, intent, flags)
     }
 
-    private fun formatRelativeTime(updatedAtMs: Long): String {
-        if (updatedAtMs <= 0L) return ""
-        val diffSec = ((System.currentTimeMillis() - updatedAtMs) / 1000L).coerceAtLeast(0L)
-        return when {
-            diffSec < 60L -> "刚刚更新"
-            diffSec < 3600L -> "${diffSec / 60L} 分钟前"
-            diffSec < 86_400L -> "${diffSec / 3600L} 小时前"
-            else -> "${diffSec / 86_400L} 天前"
+    private fun formatSyncTimestamp(updatedAtMs: Long): String {
+        if (updatedAtMs <= 0L) return "待同步"
+        val nowCal = Calendar.getInstance()
+        val updCal = Calendar.getInstance().apply { timeInMillis = updatedAtMs }
+        val sameDay = nowCal.get(Calendar.YEAR) == updCal.get(Calendar.YEAR) &&
+            nowCal.get(Calendar.DAY_OF_YEAR) == updCal.get(Calendar.DAY_OF_YEAR)
+        return if (sameDay) {
+            val hhmm = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(updatedAtMs))
+            "$hhmm 更新"
+        } else {
+            SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(updatedAtMs))
         }
     }
 }

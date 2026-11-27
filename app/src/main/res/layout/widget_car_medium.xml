@@ -91,7 +91,7 @@
                 android:layout_marginTop="4dp"
                 android:ellipsize="end"
                 android:singleLine="true"
-                android:text="已驻车 · 刚刚更新"
+                android:text="已驻车"
                 android:textColor="#8E9299"
                 android:textSize="11sp" />
         </LinearLayout>
@@ -107,19 +107,37 @@
                 android:layout_height="match_parent"
                 android:layout_gravity="center"
                 android:contentDescription="车辆视图"
-                android:paddingTop="4dp"
+                android:paddingTop="16dp"
                 android:scaleType="fitCenter"
                 android:src="@drawable/widget_car_arrizo8" />
 
-            <ImageView
+            <LinearLayout
                 android:id="@+id/widget_btn_refresh"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
+                android:layout_width="wrap_content"
+                android:layout_height="22dp"
                 android:layout_gravity="top|end"
-                android:contentDescription="刷新车况"
-                android:padding="4dp"
-                android:src="@drawable/ic_widget_refresh"
-                android:tint="#8E9299" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="6dp"
+                android:paddingEnd="2dp">
+
+                <TextView
+                    android:id="@+id/widget_update_time"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="3dp"
+                    android:singleLine="true"
+                    android:text="13:42 更新"
+                    android:textColor="#787C86"
+                    android:textSize="9.5sp" />
+
+                <ImageView
+                    android:layout_width="14dp"
+                    android:layout_height="14dp"
+                    android:contentDescription="刷新车况"
+                    android:src="@drawable/ic_widget_refresh"
+                    android:tint="#8E9299" />
+            </LinearLayout>
         </FrameLayout>
     </LinearLayout>
 

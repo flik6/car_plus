@@ -13,6 +13,7 @@
   var currentContainer = null;
   var currentChassis = null;
   var currentModelKey = null;
+  var activeLoadedUrl = null;
   var currentEffects = null;
   var currentRig = null;
   var renderActive = true;
@@ -323,15 +324,16 @@
   }
 
   /**
-   * Builds physically articulated sub-assemblies directly from the real Arrizo 8 GLB:
-   * - 4 independent rolling wheels (FL/FR with Ackermann steering knuckles + fixed brake calipers)
-   * - Real hinged rear trunk lid (ar8:mesh_1 .. ar8:mesh_1_7)
-   * - Real front panoramic sunroof panel (ar8:Door_Sunroof: tilt & slide)
-   * - Real 4 side window glass panels (mesh_2_4, mesh_3_2, mesh_4_4, mesh_5_2)
+   * Builds physically articulated sub-assemblies for both Arrizo 8 and Tiggo 8 GLBs:
+   * - 4 independent rolling wheels (FL/FR with Ackermann steering knuckles + fixed brake calipers/discs)
+   * - Real hinged rear trunk lid (Arrizo 8: ar8:mesh_1 .. ar8:mesh_1_7)
+   * - Real panoramic sunroof panel (Arrizo 8: Door_Sunroof, Tiggo 8: tiggo8_sunroof)
+   * - Real 4 side window glass panels (Arrizo 8: mesh_2_4, mesh_3_2, mesh_4_4, mesh_5_2)
    */
-  function setupVehicleRig(container, chassisGroup, model) {
+  function setupVehicleRig(container, chassisGroup, model, cfg) {
     container.updateMatrixWorld(true);
 
+    var isTiggo8 = !!(cfg && cfg.key === 'tiggo8');
     var wheelMeshes = [];
     var trunkNodes = [];
     var windowNodes = [];
@@ -344,17 +346,27 @@
 
     model.traverse(function (obj) {
       var nm = obj.name || '';
-      if (!sunroofNode && nm.toLowerCase().indexOf('sunroof') !== -1 && !obj.isMesh) {
-        sunroofNode = obj;
-      }
-      if (obj.isMesh && wheelMeshRe.test(nm)) {
-        wheelMeshes.push(obj);
-      }
-      if (!obj.isMesh && trunkNodeRe.test(nm)) {
-        trunkNodes.push(obj);
-      }
-      if (obj.isMesh && windowNodeRe.test(nm)) {
-        windowNodes.push(obj);
+      var parentNm = (obj.parent && obj.parent.name) ? obj.parent.name : '';
+      if (isTiggo8) {
+        if (!sunroofNode && (nm === 'tiggo8_sunroof' || parentNm === 'tiggo8_sunroof')) {
+          sunroofNode = nm === 'tiggo8_sunroof' ? obj : obj.parent;
+        }
+        if (obj.isMesh && (nm.indexOf('tiggo8_wheel_') === 0 || parentNm.indexOf('tiggo8_wheel_') === 0)) {
+          wheelMeshes.push(obj);
+        }
+      } else {
+        if (!sunroofNode && nm.toLowerCase().indexOf('sunroof') !== -1 && !obj.isMesh) {
+          sunroofNode = obj;
+        }
+        if (obj.isMesh && wheelMeshRe.test(nm)) {
+          wheelMeshes.push(obj);
+        }
+        if (!obj.isMesh && trunkNodeRe.test(nm)) {
+          trunkNodes.push(obj);
+        }
+        if (obj.isMesh && windowNodeRe.test(nm)) {
+          windowNodes.push(obj);
+        }
       }
     });
 
@@ -381,8 +393,13 @@
         var buckets = splitWheelGeometryByQuadrant(mesh, zMid);
         if (!buckets) continue;
         var matName = (mesh.material && mesh.material.name) ? mesh.material.name : '';
-        var isCaliper = mesh.name.indexOf('mesh_0_4') !== -1 && matName.indexOf('phong10SG1') !== -1;
-        var isTire = matName.indexOf('phong19SG1') !== -1;
+        var nodeTag = (mesh.name || '') + ' ' + ((mesh.parent && mesh.parent.name) ? mesh.parent.name : '');
+        var isCaliper = isTiggo8
+          ? (nodeTag.indexOf('tiggo8_wheel_brake_') !== -1)
+          : (mesh.name.indexOf('mesh_0_4') !== -1 && matName.indexOf('phong10SG1') !== -1);
+        var isTire = isTiggo8
+          ? (nodeTag.indexOf('tiggo8_wheel_tire_') !== -1 || matName.indexOf('Tire') !== -1)
+          : (matName.indexOf('phong19SG1') !== -1);
         splitEntries.push({
           buckets: buckets,
           material: mesh.material,
@@ -696,9 +713,14 @@
     return 0xfb923c;                  // Warm cabin amber
   }
 
-  function createInteractiveOverlays(chassisRoot, gltfScene, rig) {
+  function createInteractiveOverlays(chassisRoot, gltfScene, rig, cfg, modelSize) {
     var headBarTex = createSleekLightBarTexture('240, 247, 255', '196, 224, 255');
     var tailBarTex = createSleekLightBarTexture('255, 42, 42', '255, 30, 30');
+
+    var headPos = (cfg && cfg.headlightPos) ? cfg.headlightPos : [0.67, 0.77, 2.16];
+    var tailPos = (cfg && cfg.taillightPos) ? cfg.taillightPos : [0.66, 0.90, -2.26];
+    var hornPos = (cfg && cfg.hornPos) ? cfg.hornPos : [0, 0.66, 2.38];
+    var heightLift = modelSize ? Math.max(0, modelSize.y - 1.48) : 0;
 
     var headBarSprites = [];
     var tailBarSprites = [];
@@ -712,7 +734,7 @@
         blending: THREE.AdditiveBlending,
         depthWrite: false
       }));
-      hb.position.set(side * 0.67, 0.77, 2.16);
+      hb.position.set(side * headPos[0], headPos[1], headPos[2]);
       hb.scale.set(0.34, 0.085, 1);
       chassisRoot.add(hb);
       headBarSprites.push(hb);
@@ -725,7 +747,7 @@
         blending: THREE.AdditiveBlending,
         depthWrite: false
       }));
-      tb.position.set(side * 0.66, 0.90, -2.26);
+      tb.position.set(side * tailPos[0], tailPos[1], tailPos[2]);
       tb.scale.set(0.34, 0.075, 1);
       chassisRoot.add(tb);
       tailBarSprites.push(tb);
@@ -738,10 +760,10 @@
     for (var i = 0; i < 3; i++) {
       var xOff = (i - 1) * 0.34;
       var curve = new THREE.CatmullRomCurve3([
-        new THREE.Vector3(xOff, 1.12, 0.95),
-        new THREE.Vector3(xOff * 0.95, 1.62, 0.25),
-        new THREE.Vector3(xOff * 0.92, 1.68, -0.50),
-        new THREE.Vector3(xOff * 0.98, 1.48, -1.25)
+        new THREE.Vector3(xOff, 1.12 + heightLift * 0.75, 0.95),
+        new THREE.Vector3(xOff * 0.95, 1.62 + heightLift * 0.92, 0.25),
+        new THREE.Vector3(xOff * 0.92, 1.68 + heightLift * 0.92, -0.50),
+        new THREE.Vector3(xOff * 0.98, 1.48 + heightLift * 0.85, -1.25)
       ]);
       var mat = new THREE.MeshBasicMaterial({
         color: 0x60a5fa,
@@ -764,9 +786,9 @@
       for (var vz = 0; vz < 2; vz++) {
         var zPos = vz === 0 ? 0.36 : -0.48;
         var vCurve = new THREE.CatmullRomCurve3([
-          new THREE.Vector3(vs * 0.74, 1.24, zPos),
-          new THREE.Vector3(vs * 0.88, 1.40, zPos - 0.14),
-          new THREE.Vector3(vs * 0.95, 1.56, zPos - 0.32)
+          new THREE.Vector3(vs * 0.74, 1.24 + heightLift * 0.78, zPos),
+          new THREE.Vector3(vs * 0.88, 1.40 + heightLift * 0.82, zPos - 0.14),
+          new THREE.Vector3(vs * 0.95, 1.56 + heightLift * 0.86, zPos - 0.32)
         ]);
         var vMat = new THREE.MeshBasicMaterial({
           color: 0xa5d8ff,
@@ -797,9 +819,9 @@
         depthWrite: false
       });
       var ringMesh = new THREE.Mesh(ringGeo, ringMat);
-      ringMesh.position.set(0, 0.66, 2.38);
+      ringMesh.position.set(hornPos[0], hornPos[1], hornPos[2]);
       hornGroup.add(ringMesh);
-      hornRings.push({ mesh: ringMesh, mat: ringMat, delay: hr * 0.24 });
+      hornRings.push({ mesh: ringMesh, mat: ringMat, delay: hr * 0.24, baseZ: hornPos[2] });
     }
     chassisRoot.add(hornGroup);
 
@@ -808,7 +830,10 @@
     var tailMats = [];
     gltfScene.traverse(function (obj) {
       if (obj.isMesh && obj.material) {
-        var isFrontLampMesh = obj.name && obj.name.indexOf('mesh_9_ar8') !== -1;
+        var nm = obj.name || '';
+        var pnm = (obj.parent && obj.parent.name) ? obj.parent.name : '';
+        var isFrontLampMesh = nm.indexOf('mesh_9_ar8') !== -1 ||
+          nm === 'tiggo8_headlamp_led' || pnm === 'tiggo8_headlamp_led';
         if (isFrontLampMesh && !Array.isArray(obj.material)) {
           obj.material = obj.material.clone();
           headMats.push(obj.material);
@@ -816,10 +841,14 @@
         var mats = Array.isArray(obj.material) ? obj.material : [obj.material];
         for (var m = 0; m < mats.length; m++) {
           var mt = mats[m];
+          if (mt.name === 'Material #159' && headMats.indexOf(mt) === -1) {
+            headMats.push(mt);
+          }
           // Exclude red brake caliper material (mesh_0_4) so calipers never glow like taillights
-          var isCaliperMesh = obj.name && obj.name.indexOf('mesh_0_4') !== -1;
+          var isCaliperMesh = nm.indexOf('mesh_0_4') !== -1 || nm.indexOf('tiggo8_wheel_brake_') !== -1;
           var isRedTail = !isCaliperMesh && (
-            (mt.name && mt.name.indexOf('phong10SG1') !== -1) ||
+            (mt.name && (mt.name.indexOf('phong10SG1') !== -1 || mt.name === 'Material #162' || mt.name === 'GlassRed')) ||
+            nm === 'tiggo8_taillamp_led' || pnm === 'tiggo8_taillamp_led' ||
             (mt.color && mt.color.r > 0.4 && mt.color.g < 0.12 && mt.color.b < 0.12)
           );
           if (isRedTail && tailMats.indexOf(mt) === -1) {
@@ -1007,7 +1036,7 @@
               var ease = 1.0 - Math.pow(1.0 - localT, 2.4);
               var sc = 1.0 + ease * 5.2;
               hrObj.mesh.scale.set(sc, sc * 0.72, 1);
-              hrObj.mesh.position.z = 2.38 + ease * 0.85;
+              hrObj.mesh.position.z = (hrObj.baseZ || 2.38) + ease * 0.85;
               hrObj.mat.opacity = Math.sin(localT * Math.PI) * 0.42;
             } else {
               hrObj.mat.opacity = 0;
@@ -1065,13 +1094,16 @@
     };
   }
 
-  function loadModel(modelKey) {
+  function loadModel(modelKey, customGlbUrl) {
     var cfg = global.CarModelRegistry.get(modelKey);
-    if (currentModelKey === cfg.key && currentContainer) {
+    var resolvedUrl = (typeof customGlbUrl === 'string' && customGlbUrl) ? customGlbUrl : cfg.glbUrl;
+    if (currentModelKey === cfg.key && activeLoadedUrl === resolvedUrl && currentContainer) {
       return;
     }
     currentModelKey = cfg.key;
+    activeLoadedUrl = resolvedUrl;
     state.modelKey = cfg.key;
+    WHEELBASE_M = cfg.wheelbase || 2.77;
 
     if (currentContainer) {
       scene.remove(currentContainer);
@@ -1083,7 +1115,7 @@
 
     var container = new THREE.Group();
     container.name = 'car_container_' + cfg.key;
-    // Keep hidden until GLB finishes parsing so contact shadow never renders alone on empty canvas
+    // Keep hidden until GLB finishes parsing & shader pre-compilation so reveal is silky smooth
     container.visible = false;
     currentContainer = container;
     scene.add(container);
@@ -1104,10 +1136,11 @@
     container.add(shadowPlane);
 
     gltfLoader.load(
-      cfg.glbUrl,
+      resolvedUrl,
       function (gltf) {
         if (currentContainer !== container) return;
         var model = gltf.scene;
+        var isTiggo8 = cfg.key === 'tiggo8';
 
         model.traverse(function (child) {
           if (child.isMesh && child.material) {
@@ -1116,7 +1149,34 @@
               var mat = mats[i];
               mat.envMap = envMap;
               mat.envMapIntensity = 1.65;
-              if (mat.metalness > 0.65 && mat.roughness < 0.12 && mat.color) {
+              if (isTiggo8) {
+                var mn = mat.name || '';
+                if (mn === 'Car paint') {
+                  mat.metalness = 0.36;
+                  mat.roughness = 0.18;
+                  mat.envMapIntensity = 1.95;
+                } else if (mn === 'MetallicWhite') {
+                  mat.metalness = 0.90;
+                  mat.roughness = 0.24;
+                  if (mat.color) mat.color.setHex(0xd2d8e4);
+                  mat.envMapIntensity = 2.05;
+                } else if (mn === 'GlassBlack') {
+                  if (mat.color) mat.color.setHex(0x12161d);
+                  mat.metalness = 0.85;
+                  mat.roughness = 0.08;
+                  mat.opacity = 0.78;
+                  mat.transparent = true;
+                  mat.envMapIntensity = 1.8;
+                } else if (mn === 'GlassRed') {
+                  if (mat.color) mat.color.setHex(0xc81616);
+                  mat.roughness = 0.14;
+                  mat.opacity = 0.82;
+                  mat.transparent = true;
+                } else if (mn === 'MetallicBlack02') {
+                  mat.roughness = 0.28;
+                  mat.envMapIntensity = 1.5;
+                }
+              } else if (mat.metalness > 0.65 && mat.roughness < 0.12 && mat.color) {
                 mat.envMapIntensity = 2.1;
               }
               mat.needsUpdate = true;
@@ -1145,15 +1205,24 @@
 
         model.updateMatrixWorld(true);
         box.setFromObject(model);
+        box.getSize(size);
         var center = new THREE.Vector3();
         box.getCenter(center);
         model.position.x -= center.x;
         model.position.z -= center.z;
         model.position.y -= box.min.y;
 
+        // Optically center both sleek sedans and taller SUVs on stage
+        orbit.targetCenter.y = clamp(size.y * 0.42, 0.56, 0.76);
+        shadowPlane.scale.set(
+          clamp((size.x * 1.48) / 3.05, 0.85, 1.35),
+          1,
+          clamp((size.z * 1.24) / 6.05, 0.85, 1.25)
+        );
+
         chassisGroup.add(model);
-        currentRig = setupVehicleRig(container, chassisGroup, model);
-        currentEffects = createInteractiveOverlays(chassisGroup, model, currentRig);
+        currentRig = setupVehicleRig(container, chassisGroup, model, cfg);
+        currentEffects = createInteractiveOverlays(chassisGroup, model, currentRig, cfg, size);
         resize();
 
         if (!hasCustomDemoAngle) {
@@ -1161,12 +1230,24 @@
         }
         container.visible = true;
 
-        notifyAndroidReady();
-        requestAnimationFrame(function () {
+        // Pre-compile WebGL shaders before first visible frame to prevent mid-animation stutter
+        try {
           if (renderer && scene && camera) {
+            renderer.compile(scene, camera);
             renderer.render(scene, camera);
           }
-          notifyAndroidFirstFrame();
+        } catch (compileErr) {
+          // ignore shader pre-compile edge errors
+        }
+
+        notifyAndroidReady();
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            if (renderer && scene && camera) {
+              renderer.render(scene, camera);
+            }
+            notifyAndroidFirstFrame();
+          });
         });
       },
       undefined,
@@ -1219,6 +1300,16 @@
         pendingSingleTapTimer = null;
         notifyAndroidTap();
       }, 260);
+    }
+  }
+
+  function notifyAndroidEngineReady() {
+    try {
+      if (global.Car3DBridge && typeof global.Car3DBridge.onEngineReady === 'function') {
+        global.Car3DBridge.onEngineReady();
+      }
+    } catch (e) {
+      // ignore in desktop preview
     }
   }
 
@@ -1672,7 +1763,6 @@
       // ignore
     }
 
-    loadModel(state.modelKey);
     updateCameraPosition();
     resize();
     bindPointerControls(renderer.domElement);
@@ -1686,13 +1776,24 @@
 
     lastTime = performance.now();
     animate(lastTime);
+
+    // Inside Android, wait for VehicleModelRepository to supply the exact local cached GLB URL;
+    // in standalone desktop browser preview, auto-load the default registry URL.
+    if (global.Car3DBridge && typeof global.Car3DBridge.onEngineReady === 'function') {
+      notifyAndroidEngineReady();
+    } else {
+      loadModel(state.modelKey);
+    }
   }
 
   global.Car3D = {
+    loadModel: function (modelKey, customGlbUrl) {
+      loadModel(modelKey, customGlbUrl);
+    },
     setState: function (patch) {
       if (!patch || typeof patch !== 'object') return;
-      if (typeof patch.modelKey === 'string' && patch.modelKey) {
-        loadModel(patch.modelKey);
+      if (typeof patch.modelKey === 'string' && patch.modelKey && typeof patch.glbUrl === 'string' && patch.glbUrl) {
+        loadModel(patch.modelKey, patch.glbUrl);
       }
       if (typeof patch.vehicleLocked === 'boolean') state.vehicleLocked = patch.vehicleLocked;
       if (typeof patch.doorsOpen === 'boolean') state.doorsOpen = patch.doorsOpen;

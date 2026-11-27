@@ -5,6 +5,7 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
@@ -20,19 +21,30 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.webkit.WebViewAssetLoader
 import com.chery.carplus.R
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /**
- * Interactive offline 3D vehicle hero renderer powered by local Three.js WebGL
- * assets under `assets/car3d/` (currently featuring Chery Arrizo 8 with
- * extensible multi-model registry support).
+ * Interactive 3D vehicle hero renderer powered by Three.js WebGL with
+ * on-demand jsDelivr CDN model delivery and permanent local disk caching.
  *
- * Keeps full API compatibility with the previous 2D Canvas vehicle view while
- * adding 360-degree touch orbit, pinch zoom, double-tap camera reset,
- * articulated doors/trunk/sunroof/folding-mirrors, and studio PBR reflections.
+ * Loading choreography:
+ * - While the GLB is being downloaded (first time) or parsed, displays a calm
+ *   ambient CHERY emblem on `#161719` plus a hairline progress bar (only when
+ *   actually fetching from CDN).
+ * - WebGL shaders pre-compile off-screen before reveal; on the first rendered
+ *   frame, the WebView and ambient placeholder cross-fade seamlessly as the car
+ *   glides in along a curved drive-in arc.
  */
 class VehicleVisualView @JvmOverloads constructor(
     context: Context,
@@ -42,8 +54,13 @@ class VehicleVisualView @JvmOverloads constructor(
     var modelKey: String = "arrizo8"
         set(value) {
             val normalized = value.ifBlank { "arrizo8" }
-            if (field != normalized) {
-                field = normalized
+            val prevResolved = VehicleModelRepository.resolveModelKey(field)
+            val nextResolved = VehicleModelRepository.resolveModelKey(normalized)
+            field = normalized
+            fallbackLabel.text = "${VehicleModelRepository.displayNameForKey(nextResolved)} · 3D 视图不可用"
+            if (engineReady && (activeLoadedKey != nextResolved || prevResolved != nextResolved)) {
+                requestModelLoad(normalized, isVehicleSwitch = activeLoadedKey != null && activeLoadedKey != nextResolved)
+            } else {
                 pushStateToScene()
             }
         }
@@ -125,23 +142,41 @@ class VehicleVisualView @JvmOverloads constructor(
     var onDoubleTapListener: (() -> Unit)? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val viewScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var modelLoadJob: Job? = null
+    private var bgUpdateJob: Job? = null
+
     private val bgColor = Color.parseColor("#161719")
+    private var engineReady = false
     private var sceneReady = false
+    private var activeLoadedKey: String? = null
+    private var activeLoadedUrl: String? = null
+    private var loadGeneration = 0
     private var pendingFlash = false
     private var deckProgress = 0f
     private var collapsedVisibleRatio = 0.64f
     private var placeholderHidden = false
     private var hasDraggedOnce = false
     private var isDestroyed = false
+    private var downloadFailed = false
 
     private val webView: OrbitWebView
     private val placeholderView: FrameLayout
+    private val ambientEmblem: ImageView
+    private val progressContainer: LinearLayout
+    private val progressTrack: FrameLayout
+    private val progressFill: View
+    private val loadingCaption: TextView
     private var loadingPulseAnimator: ObjectAnimator? = null
     private val fallbackLabel: TextView
     private val hintBadge: TextView
 
     private val assetLoader = WebViewAssetLoader.Builder()
         .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
+        .addPathHandler(
+            "/car3d-cache/",
+            WebViewAssetLoader.InternalStoragePathHandler(context, VehicleModelRepository.cacheDir(context))
+        )
         .build()
 
     init {
@@ -151,6 +186,7 @@ class VehicleVisualView @JvmOverloads constructor(
 
         webView = OrbitWebView(context).apply {
             setBackgroundColor(bgColor)
+            alpha = 0f
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -166,58 +202,106 @@ class VehicleVisualView @JvmOverloads constructor(
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    // Fallback only if JS bridge onSceneReady never fires (e.g. legacy WebView)
+                    // Fallback only if JS bridge onEngineReady never fires on legacy WebView
                     mainHandler.postDelayed({
-                        if (!isDestroyed && !sceneReady) {
-                            sceneReady = true
-                            pushStateToScene()
-                            if (pendingFlash) {
-                                pendingFlash = false
-                                flashLights()
-                            }
+                        if (!isDestroyed && !engineReady) {
+                            engineReady = true
+                            requestModelLoad(modelKey, isVehicleSwitch = false)
                         }
-                    }, 4000L)
+                    }, 1800L)
                 }
             }
             addJavascriptInterface(JsBridge(), "Car3DBridge")
         }
         addView(webView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
-        // Subtle ambient CHERY emblem breathing on #161719 while 3D GLB initializes,
-        // fading smoothly out the instant the 3D car begins driving in from screen-right.
-        val ambientEmblem = ImageView(context).apply {
+        // Calm ambient loading stage on #161719: breathing CHERY emblem + optional hairline download progress
+        ambientEmblem = ImageView(context).apply {
             setImageResource(R.drawable.ic_chery_adaptive_mark)
             scaleType = ImageView.ScaleType.FIT_CENTER
             alpha = 0.22f
             isClickable = false
             isFocusable = false
         }
+
+        val trackWidthPx = dp(132)
+        val trackHeightPx = dp(3)
+        progressFill = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = trackHeightPx / 2f
+                setColor(Color.parseColor("#3D9BFF"))
+            }
+        }
+        progressTrack = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = trackHeightPx / 2f
+                setColor(Color.parseColor("#262A32"))
+            }
+            addView(progressFill, LayoutParams(0, LayoutParams.MATCH_PARENT, Gravity.START))
+        }
+        loadingCaption = TextView(context).apply {
+            text = ""
+            textSize = 11f
+            setTextColor(Color.parseColor("#8E9299"))
+            gravity = Gravity.CENTER
+        }
+        progressContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            visibility = View.GONE
+            alpha = 0f
+            addView(progressTrack, LinearLayout.LayoutParams(trackWidthPx, trackHeightPx))
+            addView(
+                loadingCaption,
+                LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(9)
+                }
+            )
+        }
+
+        val stageCenterStack = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(ambientEmblem, LinearLayout.LayoutParams(dp(116), dp(36)))
+            addView(
+                progressContainer,
+                LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = dp(16)
+                }
+            )
+        }
+
         placeholderView = FrameLayout(context).apply {
             setBackgroundColor(bgColor)
             isClickable = false
             isFocusable = false
             addView(
-                ambientEmblem,
-                LayoutParams(dp(116), dp(36), Gravity.CENTER).apply {
-                    bottomMargin = dp(28)
+                stageCenterStack,
+                LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER).apply {
+                    bottomMargin = dp(24)
                 }
             )
+            setOnClickListener {
+                if (downloadFailed && !isDestroyed) {
+                    downloadFailed = false
+                    requestModelLoad(modelKey, isVehicleSwitch = false)
+                }
+            }
         }
         placeholderHidden = false
         addView(placeholderView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        loadingPulseAnimator = ObjectAnimator.ofFloat(ambientEmblem, View.ALPHA, 0.14f, 0.30f).apply {
-            duration = 950L
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-            start()
-        }
+        startAmbientPulse()
 
-        // Subtle bottom-right 360° hint pill
+        // Subtle bottom-right 360° hint pill (hidden until 3D car first appears)
         hintBadge = TextView(context).apply {
             text = "360° 拖动旋转"
             textSize = 10f
             setTextColor(Color.argb(120, 210, 218, 232))
             setPadding(dp(8), dp(3), dp(8), dp(3))
+            alpha = 0f
+            visibility = View.GONE
         }
         addView(
             hintBadge,
@@ -229,7 +313,7 @@ class VehicleVisualView @JvmOverloads constructor(
 
         // Graceful fallback label (only shown if WebGL is unavailable on very old devices)
         fallbackLabel = TextView(context).apply {
-            text = "艾瑞泽 8 · 3D 视图不可用"
+            text = "3D 视图不可用"
             textSize = 13f
             setTextColor(Color.argb(170, 200, 206, 216))
             gravity = Gravity.CENTER
@@ -237,7 +321,7 @@ class VehicleVisualView @JvmOverloads constructor(
         }
         addView(fallbackLabel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
-        // Serve offline assets via WebViewAssetLoader HTTPS origin so GLTFLoader fetches .glb cleanly
+        // Serve offline HTML/JS via WebViewAssetLoader HTTPS origin
         webView.loadUrl("https://appassets.androidplatform.net/assets/car3d/index.html")
     }
 
@@ -256,6 +340,168 @@ class VehicleVisualView @JvmOverloads constructor(
         s.useWideViewPort = false
         s.loadWithOverviewMode = false
         s.cacheMode = WebSettings.LOAD_NO_CACHE
+    }
+
+    private fun startAmbientPulse() {
+        loadingPulseAnimator?.cancel()
+        loadingPulseAnimator = ObjectAnimator.ofFloat(ambientEmblem, View.ALPHA, 0.14f, 0.32f).apply {
+            duration = 950L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            start()
+        }
+    }
+
+    private fun showPlaceholderOverlay(animateIn: Boolean) {
+        if (isDestroyed) return
+        placeholderHidden = false
+        placeholderView.animate().cancel()
+        placeholderView.translationY = 0f
+        if (placeholderView.visibility != View.VISIBLE) {
+            placeholderView.alpha = if (animateIn) 0f else 1f
+            placeholderView.visibility = View.VISIBLE
+        }
+        startAmbientPulse()
+        if (animateIn) {
+            placeholderView.animate()
+                .alpha(1f)
+                .setDuration(220L)
+                .setInterpolator(MotionSpec.EASE_STANDARD)
+                .start()
+        } else {
+            placeholderView.alpha = 1f
+        }
+    }
+
+    private fun showDownloadProgress(caption: String, percent: Int, showBar: Boolean = true) {
+        if (isDestroyed) return
+        loadingCaption.text = caption
+        loadingCaption.setTextColor(Color.parseColor("#8E9299"))
+        progressTrack.visibility = if (showBar) View.VISIBLE else View.GONE
+        if (showBar) {
+            val targetW = (dp(132) * (percent.coerceIn(0, 100) / 100f)).toInt()
+            val lp = progressFill.layoutParams
+            if (lp.width != targetW) {
+                lp.width = targetW
+                progressFill.layoutParams = lp
+            }
+        }
+        if (progressContainer.visibility != View.VISIBLE) {
+            progressContainer.visibility = View.VISIBLE
+            progressContainer.alpha = 0f
+            progressContainer.animate()
+                .alpha(1f)
+                .setDuration(220L)
+                .setInterpolator(MotionSpec.EASE_STANDARD)
+                .start()
+        }
+    }
+
+    private fun hideDownloadProgress() {
+        if (progressContainer.visibility == View.VISIBLE) {
+            progressContainer.animate().cancel()
+            progressContainer.visibility = View.GONE
+            progressContainer.alpha = 0f
+        }
+    }
+
+    private fun showDownloadError(displayName: String) {
+        if (isDestroyed) return
+        downloadFailed = true
+        placeholderView.isClickable = true
+        placeholderView.isFocusable = true
+        progressTrack.visibility = View.GONE
+        loadingCaption.text = "$displayName 3D 模型拉取失败 · 轻触重试"
+        loadingCaption.setTextColor(Color.parseColor("#B0B6C2"))
+        if (progressContainer.visibility != View.VISIBLE) {
+            progressContainer.visibility = View.VISIBLE
+            progressContainer.alpha = 1f
+        }
+    }
+
+    private fun requestModelLoad(rawHint: String, isVehicleSwitch: Boolean) {
+        if (isDestroyed || !engineReady) return
+        val resolvedKey = VehicleModelRepository.resolveModelKey(rawHint)
+        val displayName = VehicleModelRepository.displayNameForKey(resolvedKey)
+        val gen = ++loadGeneration
+        downloadFailed = false
+        placeholderView.isClickable = false
+        placeholderView.isFocusable = false
+
+        val hasLocalCache = VehicleModelRepository.getCachedModelFile(context, resolvedKey) != null
+        if (isVehicleSwitch) {
+            sceneReady = false
+            showPlaceholderOverlay(animateIn = true)
+            if (!hasLocalCache) {
+                showDownloadProgress("正在获取 $displayName 3D 车模...", 0, showBar = true)
+            } else {
+                hideDownloadProgress()
+            }
+        } else if (!hasLocalCache) {
+            showPlaceholderOverlay(animateIn = false)
+            showDownloadProgress("正在获取 $displayName 3D 车模...", 0, showBar = true)
+        } else {
+            hideDownloadProgress()
+        }
+
+        modelLoadJob?.cancel()
+        modelLoadJob = viewScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    VehicleModelRepository.ensureModelReady(context, rawHint) { pct, _, _ ->
+                        mainHandler.post {
+                            if (!isDestroyed && loadGeneration == gen) {
+                                val label = if (pct >= 99) {
+                                    "正在准备 $displayName 3D 展台..."
+                                } else {
+                                    "正在获取 $displayName 3D 车模 · $pct%"
+                                }
+                                showDownloadProgress(label, pct, showBar = true)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (isDestroyed || loadGeneration != gen) return@launch
+
+            result.onSuccess { ready ->
+                if (activeLoadedKey == ready.key && activeLoadedUrl == ready.cacheUrl && sceneReady) {
+                    fadeOutPlaceholderAndRevealWebView()
+                    return@onSuccess
+                }
+                if (!ready.fromCache) {
+                    showDownloadProgress("正在准备 ${ready.displayName} 3D 展台...", 100, showBar = true)
+                }
+                activeLoadedKey = ready.key
+                activeLoadedUrl = ready.cacheUrl
+                val safeKey = JSONObject.quote(ready.key)
+                val safeUrl = JSONObject.quote(ready.cacheUrl)
+                evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
+                evalJs("window.Car3D && window.Car3D.loadModel($safeKey, $safeUrl);")
+
+                // Only check manifest in background when loaded from cache; never re-downloads unless updated
+                if (ready.fromCache) {
+                    scheduleSilentModelUpdateCheck(ready.key)
+                }
+            }.onFailure {
+                showDownloadError(displayName)
+            }
+        }
+    }
+
+    private fun scheduleSilentModelUpdateCheck(key: String) {
+        bgUpdateJob?.cancel()
+        bgUpdateJob = viewScope.launch(Dispatchers.IO) {
+            val check = runCatching {
+                VehicleModelRepository.checkAndUpdateInBackground(context, key)
+            }.getOrNull()
+            if (check?.updated == true && !check.cacheUrl.isNullOrBlank()) {
+                // Updated model is now safely cached on disk and will be used automatically
+                // on the next launch or vehicle switch without disrupting the user's current view.
+                activeLoadedUrl = check.cacheUrl
+            }
+        }
     }
 
     fun flashLights() {
@@ -288,7 +534,7 @@ class VehicleVisualView @JvmOverloads constructor(
     fun setCollapsedVisibleRatio(ratio: Float) {
         val clamped = ratio.coerceIn(0.40f, 1.0f)
         collapsedVisibleRatio = clamped
-        if (isDestroyed || !sceneReady) return
+        if (isDestroyed || !engineReady) return
         evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($clamped);")
     }
 
@@ -301,7 +547,7 @@ class VehicleVisualView @JvmOverloads constructor(
                 hintBadge.alpha = 0f
                 hintBadge.visibility = View.GONE
             }
-        } else if (!hasDraggedOnce && webView.visibility == View.VISIBLE) {
+        } else if (!hasDraggedOnce && sceneReady && webView.visibility == View.VISIBLE) {
             if (hintBadge.visibility != View.VISIBLE || hintBadge.alpha < 1f) {
                 hintBadge.visibility = View.VISIBLE
                 hintBadge.animate().cancel()
@@ -339,7 +585,6 @@ class VehicleVisualView @JvmOverloads constructor(
     private fun pushStateToScene() {
         if (isDestroyed || !sceneReady) return
         val payload = JSONObject().apply {
-            put("modelKey", modelKey)
             put("vehicleLocked", vehicleLocked)
             put("doorsOpen", doorsOpen)
             put("trunkOpen", trunkOpen)
@@ -370,6 +615,9 @@ class VehicleVisualView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         isDestroyed = true
+        modelLoadJob?.cancel()
+        bgUpdateJob?.cancel()
+        viewScope.cancel()
         loadingPulseAnimator?.cancel()
         loadingPulseAnimator = null
         mainHandler.removeCallbacksAndMessages(null)
@@ -379,8 +627,27 @@ class VehicleVisualView @JvmOverloads constructor(
         super.onDetachedFromWindow()
     }
 
-    private fun fadeOutPlaceholder() {
-        if (isDestroyed || placeholderHidden) return
+    private fun fadeOutPlaceholderAndRevealWebView() {
+        if (isDestroyed) return
+        if (webView.alpha < 1f) {
+            webView.animate().cancel()
+            webView.animate()
+                .alpha(1f)
+                .setDuration(300L)
+                .setInterpolator(MotionSpec.EASE_OUT_EXPO)
+                .start()
+        }
+        if (!hasDraggedOnce && deckProgress <= 0.05f && hintBadge.visibility != View.VISIBLE) {
+            hintBadge.visibility = View.VISIBLE
+            hintBadge.alpha = 0f
+            hintBadge.animate()
+                .alpha(1f)
+                .setStartDelay(520L)
+                .setDuration(320L)
+                .setInterpolator(MotionSpec.EASE_STANDARD)
+                .start()
+        }
+        if (placeholderHidden) return
         placeholderHidden = true
         loadingPulseAnimator?.cancel()
         loadingPulseAnimator = null
@@ -389,11 +656,12 @@ class VehicleVisualView @JvmOverloads constructor(
         placeholderView.animate()
             .alpha(0f)
             .translationY(-dp(6).toFloat())
-            .setDuration(220L)
+            .setDuration(360L)
             .setInterpolator(MotionSpec.EASE_OUT_EXPO)
             .withEndAction {
                 placeholderView.visibility = View.GONE
                 placeholderView.translationY = 0f
+                hideDownloadProgress()
             }
             .start()
     }
@@ -402,6 +670,17 @@ class VehicleVisualView @JvmOverloads constructor(
         (value * resources.displayMetrics.density + 0.5f).toInt()
 
     private inner class JsBridge {
+        @JavascriptInterface
+        fun onEngineReady() {
+            mainHandler.post {
+                if (isDestroyed || engineReady) return@post
+                engineReady = true
+                evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
+                evalJs("window.Car3D && window.Car3D.resize();")
+                requestModelLoad(modelKey, isVehicleSwitch = false)
+            }
+        }
+
         @JavascriptInterface
         fun onSceneReady(@Suppress("UNUSED_PARAMETER") activeModel: String?) {
             mainHandler.post {
@@ -418,14 +697,14 @@ class VehicleVisualView @JvmOverloads constructor(
                     flashLights()
                 }
                 // Safety fallback if onFirstFrameRendered callback is delayed
-                mainHandler.postDelayed({ fadeOutPlaceholder() }, 160L)
+                mainHandler.postDelayed({ fadeOutPlaceholderAndRevealWebView() }, 200L)
             }
         }
 
         @JavascriptInterface
         fun onFirstFrameRendered() {
             mainHandler.post {
-                fadeOutPlaceholder()
+                fadeOutPlaceholderAndRevealWebView()
             }
         }
 
@@ -466,9 +745,20 @@ class VehicleVisualView @JvmOverloads constructor(
         }
 
         @JavascriptInterface
-        fun onWebGLError(@Suppress("UNUSED_PARAMETER") errorMsg: String?) {
+        fun onWebGLError(errorMsg: String?) {
             mainHandler.post {
                 if (isDestroyed) return@post
+                val msg = errorMsg.orEmpty()
+                if (msg.startsWith("GLB load failed")) {
+                    // Recoverable model file error -> allow tap-to-retry instead of hiding WebView permanently
+                    val key = VehicleModelRepository.resolveModelKey(modelKey)
+                    VehicleModelRepository.getCachedModelFile(context, key)?.delete()
+                    activeLoadedKey = null
+                    activeLoadedUrl = null
+                    showPlaceholderOverlay(animateIn = false)
+                    showDownloadError(VehicleModelRepository.displayNameForKey(key))
+                    return@post
+                }
                 placeholderHidden = true
                 placeholderView.visibility = View.GONE
                 webView.visibility = View.GONE

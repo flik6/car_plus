@@ -74,7 +74,8 @@ class SettingsScreen(
     private val onOpenPinManagement: () -> Unit = {},
     private val onPickAvatarImage: (onPicked: (Uri) -> Unit) -> Unit,
     private val onLogout: () -> Unit,
-    private val fetchCloudUserInfo: (suspend () -> CheryUserInfo?)? = null
+    private val fetchCloudUserInfo: (suspend () -> CheryUserInfo?)? = null,
+    private val onOpenDebugDiagnostics: (() -> Unit)? = null
 ) {
 
     private enum class SubPage {
@@ -802,11 +803,41 @@ class SettingsScreen(
             lp(top = dp(14))
         )
 
+        var debugTapCount = 0
+        var debugTapWindowStart = 0L
+        fun handleVersionDebugTap(triggerView: View) {
+            if (onOpenDebugDiagnostics == null) return
+            val now = System.currentTimeMillis()
+            if (now - debugTapWindowStart > 2_500L) {
+                debugTapCount = 1
+                debugTapWindowStart = now
+            } else {
+                debugTapCount++
+            }
+            val remaining = 5 - debugTapCount
+            when {
+                remaining <= 0 -> {
+                    debugTapCount = 0
+                    debugTapWindowStart = 0L
+                    AppHaptics.perform(triggerView, HapticLevel.MEDIUM_CONFIRM)
+                    onOpenDebugDiagnostics.invoke()
+                }
+                remaining <= 2 -> {
+                    AppHaptics.perform(triggerView, HapticLevel.LIGHT_TICK)
+                    toast("再连续点击 $remaining 次进入调试面板")
+                }
+            }
+        }
+
         brandSection.addView(
             text("v$curName", 13.5f, ThemeTokens.TEXT_SUB).apply {
                 gravity = Gravity.CENTER
+                setPadding(dp(16), dp(4), dp(16), dp(4))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { handleVersionDebugTap(it) }
             },
-            lp(top = dp(5))
+            lp(top = dp(3))
         )
 
         brandSection.addView(
@@ -881,13 +912,17 @@ class SettingsScreen(
         body.addView(updateRow, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
 
-        // 3. Build Number Read-Only Row
+        // 3. Build Number Row (rapid 5-tap unlocks Debug Diagnostics)
         val buildRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(56)
             setPadding(dp(20), dp(12), dp(20), dp(12))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { handleVersionDebugTap(it) }
         }
+        MotionSpec.attachPressPhysics(buildRow, pressedScale = 0.99f, haptic = false)
         buildRow.addView(
             text("构建版本", 15.5f, ThemeTokens.TEXT_PRIMARY),
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)

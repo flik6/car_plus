@@ -321,6 +321,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var lastBleActionLabel = ""
     private var energyShowsRange = false
     private var cloudTripTrackEnabled: Boolean? = null
+    private var lastKnownAntiTheftEnabled: Boolean? = null
+    private var topPairingDrawerView: View? = null
+    private var latestTopStatusBarInsetPx: Int = 0
     private var lastGeocodedKey = ""
     private var lastGeocodedAddress: String? = null
     private var lastGeocodeSettled = false
@@ -433,6 +436,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     androidx.core.view.WindowInsetsCompat.Type.displayCutout()
             )
             val ime = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.ime())
+            latestTopStatusBarInsetPx = sysBars.top
             AppSystemInsets.updateBottomNavInset(sysBars.bottom)
             // Keep bottom edge-to-edge behind Android gesture pill ("小白条"); only IME lifts contentFrame
             v.setPadding(sysBars.left, sysBars.top, sysBars.right, ime.bottom)
@@ -2014,7 +2018,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 val active = profileStore.getActiveProfile()
                 if (active.accessToken.isBlank()) null
                 else runCatching { httpClient.fetchUserInfo(active.accessToken) }.getOrNull()
-            }
+            },
+            onOpenDebugDiagnostics = { openDebugDiagnosticsScreen() }
         )
         settingsScreen = screen
         currentScreen = Screen.SETTINGS
@@ -5279,6 +5284,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             updateSecurityRow()
             if (isBleConnected) {
                 lastPairingPin = ""
+                dismissTopPairingPinDrawer()
                 showHomeStatus("手机钥匙已连接 (BLE 直连)")
             }
         }
@@ -5288,7 +5294,23 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         runOnUiThread {
             lastPairingPin = pin
             refreshSecuritySheetIfOpen()
-            showHomeStatus("蓝牙配对码：$pin (已自动填入)")
+        }
+    }
+
+    override fun onManualPairingRequired(pin: String, deviceName: String, address: String) {
+        runOnUiThread {
+            lastPairingPin = pin
+            refreshSecuritySheetIfOpen()
+            showTopPairingPinDrawer(pin = pin, deviceName = deviceName, address = address)
+        }
+    }
+
+    override fun onBondCompleted(success: Boolean, address: String) {
+        runOnUiThread {
+            dismissTopPairingPinDrawer()
+            if (success) {
+                showHomeStatus("蓝牙配对已完成，正在建立安全连接...")
+            }
         }
     }
 
@@ -5296,8 +5318,207 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         runOnUiThread {
             bleConnected = true
             bleNearby = false
+            dismissTopPairingPinDrawer()
             updateSecurityRow()
         }
+    }
+
+    private fun openDebugDiagnosticsScreen() {
+        val screen = DebugDiagnosticsScreen(
+            context = this,
+            scope = lifecycleScope,
+            bleController = bleController,
+            profileProvider = { profileStore.getActiveProfile() },
+            modelNameProvider = { uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty() },
+            plateNoProvider = { uiPrefs.getString(KEY_PLATE_NO, "").orEmpty() },
+            telemetryProvider = { activeTelemetry },
+            lastPairingPinProvider = { lastPairingPin },
+            requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
+            antiTheftEnabledProvider = { lastKnownAntiTheftEnabled },
+            onRequestBlePermissions = { ensureBlePermissions() },
+            onPreviewPairingDrawer = { pin, devName, addr ->
+                showTopPairingPinDrawer(pin = pin, deviceName = devName, address = addr)
+            },
+            onBack = { popSubpageOverlay() }
+        )
+        val (view, onDestroy) = screen.buildView()
+        pushSubpageOverlay(view, onDestroy)
+    }
+
+    /**
+     * Slides a non-blocking pairing PIN drawer smoothly down from the TOP of the screen
+     * so it remains clearly visible above centered or bottom-anchored Android system
+     * Bluetooth pairing dialogs while the user manually types the 6-digit PIN.
+     */
+    private fun showTopPairingPinDrawer(pin: String, deviceName: String, address: String) {
+        val decor = window.decorView as? FrameLayout ?: return
+        dismissTopPairingPinDrawer(immediate = true)
+
+        val topSafePx = latestTopStatusBarInsetPx.coerceAtLeast(dp(28))
+        val spacedPin = pin.trim().toCharArray().joinToString(" ")
+
+        val drawer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            elevation = dpF(16f)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#1C1D21"))
+                cornerRadii = floatArrayOf(
+                    0f, 0f,
+                    0f, 0f,
+                    dpF(22f), dpF(22f),
+                    dpF(22f), dpF(22f)
+                )
+                setStroke(dp(1), Color.parseColor("#2F3542"))
+            }
+            setPadding(dp(20), topSafePx + dp(12), dp(20), dp(16))
+            isClickable = true
+            isFocusable = false
+        }
+
+        // Top Row: Bluetooth icon + title + device tag + Close button
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val btBadge = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#1D334D"))
+            }
+            addView(
+                AppIconView(this@MainActivity, AppIconType.BLUETOOTH_ICON, Color.parseColor("#60A5FA")),
+                FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER)
+            )
+        }
+        headerRow.addView(btBadge, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(10) })
+
+        val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        titleCol.addView(text("首次蓝牙配对", 15f, TEXT_PRIMARY, Typeface.BOLD))
+        val targetSub = listOf(deviceName.trim(), address.trim())
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" · ")
+        if (targetSub.isNotBlank()) {
+            titleCol.addView(
+                text(targetSub, 11.5f, TEXT_SECONDARY).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                },
+                lp(top = dp(1))
+            )
+        }
+        headerRow.addView(titleCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+
+        val closeBtn = text("收起", 13f, TEXT_SECONDARY, Typeface.BOLD).apply {
+            setPadding(dp(10), dp(6), dp(4), dp(6))
+            isClickable = true
+            setOnClickListener {
+                AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
+                dismissTopPairingPinDrawer()
+            }
+        }
+        headerRow.addView(closeBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        drawer.addView(headerRow, lp())
+
+        // Middle Hero: Large spaced 6-digit PIN + One-tap Copy pill
+        val pinBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dpF(14f)
+                setColor(Color.parseColor("#141519"))
+                setStroke(dp(1), Color.parseColor("#2A2E38"))
+            }
+            setPadding(dp(16), dp(12), dp(12), dp(12))
+        }
+        val pinTv = text(spacedPin, 26f, TEXT_PRIMARY, Typeface.BOLD).apply {
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            letterSpacing = 0.08f
+        }
+        pinBox.addView(pinTv, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+
+        val copyBtn = text("复制", 12.5f, Color.parseColor("#FFFFFF"), Typeface.BOLD).apply {
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                cornerRadius = dpF(9f)
+                setColor(ACCENT_BLUE)
+            }
+            setPadding(dp(14), dp(7), dp(14), dp(7))
+            isClickable = true
+            setOnClickListener {
+                AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                cm?.setPrimaryClip(android.content.ClipData.newPlainText("BLE Pairing PIN", pin))
+                Toast.makeText(this@MainActivity, "已复制配对码 $pin", Toast.LENGTH_SHORT).show()
+            }
+        }
+        MotionSpec.attachPressPhysics(copyBtn, pressedScale = 0.94f, haptic = false)
+        pinBox.addView(copyBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        drawer.addView(pinBox, lp(top = dp(12)))
+
+        // Bottom Manual Input Hint
+        drawer.addView(
+            text(
+                "系统不支持自动填入配对码，请在下方或中部的蓝牙配对框中手动输入以上 6 位数字。",
+                12f,
+                Color.parseColor("#9DA3AE")
+            ).apply {
+                setLineSpacing(dpF(2.5f), 1f)
+            },
+            lp(top = dp(10))
+        )
+
+        // Subtle bottom drag-handle cue
+        val grabber = View(this).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dpF(2f)
+                setColor(Color.parseColor("#3A3F4B"))
+            }
+        }
+        val grabberWrap = FrameLayout(this).apply {
+            addView(grabber, FrameLayout.LayoutParams(dp(34), dp(3), Gravity.CENTER))
+        }
+        drawer.addView(grabberWrap, lp(top = dp(10)))
+
+        topPairingDrawerView = drawer
+        decor.addView(
+            drawer,
+            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP)
+        )
+
+        // Slide smoothly down from above the top edge
+        drawer.alpha = 0.92f
+        drawer.post {
+            val h = drawer.height.takeIf { it > 0 }?.toFloat() ?: dpF(210f)
+            drawer.translationY = -h
+            drawer.animate()
+                .translationY(0f)
+                .alpha(1f)
+                .setDuration(380L)
+                .setInterpolator(MotionSpec.EASE_OUT_EXPO)
+                .start()
+        }
+    }
+
+    private fun dismissTopPairingPinDrawer(immediate: Boolean = false) {
+        val view = topPairingDrawerView ?: return
+        topPairingDrawerView = null
+        val parent = view.parent as? ViewGroup ?: return
+        view.animate().cancel()
+        if (immediate) {
+            parent.removeView(view)
+            return
+        }
+        val h = view.height.takeIf { it > 0 }?.toFloat() ?: dpF(210f)
+        view.animate()
+            .translationY(-h)
+            .alpha(0f)
+            .setDuration(260L)
+            .setInterpolator(MotionSpec.EASE_STANDARD)
+            .withEndAction {
+                (view.parent as? ViewGroup)?.removeView(view)
+            }
+            .start()
     }
 
     override fun onVehicleResponse(parsedResponse: ParsedTBoxResponse) {
