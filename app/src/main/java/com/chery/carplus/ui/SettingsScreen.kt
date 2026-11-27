@@ -38,14 +38,18 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.LifecycleCoroutineScope
 import com.chery.carplus.R
 import com.chery.carplus.cloud.AppUpdater
+import com.chery.carplus.cloud.CheryUserInfo
 import com.chery.carplus.cloud.UpdateCheckResult
 import com.chery.carplus.profile.VehicleProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -69,7 +73,8 @@ class SettingsScreen(
     @Suppress("UNUSED_PARAMETER")
     private val onOpenPinManagement: () -> Unit = {},
     private val onPickAvatarImage: (onPicked: (Uri) -> Unit) -> Unit,
-    private val onLogout: () -> Unit
+    private val onLogout: () -> Unit,
+    private val fetchCloudUserInfo: (suspend () -> CheryUserInfo?)? = null
 ) {
 
     private enum class SubPage {
@@ -137,8 +142,166 @@ class SettingsScreen(
         pageHost = host
         renderSubPage(SubPage.MAIN, direction = 0, animate = false)
         triggerUpdateCheck(force = false)
+        syncOfficialCloudProfileIfPossible()
         return host
     }
+
+    private fun syncOfficialCloudProfileIfPossible() {
+        val fetcher = fetchCloudUserInfo ?: return
+        scope.launch {
+            val userInfo = withContext(Dispatchers.IO) {
+                runCatching { fetcher() }.getOrNull()
+            } ?: return@launch
+
+            val changed = withContext(Dispatchers.IO) {
+                applyCloudUserInfoToCache(userInfo)
+            }
+            if (changed && currentSubPage == SubPage.MAIN) {
+                renderSubPage(SubPage.MAIN, direction = 0, animate = false)
+            }
+        }
+    }
+
+    private fun applyCloudUserInfoToCache(userInfo: CheryUserInfo): Boolean {
+        val rootObj = runCatching { JSONObject(userInfo.rawJson) }.getOrNull()
+        val data = rootObj?.optJSONObject("data") ?: rootObj
+        val cloudNickname = firstNonBlank(
+            userInfo.nickname,
+            data?.optString("nickname").orEmpty(),
+            data?.optString("nickName").orEmpty()
+        )
+        val cloudAccount = firstNonBlank(
+            userInfo.account,
+            data?.optString("account").orEmpty(),
+            userInfo.userId
+        )
+        val cloudMobile = firstNonBlank(
+            userInfo.telephone,
+            data?.optString("telephone").orEmpty()
+        )
+        val cloudEmail = data?.optString("mail").orEmpty().trim()
+        val cloudCity = data?.optString("city").orEmpty().trim()
+        val rawSex = data?.optString("sex").orEmpty().trim()
+        val cloudGender = when (rawSex.lowercase(Locale.US)) {
+            "1", "m", "male", "男" -> "男"
+            "0", "2", "f", "female", "女" -> "女"
+            else -> ""
+        }
+        val rawIcon = firstNonBlank(
+            data?.optString("icon").orEmpty(),
+            data?.optString("headImg").orEmpty(),
+            data?.optString("headUrl").orEmpty(),
+            data?.optString("avatar").orEmpty()
+        )
+        val resolvedAvatarUrl = resolveCloudAvatarUrl(rawIcon)
+
+        val editor = accountPrefs.edit()
+        var changed = false
+
+        val lastSyncedUserId = accountPrefs.getString(KEY_SYNCED_USER_ID, "").orEmpty()
+        val currentUserId = userInfo.userId.ifBlank { cloudMobile }
+        val switchedAccount = currentUserId.isNotBlank() && lastSyncedUserId.isNotBlank() && lastSyncedUserId != currentUserId
+        if (switchedAccount) {
+            runCatching { avatarFile().delete() }
+            runCatching { cloudAvatarFile().delete() }
+            editor.remove(KEY_AVATAR_URL)
+            changed = true
+        }
+        if (currentUserId.isNotBlank()) {
+            editor.putString(KEY_SYNCED_USER_ID, currentUserId)
+        }
+
+        if (cloudNickname.isNotBlank() && cloudNickname != accountPrefs.getString(KEY_NICKNAME, "")) {
+            editor.putString(KEY_NICKNAME, cloudNickname)
+            changed = true
+        }
+        if (cloudAccount.isNotBlank() && cloudAccount != accountPrefs.getString(KEY_USERNAME, "")) {
+            editor.putString(KEY_USERNAME, cloudAccount)
+            changed = true
+        }
+        if (cloudMobile.isNotBlank() && cloudMobile != accountPrefs.getString(KEY_MOBILE, "")) {
+            editor.putString(KEY_MOBILE, cloudMobile)
+            changed = true
+        }
+        if (cloudEmail.isNotBlank() && cloudEmail != accountPrefs.getString(KEY_EMAIL, "")) {
+            editor.putString(KEY_EMAIL, cloudEmail)
+            changed = true
+        }
+        if (cloudCity.isNotBlank() && cloudCity != accountPrefs.getString(KEY_REGION, "")) {
+            editor.putString(KEY_REGION, cloudCity)
+            changed = true
+        }
+        if (cloudGender.isNotBlank() && cloudGender != accountPrefs.getString(KEY_GENDER, "")) {
+            editor.putString(KEY_GENDER, cloudGender)
+            changed = true
+        }
+
+        if (resolvedAvatarUrl.isNotBlank()) {
+            val prevUrl = accountPrefs.getString(KEY_AVATAR_URL, "").orEmpty()
+            val cFile = cloudAvatarFile()
+            if (resolvedAvatarUrl != prevUrl || !cFile.exists() || cFile.length() == 0L) {
+                if (downloadCloudAvatar(resolvedAvatarUrl, cFile)) {
+                    editor.putString(KEY_AVATAR_URL, resolvedAvatarUrl)
+                    // Prefer newly synced official cloud avatar over any stale local test file
+                    runCatching { avatarFile().delete() }
+                    changed = true
+                }
+            }
+        }
+        editor.apply()
+        return changed
+    }
+
+    private fun resolveCloudAvatarUrl(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank() || trimmed.equals("null", ignoreCase = true)) return ""
+        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
+            return trimmed
+        }
+        val cleanPath = trimmed.removePrefix("/")
+        return "https://cloudrivechery.mychery.com/$cleanPath"
+    }
+
+    private fun downloadCloudAvatar(urlStr: String, target: File): Boolean {
+        return runCatching {
+            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 8_000
+                readTimeout = 10_000
+                instanceFollowRedirects = true
+                requestMethod = "GET"
+            }
+            try {
+                if (conn.responseCode !in 200..299) return false
+                val bytes = conn.inputStream.use { it.readBytes() }
+                if (bytes.isEmpty()) return false
+                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return false
+                val side = min(decoded.width, decoded.height)
+                val x = (decoded.width - side) / 2
+                val y = (decoded.height - side) / 2
+                val cropped = Bitmap.createBitmap(decoded, x, y, side, side)
+                if (cropped !== decoded) decoded.recycle()
+                val targetSize = min(side, 512)
+                val scaled = if (side > targetSize) {
+                    Bitmap.createScaledBitmap(cropped, targetSize, targetSize, true).also {
+                        if (it !== cropped) cropped.recycle()
+                    }
+                } else {
+                    cropped
+                }
+                FileOutputStream(target).use { out ->
+                    scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                    out.flush()
+                }
+                scaled.recycle()
+                true
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun firstNonBlank(vararg values: String): String =
+        values.firstOrNull { it.isNotBlank() && !it.equals("null", ignoreCase = true) }.orEmpty()
 
     fun handleBackPressed(): Boolean {
         dismissTransientOverlays()
@@ -1200,6 +1363,8 @@ class SettingsScreen(
 
     private fun avatarFile(): File = File(activity.filesDir, AVATAR_FILENAME)
 
+    private fun cloudAvatarFile(): File = File(activity.filesDir, CLOUD_AVATAR_FILENAME)
+
     private fun saveScaledAvatar(uri: Uri): Boolean {
         return runCatching {
             val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1243,9 +1408,15 @@ class SettingsScreen(
     }
 
     private fun buildAvatarView(sizeDp: Int, displayName: String): View {
-        val file = avatarFile()
-        val bitmap = if (file.exists() && file.length() > 0L) {
-            runCatching { BitmapFactory.decodeFile(file.absolutePath) }.getOrNull()
+        val localFile = avatarFile()
+        val cloudFile = cloudAvatarFile()
+        val resolvedFile = when {
+            localFile.exists() && localFile.length() > 0L -> localFile
+            cloudFile.exists() && cloudFile.length() > 0L -> cloudFile
+            else -> null
+        }
+        val bitmap = if (resolvedFile != null) {
+            runCatching { BitmapFactory.decodeFile(resolvedFile.absolutePath) }.getOrNull()
         } else {
             null
         }
@@ -1431,7 +1602,19 @@ class SettingsScreen(
         private const val KEY_EMAIL = "email"
         private const val KEY_GENDER = "gender"
         private const val KEY_REGION = "region"
+        private const val KEY_AVATAR_URL = "cloud_avatar_url"
+        private const val KEY_SYNCED_USER_ID = "synced_user_id"
         private const val AVATAR_FILENAME = "user_avatar.jpg"
+        private const val CLOUD_AVATAR_FILENAME = "cloud_avatar.jpg"
+
+        fun clearCachedAccountProfile(context: Context) {
+            context.getSharedPreferences(PREFS_ACCOUNT_PROFILE, Context.MODE_PRIVATE)
+                .edit()
+                .clear()
+                .apply()
+            runCatching { File(context.filesDir, AVATAR_FILENAME).delete() }
+            runCatching { File(context.filesDir, CLOUD_AVATAR_FILENAME).delete() }
+        }
 
         private val ABOUT_BADGE_SURFACE = Color.parseColor("#1E2026")
         private val ABOUT_BADGE_BORDER = Color.parseColor("#2A2D35")

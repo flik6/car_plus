@@ -403,8 +403,8 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
             return
         }
 
-        val uiPrefs = appCtx.getSharedPreferences("carplus_ui_prefs", Context.MODE_PRIVATE)
-        val requirePinEveryTime = uiPrefs.getBoolean("require_pin_every_time", false)
+        val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+        val requirePinEveryTime = uiPrefs.getBoolean("require_pin_every_time", true)
         val needsPin = cmd != CarWidgetManager.CMD_REFRESH
         if (needsPin && (requirePinEveryTime || profile.controlPin.length != 6)) {
             // Respect user's security policy: open App for 6-digit PIN sheet
@@ -421,10 +421,10 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                 val client = CheryHttpClient(defaultDeviceId = store.defaultDeviceId())
                 val snap = CarWidgetStateStore.load(appCtx)
                 val cachedModel = VehicleDisplayNames.normalizeCachedName(
-                    uiPrefs.getString("cached_model_name", snap.modelName).orEmpty(),
-                    uiPrefs.getString("cached_plate_no", snap.plateNo).orEmpty()
+                    uiPrefs.getString("modelName", snap.modelName).orEmpty(),
+                    uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
                 )
-                val cachedPlate = uiPrefs.getString("cached_plate_no", snap.plateNo).orEmpty()
+                val cachedPlate = uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
 
                 if (cmd == CarWidgetManager.CMD_REFRESH) {
                     CarWidgetStateStore.setTransientHint(appCtx, "正在刷新车况...")

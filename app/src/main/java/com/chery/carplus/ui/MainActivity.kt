@@ -392,7 +392,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             plateNoProvider = { uiPrefs.getString(KEY_PLATE_NO, "").orEmpty() },
             onDepthRecede = { receded -> applySheetDepthRecede(receded) },
             tripTrackEnabledProvider = { cloudTripTrackEnabled },
-            requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, false) },
+            requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
             onRequirePinEveryTimeChanged = { enabled ->
                 uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, enabled).apply()
                 showHomeStatus(if (enabled) "已开启每次控车验证密码" else "已关闭每次控车验证密码")
@@ -2006,7 +2006,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 pendingAvatarPickCallback = onPicked
                 avatarPickerLauncher.launch("image/*")
             },
-            onLogout = { logoutToWelcome() }
+            onLogout = { logoutToWelcome() },
+            fetchCloudUserInfo = {
+                val active = profileStore.getActiveProfile()
+                if (active.accessToken.isBlank()) null
+                else runCatching { httpClient.fetchUserInfo(active.accessToken) }.getOrNull()
+            }
         )
         settingsScreen = screen
         currentScreen = Screen.SETTINGS
@@ -2100,24 +2105,45 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         scroll.addView(content, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        // Row 1: 车控安全密码 switch (turn OFF requires confirmation per DESIGN_SYSTEM v2.3)
+        // Group 1: 控车安全
+        content.addView(AppComponents.createSectionHeader(this, "控车安全"), lp())
+
+        // Row 1: 车控安全密码 switch (default ON; controls both BLE & HTTP; toggling requires cloud PIN verification)
         val pinSwitch = ToggleSwitch(this).apply {
-            checked = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, false)
+            checked = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true)
             onToggleAttempt = { targetChecked ->
-                if (targetChecked) {
-                    uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true).apply()
-                    setChecked(true, animate = true)
-                    showHomeStatus("已开启每次控车验证密码")
+                val profile = profileStore.getActiveProfile()
+                if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+                    Toast.makeText(this@MainActivity, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
                 } else {
-                    AppComponents.showConfirmDialog(
+                    val actionDesc = if (targetChecked) "开启" else "关闭"
+                    appDialog?.dismiss()
+                    appDialog = SixDigitPinSheet.showVerifyPinSheet(
                         context = this@MainActivity,
-                        title = "关闭控车密码验证",
-                        message = "关闭后发起远程控车将自动校验已保存密码，无需每次手动输入。",
-                        confirmText = "确认关闭"
-                    ) {
-                        uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, false).apply()
-                        setChecked(false, animate = true)
-                        showHomeStatus("已关闭每次控车验证密码")
+                        title = "验证车控安全密码",
+                        subtitle = "请输入 6 位云端车控安全密码以${actionDesc}每次控车验证"
+                    ) { pin, showError, dismiss ->
+                        lifecycleScope.launch {
+                            val verified = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
+                                }
+                            }.getOrDefault(false)
+                            if (verified) {
+                                sessionVehiclePin = pin
+                                currentProfile = profileStore.saveProfile(
+                                    profile.copy(controlPin = pin),
+                                    activate = true
+                                )
+                                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, targetChecked).apply()
+                                setChecked(targetChecked, animate = true)
+                                dismiss()
+                                val msg = if (targetChecked) "已开启每次控车验证密码" else "已关闭每次控车验证密码"
+                                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                            } else {
+                                showError("云端车控安全密码错误，请重试")
+                            }
+                        }
                     }
                 }
             }
@@ -2127,7 +2153,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 context = this,
                 icon = AppIconType.LOCK_CLOSED,
                 title = "车控安全密码",
-                subtitle = "开启后每次远程控车均需输入 6 位密码",
+                subtitle = "开启后蓝牙直连与远程控车均需验证 6 位密码",
                 trailingView = pinSwitch,
                 showChevron = false,
                 onClick = null
@@ -2148,17 +2174,156 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
 
-        // Row 3: 防盗与车辆体检
+        // Group 2: 车辆防护
+        content.addView(AppComponents.createSectionHeader(this, "车辆防护"), lp())
+
+        // Row 3: 防盗提醒 (dedicated standalone toggle row; vehicle diagnosis removed)
+        val theftTrailing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val theftSyncLabel = text("读取中...", 12f, TEXT_SECONDARY)
+        theftTrailing.addView(
+            theftSyncLabel,
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(10) }
+        )
+        var theftBusy = true
+        var theftEnabledState = false
+        val theftSwitch = ToggleSwitch(this).apply {
+            setChecked(false, animate = false)
+            isEnabled = false
+            alpha = 0.55f
+        }
+
+        fun submitAntiTheftToggle(targetEnabled: Boolean, verifiedPin: String) {
+            val profile = profileStore.getActiveProfile()
+            if (profile.vin.isBlank() || profile.accessToken.isBlank()) return
+            theftBusy = true
+            theftSyncLabel.text = "同步中..."
+            theftSyncLabel.visibility = View.VISIBLE
+            theftSwitch.isEnabled = false
+            theftSwitch.alpha = 0.55f
+            lifecycleScope.launch {
+                val ok = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val payload = org.json.JSONObject().apply {
+                            put("vin", profile.vin.trim().uppercase(Locale.US))
+                            put("instruction", "1204")
+                            put("paras", org.json.JSONObject().put("0002", if (targetEnabled) 1 else 0))
+                            put("passwordType", "0")
+                            if (verifiedPin.isNotBlank()) {
+                                put("safePasswd", hashZyhlPinFor970(verifiedPin))
+                            }
+                        }
+                        val env = httpClient.executeZyhlService("970", payload, profile.accessToken)
+                        val code = env.optString("resultCode").ifBlank { env.optString("code") }
+                        code == "0200" || code == "200" || code == "0"
+                    }
+                }.getOrDefault(false)
+                theftBusy = false
+                theftSyncLabel.visibility = View.GONE
+                theftSwitch.isEnabled = true
+                theftSwitch.alpha = 1f
+                if (ok) {
+                    theftEnabledState = targetEnabled
+                    theftSwitch.setChecked(targetEnabled, animate = true)
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (targetEnabled) "已开启防盗提醒" else "已关闭防盗提醒",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    theftSwitch.setChecked(theftEnabledState, animate = true)
+                    Toast.makeText(this@MainActivity, "防盗提醒设置同步失败，请稍后重试", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        theftSwitch.onToggleAttempt = { targetEnabled ->
+            if (!theftBusy) {
+                val profile = profileStore.getActiveProfile()
+                val titleText = if (targetEnabled) "开启防盗提醒" else "关闭防盗提醒"
+                val messageText = if (targetEnabled) {
+                    "开启后当车辆发生异常移动或触发防盗告警时将及时推送提醒。"
+                } else {
+                    "关闭后将不再接收车辆防盗异常告警提醒，确定关闭吗？"
+                }
+                AppComponents.showConfirmDialog(
+                    context = this@MainActivity,
+                    title = titleText,
+                    message = messageText,
+                    confirmText = "确认",
+                    cancelText = "取消",
+                    dangerConfirm = !targetEnabled
+                ) {
+                    val cachedPin = sessionVehiclePin.ifBlank { profile.controlPin }
+                    val needPin = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) || cachedPin.length != 6
+                    if (needPin) {
+                        appDialog?.dismiss()
+                        appDialog = SixDigitPinSheet.showVerifyPinSheet(
+                            context = this@MainActivity,
+                            title = "输入车控安全密码",
+                            subtitle = "请输入 6 位云端车控安全密码以${if (targetEnabled) "开启" else "关闭"}防盗提醒"
+                        ) { pin, showError, dismiss ->
+                            lifecycleScope.launch {
+                                val verified = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
+                                    }
+                                }.getOrDefault(false)
+                                if (verified) {
+                                    sessionVehiclePin = pin
+                                    currentProfile = profileStore.saveProfile(
+                                        profile.copy(controlPin = pin),
+                                        activate = true
+                                    )
+                                    dismiss()
+                                    submitAntiTheftToggle(targetEnabled, pin)
+                                } else {
+                                    showError("云端车控安全密码错误，请重试")
+                                }
+                            }
+                        }
+                    } else {
+                        submitAntiTheftToggle(targetEnabled, cachedPin)
+                    }
+                }
+            }
+        }
+        theftTrailing.addView(theftSwitch)
         content.addView(
             AppComponents.createListRow(
                 context = this,
                 icon = AppIconType.SHIELD_CHECK,
-                title = "防盗与车辆体检",
-                showChevron = true
-            ) { featureSheets.showAntiTheftSheet() },
+                title = "防盗提醒",
+                subtitle = "车辆异常移动或触发防盗时推送提醒",
+                trailingView = theftTrailing,
+                showChevron = false,
+                onClick = null
+            ),
             lp()
         )
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
+
+        // Fetch live anti-theft remind state on Security screen open
+        lifecycleScope.launch {
+            val active = profileStore.getActiveProfile()
+            val status = if (active.vin.isNotBlank() && active.accessToken.isNotBlank()) {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        httpClient.fetchAntiTheftSettings(active.vin, active.accessToken)
+                    }
+                }.getOrNull()
+            } else null
+            theftBusy = false
+            theftSyncLabel.visibility = View.GONE
+            theftSwitch.isEnabled = true
+            theftSwitch.alpha = 1f
+            if (status != null) {
+                theftEnabledState = status.theftRemindEnabled
+                theftSwitch.setChecked(status.theftRemindEnabled, animate = false)
+            }
+        }
 
         // Row 4: 电子围栏
         content.addView(
@@ -2171,6 +2336,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             lp()
         )
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
+
+        // Group 3: 隐私与轨迹
+        content.addView(AppComponents.createSectionHeader(this, "隐私与轨迹"), lp())
 
         // Row 5: 行程轨迹记录 (per-vehicle cloud trip track toggle with confirmation)
         val tripTrailing = LinearLayout(this).apply {
@@ -4441,6 +4609,41 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     // Smart Dual-Mode Command Router (BLE Nearby -> HTTP Fallback)
     // =========================================================================
 
+    private fun hashZyhlPinFor970(pinPlain: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(pinPlain.toByteArray(Charsets.UTF_8))
+        val hexLower = digest.joinToString("") { "%02x".format(it) }
+        return android.util.Base64.encodeToString(
+            hexLower.toByteArray(Charsets.UTF_8),
+            android.util.Base64.NO_WRAP
+        )
+    }
+
+    private fun executeBleActionImmediate(
+        actionKey: String,
+        label: String,
+        temperatureCelsius: Double?
+    ): Boolean {
+        lastBleActionLabel = label
+        val accepted = if (temperatureCelsius != null) {
+            bleController.sendVehicleAction(actionKey, temperatureCelsius, 10)
+        } else {
+            bleController.sendVehicleAction(actionKey)
+        }
+        if (accepted) {
+            applyOptimisticAction(actionKey)
+            showHomeStatus(
+                if (bleController.isSessionReady()) {
+                    "蓝牙直连已发送：$label"
+                } else {
+                    "蓝牙钥匙连接中，已排队：$label"
+                }
+            )
+            scheduleTelemetryRefresh()
+        }
+        return accepted
+    }
+
     private fun dispatchSmartVehicleCommand(
         actionKey: String,
         label: String,
@@ -4452,31 +4655,49 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return
         }
 
+        val requirePinEveryTime = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true)
         val bleRoute = bleController.isSessionReady() ||
             bleController.isVehicleNearby ||
             bleNearby
+
         if (bleRoute) {
-            lastBleActionLabel = label
-            val accepted = if (temperatureCelsius != null) {
-                bleController.sendVehicleAction(actionKey, temperatureCelsius, 10)
+            if (!requirePinEveryTime) {
+                if (executeBleActionImmediate(actionKey, label, temperatureCelsius)) {
+                    return
+                }
             } else {
-                bleController.sendVehicleAction(actionKey)
-            }
-            if (accepted) {
-                applyOptimisticAction(actionKey)
-                showHomeStatus(
-                    if (bleController.isSessionReady()) {
-                        "蓝牙直连已发送：$label"
-                    } else {
-                        "蓝牙钥匙连接中，已排队：$label"
+                // BLE direct control also enforces the 6-digit cloud PIN gate when switch is ON
+                appDialog?.dismiss()
+                appDialog = SixDigitPinSheet.showVerifyPinSheet(
+                    context = this,
+                    title = "输入车控安全密码",
+                    subtitle = "请输入 6 位云端车控安全密码以执行「$label」"
+                ) { pin, showError, dismiss ->
+                    lifecycleScope.launch {
+                        val verified = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
+                            }
+                        }.getOrDefault(false)
+                        if (verified) {
+                            sessionVehiclePin = pin
+                            currentProfile = profileStore.saveProfile(
+                                profile.copy(controlPin = pin),
+                                activate = true
+                            )
+                            dismiss()
+                            if (!executeBleActionImmediate(actionKey, label, temperatureCelsius)) {
+                                sendHttpVehicleCommand(profile, actionKey, label, temperatureCelsius, pin)
+                            }
+                        } else {
+                            showError("云端车控安全密码错误，请重试")
+                        }
                     }
-                )
-                scheduleTelemetryRefresh()
+                }
                 return
             }
         }
 
-        val requirePinEveryTime = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, false)
         val cachedPin = sessionVehiclePin.ifBlank { profile.controlPin }
         if (requirePinEveryTime || cachedPin.isBlank()) {
             showVehiclePinSheet(profile, actionKey, label, temperatureCelsius)
@@ -4809,6 +5030,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun logoutToWelcome() {
         clearActiveSessionAndUiState()
+        SettingsScreen.clearCachedAccountProfile(this)
         CarWidgetStateStore.clear(this)
         CarWidgetManager.updateAllWidgets(this)
         showWelcomeScreen()
