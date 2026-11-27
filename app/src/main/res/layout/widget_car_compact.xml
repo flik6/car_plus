@@ -5,9 +5,12 @@
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg_dark"
     android:orientation="vertical"
-    android:padding="12dp">
+    android:paddingStart="12dp"
+    android:paddingTop="11dp"
+    android:paddingEnd="12dp"
+    android:paddingBottom="11dp">
 
-    <!-- Top Header: Model + Refresh -->
+    <!-- Top Header: Model + Status + Compact Refresh Pill -->
     <LinearLayout
         android:id="@+id/widget_header_area"
         android:layout_width="match_parent"
@@ -19,54 +22,65 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:paddingEnd="6dp">
 
             <TextView
                 android:id="@+id/widget_model_name"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
+                android:includeFontPadding="false"
                 android:singleLine="true"
                 android:text="Qiri+"
                 android:textColor="#FFFFFF"
-                android:textSize="14sp"
+                android:textSize="13.5sp"
                 android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/widget_status_line"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="1dp"
+                android:layout_marginTop="3dp"
                 android:ellipsize="end"
+                android:includeFontPadding="false"
                 android:singleLine="true"
                 android:text="状态待同步"
-                android:textColor="#8E9299"
+                android:textColor="#9CA3B2"
                 android:textSize="10.5sp" />
         </LinearLayout>
 
-        <ImageView
+        <FrameLayout
             android:id="@+id/widget_btn_refresh"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:contentDescription="刷新车况"
-            android:padding="7dp"
-            android:src="@drawable/ic_widget_refresh"
-            android:tint="#9EA3AE" />
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:background="@drawable/widget_pill_bg">
+
+            <ImageView
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_gravity="center"
+                android:contentDescription="刷新车况"
+                android:src="@drawable/ic_widget_refresh"
+                android:tint="#9CA3B2" />
+        </FrameLayout>
     </LinearLayout>
 
-    <!-- Middle: Compact Car Visual -->
+    <!-- Middle: Compact Car Stage -->
     <ImageView
         android:id="@+id/widget_car_image"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="4dp"
-        android:layout_marginBottom="4dp"
+        android:layout_marginBottom="6dp"
         android:layout_weight="1"
         android:contentDescription="车辆视图"
+        android:paddingStart="2dp"
+        android:paddingEnd="2dp"
         android:scaleType="fitCenter"
         android:src="@drawable/widget_car_arrizo8" />
 
-    <!-- Fuel Bar -->
+    <!-- Fuel / Energy Hairline Bar -->
     <ProgressBar
         android:id="@+id/widget_fuel_bar"
         style="?android:attr/progressBarStyleHorizontal"
@@ -87,14 +101,14 @@
             android:id="@+id/widget_btn_lock"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="6dp"
+            android:layout_marginEnd="7dp"
             android:layout_weight="1"
             android:background="@drawable/widget_btn_bg">
 
             <ImageView
                 android:id="@+id/widget_icon_lock"
-                android:layout_width="19dp"
-                android:layout_height="19dp"
+                android:layout_width="18dp"
+                android:layout_height="18dp"
                 android:layout_gravity="center"
                 android:contentDescription="锁车或解锁"
                 android:src="@drawable/ic_widget_lock_closed" />
@@ -109,8 +123,8 @@
 
             <ImageView
                 android:id="@+id/widget_icon_ac"
-                android:layout_width="19dp"
-                android:layout_height="19dp"
+                android:layout_width="18dp"
+                android:layout_height="18dp"
                 android:layout_gravity="center"
                 android:contentDescription="开关空调"
                 android:src="@drawable/ic_widget_fan" />

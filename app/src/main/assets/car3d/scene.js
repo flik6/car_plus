@@ -211,7 +211,8 @@
     headGlow: 0,
     brakeGlow: 0,
     reverseGlow: 0,
-    bayAlpha: 0
+    bayAlpha: 0,
+    arrivalBlinkFired: false
   };
 
   function evalCubicBezier(p0, p1, p2, p3, u) {
@@ -633,6 +634,7 @@
     entrance.brakeGlow = 0;
     entrance.reverseGlow = 0;
     entrance.bayAlpha = 0;
+    entrance.arrivalBlinkFired = false;
 
     applyEntranceCameraEnvelope(0);
     updateCameraPosition();
@@ -683,6 +685,7 @@
       Math.abs(entranceCam.radiusBoost) > 1e-4;
     if (!entrance.active && entrance.bayAlpha <= 0.001 && entrance.reverseGlow <= 0.001 && !hasCamOffset) return;
     entrance.active = false;
+    entrance.arrivalBlinkFired = true;
     entrance.headGlow = 0;
     entrance.brakeGlow = 0;
     entrance.reverseGlow = 0;
@@ -1241,6 +1244,99 @@
     return new THREE.CanvasTexture(canvas);
   }
 
+  function createAmberFlareTexture() {
+    var canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 96;
+    var ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, 256, 96);
+
+    // Wide soft warm-amber optical bloom
+    ctx.save();
+    ctx.translate(128, 48);
+    ctx.scale(1.0, 0.38);
+    var outer = ctx.createRadialGradient(0, 0, 6, 0, 0, 122);
+    outer.addColorStop(0.0, 'rgba(255, 224, 150, 0.95)');
+    outer.addColorStop(0.28, 'rgba(255, 166, 36, 0.80)');
+    outer.addColorStop(0.62, 'rgba(255, 134, 12, 0.28)');
+    outer.addColorStop(1.0, 'rgba(255, 120, 0, 0.0)');
+    ctx.fillStyle = outer;
+    ctx.beginPath();
+    ctx.arc(0, 0, 122, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Crisp horizontal automotive LED blade core (#FFF3CC -> #FFD27D -> #FF9A18)
+    ctx.save();
+    ctx.translate(128, 48);
+    ctx.scale(1.0, 0.16);
+    var core = ctx.createRadialGradient(0, 0, 2, 0, 0, 92);
+    core.addColorStop(0.0, 'rgba(255, 246, 212, 1.0)');
+    core.addColorStop(0.35, 'rgba(255, 210, 125, 0.96)');
+    core.addColorStop(0.72, 'rgba(255, 154, 24, 0.50)');
+    core.addColorStop(1.0, 'rgba(255, 140, 10, 0.0)');
+    ctx.fillStyle = core;
+    ctx.beginPath();
+    ctx.arc(0, 0, 92, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    return new THREE.CanvasTexture(canvas);
+  }
+
+  function createSoftAmberHaloTexture() {
+    var canvas = document.createElement('canvas');
+    canvas.width = 192;
+    canvas.height = 192;
+    var ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, 192, 192);
+
+    var grad = ctx.createRadialGradient(96, 96, 4, 96, 96, 94);
+    grad.addColorStop(0.0, 'rgba(255, 214, 132, 0.88)');
+    grad.addColorStop(0.26, 'rgba(255, 158, 28, 0.56)');
+    grad.addColorStop(0.58, 'rgba(255, 136, 12, 0.18)');
+    grad.addColorStop(1.0, 'rgba(255, 120, 0, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(96, 96, 94, 0, Math.PI * 2);
+    ctx.fill();
+
+    return new THREE.CanvasTexture(canvas);
+  }
+
+  // Automotive LED hazard pulse envelope:
+  // ~45ms snap-on -> ~130ms plateau -> ~150ms optical afterglow fade -> ~150ms clean dark pause
+  var HAZARD_PULSE_RISE = 0.045;
+  var HAZARD_PULSE_HOLD = 0.130;
+  var HAZARD_PULSE_DECAY = 0.150;
+  var HAZARD_PULSE_GAP = 0.150;
+  var HAZARD_PULSE_ACTIVE = HAZARD_PULSE_RISE + HAZARD_PULSE_HOLD + HAZARD_PULSE_DECAY; // 0.325s
+  var HAZARD_PULSE_STRIDE = HAZARD_PULSE_ACTIVE + HAZARD_PULSE_GAP; // 0.475s
+
+  function hazardTotalDuration(pulseCount) {
+    var n = Math.max(1, Math.min(4, Math.round(pulseCount || 2)));
+    return (n - 1) * HAZARD_PULSE_STRIDE + HAZARD_PULSE_ACTIVE;
+  }
+
+  function sampleHazardPulse(tSec, pulseCount) {
+    var n = Math.max(1, Math.min(4, Math.round(pulseCount || 2)));
+    var total = hazardTotalDuration(n);
+    if (tSec < 0 || tSec >= total) return 0;
+    var idx = Math.floor(tSec / HAZARD_PULSE_STRIDE);
+    if (idx >= n) return 0;
+    var local = tSec - idx * HAZARD_PULSE_STRIDE;
+    if (local < 0 || local >= HAZARD_PULSE_ACTIVE) return 0;
+    if (local < HAZARD_PULSE_RISE) {
+      var uRise = local / HAZARD_PULSE_RISE;
+      return 1.0 - Math.pow(1.0 - uRise, 2.2);
+    }
+    if (local < HAZARD_PULSE_RISE + HAZARD_PULSE_HOLD) {
+      return 1.0;
+    }
+    var uDecay = (local - HAZARD_PULSE_RISE - HAZARD_PULSE_HOLD) / HAZARD_PULSE_DECAY;
+    return Math.pow(Math.max(0, 1.0 - uDecay), 2.1);
+  }
+
   function resolveClimateColorHex(tempC) {
     var t = typeof tempC === 'number' && isFinite(tempC) ? tempC : 23.0;
     if (t <= 21.0) return 0x38bdf8;   // Crisp icy cyan-blue
@@ -1252,15 +1348,72 @@
   function createInteractiveOverlays(chassisRoot, gltfScene, rig, cfg, modelSize) {
     var headBarTex = createSleekLightBarTexture('240, 247, 255', '196, 224, 255');
     var tailBarTex = createSleekLightBarTexture('255, 42, 42', '255, 30, 30');
+    var amberFlareTex = createAmberFlareTexture();
+    var amberHaloTex = createSoftAmberHaloTexture();
 
     var headPos = (cfg && cfg.headlightPos) ? cfg.headlightPos : [0.67, 0.77, 2.16];
     var tailPos = (cfg && cfg.taillightPos) ? cfg.taillightPos : [0.66, 0.90, -2.26];
     var hornPos = (cfg && cfg.hornPos) ? cfg.hornPos : [0, 0.66, 2.38];
     var heightLift = modelSize ? Math.max(0, modelSize.y - 1.48) : 0;
+    var mirrorX = modelSize ? clamp(modelSize.x * 0.485, 0.86, 1.04) : 0.94;
+    var mirrorY = 0.97 + heightLift * 0.72;
+    var mirrorZ = 0.54;
 
     var headBarSprites = [];
     var tailBarSprites = [];
     var reverseBarSprites = [];
+    var hazardCores = [];
+    var hazardHalos = [];
+    var hazardFloorPools = [];
+
+    var floorRoot = chassisRoot.parent || chassisRoot;
+    var floorPoolGeo = new THREE.PlaneGeometry(1.55, 1.35);
+
+    function addAmberLightPoint(x, y, z, coreW, coreH, haloW, haloH) {
+      var coreSp = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: amberFlareTex,
+        color: 0xffd27d,
+        transparent: true,
+        opacity: 0.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      }));
+      coreSp.position.set(x, y, z);
+      coreSp.scale.set(coreW, coreH, 1);
+      chassisRoot.add(coreSp);
+      hazardCores.push({ sprite: coreSp, baseW: coreW, baseH: coreH });
+
+      var haloSp = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: amberHaloTex,
+        color: 0xff9a18,
+        transparent: true,
+        opacity: 0.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      }));
+      haloSp.position.set(x, y, z);
+      haloSp.scale.set(haloW, haloH, 1);
+      chassisRoot.add(haloSp);
+      hazardHalos.push({ sprite: haloSp, baseW: haloW, baseH: haloH });
+    }
+
+    function addAmberFloorPool(x, z, scaleX, scaleZ) {
+      var poolMat = new THREE.MeshBasicMaterial({
+        map: amberHaloTex,
+        color: 0xff9410,
+        transparent: true,
+        opacity: 0.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      });
+      var poolMesh = new THREE.Mesh(floorPoolGeo, poolMat);
+      poolMesh.rotation.x = -Math.PI / 2;
+      poolMesh.position.set(x, 0.003, z);
+      poolMesh.scale.set(scaleX, scaleZ, 1);
+      poolMesh.visible = false;
+      floorRoot.add(poolMesh);
+      hazardFloorPools.push({ mesh: poolMesh, mat: poolMat });
+    }
 
     for (var side = -1; side <= 1; side += 2) {
       var hb = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -1302,6 +1455,15 @@
       rb.scale.set(0.24, 0.062, 1);
       chassisRoot.add(rb);
       reverseBarSprites.push(rb);
+
+      // 6-point automotive amber hazard LED cluster (front corners, rear corners, side-mirror repeaters)
+      addAmberLightPoint(side * (headPos[0] + 0.12), headPos[1] + 0.025, headPos[2] - 0.08, 0.38, 0.135, 0.72, 0.48);
+      addAmberLightPoint(side * (tailPos[0] + 0.11), tailPos[1] - 0.015, tailPos[2] + 0.06, 0.38, 0.125, 0.68, 0.46);
+      addAmberLightPoint(side * mirrorX, mirrorY, mirrorZ, 0.22, 0.080, 0.38, 0.26);
+
+      // Subtle warm-amber dark-studio floor reflection pools beneath front & rear corners
+      addAmberFloorPool(side * (headPos[0] + 0.28), headPos[2] + 0.16, 1.0, 1.0);
+      addAmberFloorPool(side * (tailPos[0] + 0.26), tailPos[2] - 0.14, 0.95, 0.95);
     }
 
     // 3D climate airflow ribbons (dynamically tinted by target cabin temperature)
@@ -1412,7 +1574,8 @@
     var anim = {
       flashActive: false,
       flashElapsed: 0,
-      flashPattern: 'double', // 'single' (lock) | 'double' (unlock/find_car)
+      flashPulses: 2,
+      flashIncludeHeadAccent: true,
       flashLevel: 0,
       hornActive: false,
       hornElapsed: 0,
@@ -1425,52 +1588,31 @@
       prevLocked: true
     };
 
-    var DOUBLE_FLASH_TOTAL = 0.72;
-    var SINGLE_FLASH_TOTAL = 0.42;
-
-    function sampleDoubleFlash(tSec) {
-      if (tSec < 0 || tSec >= DOUBLE_FLASH_TOTAL) return 0;
-      if (tSec < 0.02) return tSec / 0.02;
-      if (tSec < 0.18) return 1.0;
-      if (tSec < 0.32) return 0.0;
-      if (tSec < 0.34) return (tSec - 0.32) / 0.02;
-      if (tSec < 0.50) return 1.0;
-      var decay = (tSec - 0.50) / 0.22;
-      return Math.max(0, 1.0 - decay * decay);
-    }
-
-    function sampleSingleFlash(tSec) {
-      if (tSec < 0 || tSec >= SINGLE_FLASH_TOTAL) return 0;
-      if (tSec < 0.02) return tSec / 0.02;
-      if (tSec < 0.20) return 1.0;
-      var decay = (tSec - 0.20) / 0.22;
-      return Math.max(0, 1.0 - decay * decay);
-    }
-
-    function startFlash(pattern) {
+    function startHazardBlink(pulses, includeHeadAccent) {
       anim.flashActive = true;
       anim.flashElapsed = 0;
-      anim.flashPattern = pattern === 'single' ? 'single' : 'double';
+      anim.flashPulses = Math.max(1, Math.min(4, Math.round(pulses || 2)));
+      anim.flashIncludeHeadAccent = includeHeadAccent !== false;
     }
 
     function triggerFeedback(actionKey) {
       switch (actionKey) {
         case 'find_car':
-          startFlash('double');
+          startHazardBlink(3, true);
           anim.hornActive = true;
           anim.hornElapsed = 0;
           impulseSuspension(0.0, 0.0, 0.018);
           break;
         case 'unlock':
-          startFlash('double');
+          startHazardBlink(2, true);
           impulseSuspension(0.0, 0.0, 0.024);
           break;
         case 'lock':
-          startFlash('single');
+          startHazardBlink(1, true);
           impulseSuspension(0.0, 0.0, -0.022);
           break;
         case 'engine_start':
-          startFlash('single');
+          startHazardBlink(1, true);
           // Realistic ignition torque roll & brief chassis thrum
           impulseSuspension(-0.045, 0.075, 0.032);
           break;
@@ -1478,7 +1620,7 @@
           impulseSuspension(0.022, -0.035, -0.018);
           break;
         case 'trunk_open':
-          startFlash('single');
+          startHazardBlink(1, false);
           impulseSuspension(-0.05, 0.0, 0.024);
           break;
         case 'tailgate_close':
@@ -1497,14 +1639,17 @@
           impulseSuspension(0.0, 0.0, 0.012);
           break;
         default:
-          startFlash('double');
+          startHazardBlink(2, true);
           break;
       }
     }
 
     return {
       triggerFlash: function () {
-        startFlash('double');
+        startHazardBlink(2, true);
+      },
+      triggerHazardBlink: function (pulses) {
+        startHazardBlink(typeof pulses === 'number' ? pulses : 2, true);
       },
       triggerFeedback: triggerFeedback,
       update: function (dt, t, st) {
@@ -1526,56 +1671,81 @@
         }
         if (st.vehicleLocked !== anim.prevLocked) {
           anim.prevLocked = st.vehicleLocked;
-          startFlash(st.vehicleLocked ? 'single' : 'double');
+          startHazardBlink(st.vehicleLocked ? 1 : 2, true);
         }
 
-        // Flash light cadence
+        // Automotive LED hazard double/triple-flash cadence
         if (anim.flashActive) {
           anim.flashElapsed += dt;
-          var maxDur = anim.flashPattern === 'single' ? SINGLE_FLASH_TOTAL : DOUBLE_FLASH_TOTAL;
+          var maxDur = hazardTotalDuration(anim.flashPulses);
           if (anim.flashElapsed >= maxDur) {
             anim.flashActive = false;
             anim.flashLevel = 0;
           } else {
-            anim.flashLevel = anim.flashPattern === 'single'
-              ? sampleSingleFlash(anim.flashElapsed)
-              : sampleDoubleFlash(anim.flashElapsed);
+            anim.flashLevel = sampleHazardPulse(anim.flashElapsed, anim.flashPulses);
           }
         } else {
           anim.flashLevel = 0;
         }
 
-        // Front pure cool-white (#F0F7FF) headlamp/DRL emissive + tight lens bar
+        var headAccent = anim.flashIncludeHeadAccent ? (anim.flashLevel * 0.42) : 0.0;
+
+        // Front pure cool-white (#F0F7FF) headlamp/DRL emissive + harmonized subtle flash accent
         var headRest = Math.max(st.engineRunning ? 0.24 : 0.0, entrance.headGlow * 0.55);
-        var headLevel = Math.min(1.0, headRest + anim.flashLevel);
+        var headLevel = Math.min(1.0, headRest + headAccent);
         for (var hm = 0; hm < headMats.length; hm++) {
           if (headMats[hm].emissive) {
             headMats[hm].emissive.setHex(0xf0f7ff);
-            headMats[hm].emissiveIntensity = headLevel * 1.45;
+            headMats[hm].emissiveIntensity = headLevel * 1.40;
           }
         }
-        var headBarOp = anim.flashLevel * 0.92 + Math.max(st.engineRunning ? 0.26 : 0.0, entrance.headGlow * 0.52);
+        var headBarOp = headAccent * 0.72 + Math.max(st.engineRunning ? 0.26 : 0.0, entrance.headGlow * 0.52);
         for (var hbIdx = 0; hbIdx < headBarSprites.length; hbIdx++) {
-          headBarSprites[hbIdx].material.opacity = clamp(headBarOp, 0, 0.95);
+          headBarSprites[hbIdx].material.opacity = clamp(headBarOp, 0, 0.92);
         }
 
-        // Rear pure red (#FF1E1E) taillight + real braking glow during drive-in deceleration
+        // Rear pure red (#FF1E1E) taillight + braking glow + subtle harmonized flash accent
         var tailBase = (st.engineRunning ? 0.30 : 0.0) + (st.vehicleLocked ? 0.0 : 0.12);
         var brakeBoost = entrance.brakeGlow * 1.35;
-        var tailIntensity = 0.15 + tailBase + brakeBoost + anim.flashLevel * 1.65;
+        var tailIntensity = 0.15 + tailBase + brakeBoost + headAccent * 0.95;
         for (var tm = 0; tm < tailMats.length; tm++) {
           if (tailMats[tm].emissive) {
             tailMats[tm].emissive.setHex(0xff1e1e);
             tailMats[tm].emissiveIntensity = tailIntensity;
           }
         }
-        var tailBarOp = anim.flashLevel * 0.68 + entrance.brakeGlow * 0.62 + (st.engineRunning ? 0.14 : 0.0);
+        var tailBarOp = headAccent * 0.45 + entrance.brakeGlow * 0.62 + (st.engineRunning ? 0.14 : 0.0);
         for (var tbIdx = 0; tbIdx < tailBarSprites.length; tbIdx++) {
           tailBarSprites[tbIdx].material.opacity = clamp(tailBarOp, 0, 0.85);
         }
         var revBarOp = clamp(entrance.reverseGlow * 0.88, 0, 0.92);
         for (var rbIdx = 0; rbIdx < reverseBarSprites.length; rbIdx++) {
           reverseBarSprites[rbIdx].material.opacity = revBarOp;
+        }
+
+        // 6-point warm amber hazard LEDs (front corners + rear corners + side-mirror repeaters) + floor reflection pools
+        var hLvl = anim.flashLevel;
+        var coreOp = clamp(hLvl * 0.96, 0, 0.98);
+        var haloOp = clamp(Math.pow(hLvl, 1.25) * 0.62, 0, 0.68);
+        var poolOp = clamp(Math.pow(hLvl, 1.35) * 0.24, 0, 0.28);
+        var coreScaleMul = 0.90 + 0.10 * hLvl;
+        var haloScaleMul = 0.84 + 0.16 * hLvl;
+        for (var hc = 0; hc < hazardCores.length; hc++) {
+          var hcItem = hazardCores[hc];
+          hcItem.sprite.material.opacity = coreOp;
+          hcItem.sprite.visible = coreOp > 0.004;
+          hcItem.sprite.scale.set(hcItem.baseW * coreScaleMul, hcItem.baseH * coreScaleMul, 1);
+        }
+        for (var hh = 0; hh < hazardHalos.length; hh++) {
+          var hhItem = hazardHalos[hh];
+          hhItem.sprite.material.opacity = haloOp;
+          hhItem.sprite.visible = haloOp > 0.004;
+          hhItem.sprite.scale.set(hhItem.baseW * haloScaleMul, hhItem.baseH * haloScaleMul, 1);
+        }
+        for (var hp = 0; hp < hazardFloorPools.length; hp++) {
+          var hpItem = hazardFloorPools[hp];
+          hpItem.mat.opacity = poolOp;
+          hpItem.mesh.visible = poolOp > 0.003;
         }
 
         // Expanding 3D acoustic horn wave rings
@@ -2234,6 +2404,12 @@
       }
 
       if (entrance.elapsed >= entrance.totalDuration) {
+        if (!entrance.arrivalBlinkFired) {
+          entrance.arrivalBlinkFired = true;
+          if (currentEffects && currentEffects.triggerHazardBlink) {
+            currentEffects.triggerHazardBlink(2);
+          }
+        }
         finishEntranceImmediately();
       } else {
         // Locate active segment and local normalized time
@@ -2274,6 +2450,14 @@
           if (seg.wakeImpulse && !seg.wakeImpulseFired && segLocalT >= 0.20) {
             seg.wakeImpulseFired = true;
             impulseSuspension(seg.wakeImpulse[0], seg.wakeImpulse[1], seg.wakeImpulse[2]);
+          }
+
+          // Trigger welcome hazard double-flash once the car settles cleanly at its final showcase stop
+          if (segIdx === entrance.segments.length - 1 && segLocalT >= 0.45 && !entrance.arrivalBlinkFired) {
+            entrance.arrivalBlinkFired = true;
+            if (currentEffects && currentEffects.triggerHazardBlink) {
+              currentEffects.triggerHazardBlink(2);
+            }
           }
 
           var targetSteerHold = typeof seg.steerTarget === 'number' ? seg.steerTarget : 0;
@@ -2514,6 +2698,11 @@
     flashLights: function () {
       if (currentEffects && currentEffects.triggerFlash) {
         currentEffects.triggerFlash();
+      }
+    },
+    triggerHazardBlink: function (pulses) {
+      if (currentEffects && currentEffects.triggerHazardBlink) {
+        currentEffects.triggerHazardBlink(pulses);
       }
     },
     triggerActionFeedback: function (actionKey) {
