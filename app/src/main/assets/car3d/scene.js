@@ -34,7 +34,8 @@
   var ENTRANCE_STYLES = ['right_drive', 'left_drive', 'reverse_park', 'bay_exit'];
   var preferredEntranceStyle = 'auto';
   var lastPlayedEntranceStyle = '';
-  var reverseParkSide = 1; // Alternates between +1 (right-to-left) and -1 (left-to-right)
+  var reverseParkSide = 1; // Alternates between +1 (Left Side Profile) and -1 (Right Side Profile)
+  var bayExitSide = -1; // Alternates between -1 (Right Side-Front) and +1 (Left Side-Front)
   var activeRestTheta = DEFAULT_THETA;
   var activeRestPhi = DEFAULT_PHI;
 
@@ -317,32 +318,32 @@
     }
 
     if (styleKey === 'reverse_park') {
-      // Approach along a foreground lane in front of a visibly deeper background parking bay,
-      // brake & shift into R (white reverse lights + front counter-steer), then reverse >6m
-      // along a strictly convex C1 J-curve deep into the bay at (0, 0, 0) facing +Z while
-      // the camera smoothly orbits to a Rear 3/4 showcase angle (±2.38, 1.24) highlighting the taillights!
+      // Side-staged reverse park: drives forward along the parallel aisle beside the bay,
+      // brakes & shifts into R (white reverse lights + front counter-steer), then reverses ~5.85m
+      // along a strictly convex C1 J-curve into the bay at (0, 0, 0) facing +Z while camera
+      // pans smoothly into a crisp Full Left or Right Side Profile (±1.52 rad, ~±87°).
       var side = (revSideOverride === -1 || revSideOverride === 1) ? revSideOverride : reverseParkSide;
-      var stopX = -3.20 * side;
+      var stopX = -2.85 * side;
       var stopZ = 4.95;
-      var stopYaw = -0.86 * side;
+      var stopYaw = -0.80 * side;
       var sinY = Math.sin(stopYaw);
       var cosY = Math.cos(stopYaw);
-      var revAlpha = Math.abs(stopX) / Math.abs(sinY); // intersection with x = 0 at Q = (0, +2.195)
+      var revAlpha = Math.abs(stopX) / Math.abs(sinY); // intersection with x = 0 at Q = (0, +2.182)
       var qZ = stopZ - cosY * revAlpha;
-      var fwdP2 = { x: stopX - sinY * 1.65, z: stopZ - cosY * 1.65 };
+      var fwdP2 = { x: stopX - sinY * 1.55, z: stopZ - cosY * 1.55 };
       var revP1 = { x: stopX - sinY * (0.62 * revAlpha), z: stopZ - cosY * (0.62 * revAlpha) };
       return {
         bayPose: { x: 0.0, z: 0.0, yaw: 0.0, fadeInEnd: 0.40, fadeOutStart: 3.58, fadeOutEnd: 4.06 },
         camProfile: {
-          startTheta: DEFAULT_THETA * side,
+          startTheta: 1.05 * side,
           startPhi: 1.34,
-          restTheta: 2.38 * side,
-          restPhi: 1.24,
+          restTheta: 1.52 * side,
+          restPhi: 1.38,
           orbitStart: 1.45,
           orbitEnd: 3.56,
           offsetX: -0.75 * side,
-          offsetZ: 1.95,
-          radiusBoost: 3.2,
+          offsetZ: 1.85,
+          radiusBoost: 2.9,
           fadeInEnd: 0.0,
           returnStart: 1.50,
           returnEnd: 3.52
@@ -353,8 +354,8 @@
             dir: 1,
             duration: 1.15,
             ease: 'decel',
-            p0: { x: 6.8 * side, z: 1.2 },
-            p1: { x: 2.2 * side, z: 2.6 },
+            p0: { x: -3.4 * side, z: -6.8 },
+            p1: { x: -2.6 * side, z: 0.2 },
             p2: fwdP2,
             p3: { x: stopX, z: stopZ },
             straightFadeStart: 0.96,
@@ -420,11 +421,12 @@
     if (styleKey === 'bay_exit') {
       // Start parked inside a deeper rear studio bay (~5.4m back in the distance),
       // wake up DRLs with ignition ripple, pull smoothly forward into (0, 0, 0) facing +Z
-      // while camera sweeps smoothly into an elevated executive Side-Front Profile (+1.18, 1.22).
-      var bayX = -2.45;
+      // while camera pans smoothly into a sleek Side-Front Profile (±1.32 rad, ~±76°).
+      var exitSide = (revSideOverride === -1 || revSideOverride === 1) ? revSideOverride : bayExitSide;
+      var bayX = -2.45 * exitSide;
       var bayZ = -4.85;
-      var bayYaw = 0.62;
-      var exitAlpha = -bayX / Math.sin(bayYaw); // intersection with x = 0 at Q = (0, -1.418)
+      var bayYaw = 0.62 * exitSide;
+      var exitAlpha = Math.abs(bayX) / Math.abs(Math.sin(bayYaw)); // intersection with x = 0 at Q = (0, -1.418)
       var exitQZ = bayZ + Math.cos(bayYaw) * exitAlpha;
       var exitP1 = {
         x: bayX + Math.sin(bayYaw) * (0.62 * exitAlpha),
@@ -433,13 +435,13 @@
       return {
         bayPose: { x: bayX, z: bayZ, yaw: bayYaw, fadeInEnd: 0.24, fadeOutStart: 2.00, fadeOutEnd: 2.62 },
         camProfile: {
-          startTheta: DEFAULT_THETA,
+          startTheta: 0.88 * exitSide,
           startPhi: 1.34,
-          restTheta: 1.18,
-          restPhi: 1.22,
+          restTheta: 1.32 * exitSide,
+          restPhi: 1.36,
           orbitStart: 0.42,
           orbitEnd: 2.24,
-          offsetX: -0.45,
+          offsetX: -0.45 * exitSide,
           offsetZ: -0.95,
           radiusBoost: 1.15,
           fadeInEnd: 0.0,
@@ -587,11 +589,15 @@
   function startEntranceAnimation(styleOverride) {
     if (!currentContainer || hasCustomDemoAngle) return;
     var chosenStyle = resolveEntranceStyle(styleOverride);
-    var sideForReverse = reverseParkSide;
+    var sideForStyle = 1;
     if (chosenStyle === 'reverse_park') {
+      sideForStyle = reverseParkSide;
       reverseParkSide = -reverseParkSide;
+    } else if (chosenStyle === 'bay_exit') {
+      sideForStyle = bayExitSide;
+      bayExitSide = -bayExitSide;
     }
-    var choreo = buildEntranceChoreography(chosenStyle, sideForReverse);
+    var choreo = buildEntranceChoreography(chosenStyle, sideForStyle);
     var cp = choreo.camProfile || null;
     var initTheta = (cp && typeof cp.startTheta === 'number') ? cp.startTheta : DEFAULT_THETA;
     var initPhi = (cp && typeof cp.startPhi === 'number') ? cp.startPhi : DEFAULT_PHI;
@@ -2078,16 +2084,31 @@
     });
   }
 
-  function computeDynamicRadius(phi, aspect, visRatio) {
+  function computeDynamicRadius(phi, aspect, visRatio, theta) {
     var vr = clamp(typeof visRatio === 'number' ? visRatio : 1.0, 0.40, 1.0);
+    var th = (typeof theta === 'number' && isFinite(theta)) ? theta : orbit.theta;
     var vFovRad = (camera ? camera.fov : 34) * Math.PI / 180;
     var halfV = vFovRad / 2;
-    var effectiveHalfV = Math.atan(Math.tan(halfV) * vr);
-    var hFovRad = 2 * Math.atan(Math.tan(halfV) * Math.max(aspect, 0.6));
+    var tanHalfV = Math.tan(halfV);
+    var effectiveHalfV = Math.atan(tanHalfV * vr);
+    var tanHalfH = tanHalfV * Math.max(aspect, 0.6);
+    var halfH = Math.atan(tanHalfH);
 
     var rTop = 2.58 / Math.sin(effectiveHalfV);
-    var distH = 2.74 / Math.sin(hFovRad / 2);
-    var rHero = Math.max(6.4 / Math.max(vr, 0.72), distH);
+    var distH = 2.74 / Math.sin(halfH);
+
+    // Angle-aware horizontal fit so full ~4.8m side profiles (|theta| ~ PI/2) never clip bumpers on narrow phones
+    var halfLen = (currentModelSize && currentModelSize.z > 1.0) ? (currentModelSize.z * 0.505) : 2.42;
+    var halfWid = (currentModelSize && currentModelSize.x > 0.5) ? (currentModelSize.x * 0.515) : 0.98;
+    var absSin = Math.abs(Math.sin(th));
+    var absCos = Math.abs(Math.cos(th));
+    var projHalfX = halfLen * absSin + halfWid * absCos;
+    var sideFactor = smoothstep(0.65, 1.0, absSin);
+    var sideDepthMargin = halfWid * absSin + halfLen * absCos * 0.45;
+    var distSide = sideDepthMargin + (projHalfX * 1.19) / Math.max(tanHalfH, 0.18);
+    var effectiveDistH = lerp(distH, Math.max(distH, distSide), sideFactor);
+
+    var rHero = Math.max(6.4 / Math.max(vr, 0.72), effectiveDistH);
 
     var topFactor = smoothstep(DEFAULT_PHI, 0.14, phi);
     return lerp(rHero, rTop, topFactor);
@@ -2128,7 +2149,7 @@
     lastViewOffsetY = -1;
     applyCameraViewOffset();
     var visRatio = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
-    var fitR = computeDynamicRadius(orbit.targetPhi, aspect, visRatio);
+    var fitR = computeDynamicRadius(orbit.targetPhi, aspect, visRatio, orbit.targetTheta);
     orbit.targetRadius = fitR;
     if (elapsed < 0.1) {
       orbit.radius = fitR;
@@ -2177,7 +2198,7 @@
     applyCameraViewOffset();
 
     if (camera) {
-      orbit.targetRadius = computeDynamicRadius(orbit.targetPhi, camera.aspect, visRatio);
+      orbit.targetRadius = computeDynamicRadius(orbit.targetPhi, camera.aspect, visRatio, orbit.targetTheta);
     }
 
     orbit.theta += (orbit.targetTheta - orbit.theta) * damp;
@@ -2516,7 +2537,7 @@
         applyCameraViewOffset();
         if (camera) {
           var vr = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
-          var fitR = computeDynamicRadius(orbit.targetPhi, camera.aspect, vr);
+          var fitR = computeDynamicRadius(orbit.targetPhi, camera.aspect, vr, orbit.targetTheta);
           orbit.targetRadius = fitR;
           if (elapsed < 0.25) {
             orbit.radius = fitR;
@@ -2532,7 +2553,7 @@
         applyCameraViewOffset();
         if (camera) {
           var vr = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
-          var fitR = computeDynamicRadius(orbit.phi, camera.aspect, vr);
+          var fitR = computeDynamicRadius(orbit.phi, camera.aspect, vr, orbit.theta);
           orbit.targetRadius = fitR;
           orbit.radius = fitR;
           updateCameraPosition();
@@ -2581,7 +2602,7 @@
       applyCameraViewOffset();
       if (camera) {
         var vr = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
-        var exactR = computeDynamicRadius(orbit.phi, camera.aspect, vr);
+        var exactR = computeDynamicRadius(orbit.phi, camera.aspect, vr, orbit.theta);
         orbit.radius = exactR;
         orbit.targetRadius = exactR;
       }
