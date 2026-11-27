@@ -42,10 +42,11 @@ object AppUpdater {
 
     private const val LATEST_RELEASE_URL =
         "https://api.github.com/repos/flik6/car_plus/releases/latest"
-    private const val USER_AGENT = "CarPlus-Android"
-    private const val APK_ASSET_NAME = "CarPlus-debug.apk"
+    private const val USER_AGENT = "QiriPlus-Android"
+    private const val APK_ASSET_NAME = "QiriPlus-debug.apk"
+    private const val LEGACY_APK_ASSET_NAME = "CarPlus-debug.apk"
     private const val UPDATES_DIR_NAME = "updates"
-    private const val UPDATE_APK_FILENAME = "CarPlus-update.apk"
+    private const val UPDATE_APK_FILENAME = "QiriPlus-update.apk"
 
     private val VERSION_CODE_REGEX = Regex("""versionCode\s*=\s*(\d+)""")
     private val VERSION_NAME_REGEX = Regex("""versionName\s*=\s*([0-9.]+)""")
@@ -106,6 +107,8 @@ object AppUpdater {
 
         var downloadUrl = ""
         var assetSizeBytes = 0L
+        var legacyDownloadUrl = ""
+        var legacyAssetSizeBytes = 0L
         val assets = root.optJSONArray("assets")
         if (assets != null) {
             for (i in 0 until assets.length()) {
@@ -118,11 +121,18 @@ object AppUpdater {
                     assetSizeBytes = size
                     break
                 }
-                if (downloadUrl.isBlank() && name.endsWith(".apk", ignoreCase = true)) {
+                if (legacyDownloadUrl.isBlank() && name.equals(LEGACY_APK_ASSET_NAME, ignoreCase = true)) {
+                    legacyDownloadUrl = url
+                    legacyAssetSizeBytes = size
+                } else if (downloadUrl.isBlank() && name.endsWith(".apk", ignoreCase = true)) {
                     downloadUrl = url
                     assetSizeBytes = size
                 }
             }
+        }
+        if (downloadUrl.isBlank() && legacyDownloadUrl.isNotBlank()) {
+            downloadUrl = legacyDownloadUrl
+            assetSizeBytes = legacyAssetSizeBytes
         }
 
         val hasUpdate = if (parsedVersionCode > 0) {
@@ -159,12 +169,14 @@ object AppUpdater {
         require(url.isNotBlank()) { "下载地址为空" }
         val safeTag = versionTag.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "latest" }
         val updatesDir = File(context.cacheDir, UPDATES_DIR_NAME).apply { mkdirs() }
-        // Clean up any older cached update APKs before downloading a new version.
+        // Clean up any older cached update APKs (both QiriPlus-update-* and legacy CarPlus-update-*) before downloading.
         updatesDir.listFiles()?.forEach { old ->
-            if (old.isFile && old.name.endsWith(".apk")) runCatching { old.delete() }
+            if (old.isFile && (old.name.endsWith(".apk") || old.name.endsWith(".apk.tmp"))) {
+                runCatching { old.delete() }
+            }
         }
-        val targetFile = File(updatesDir, "CarPlus-update-$safeTag.apk")
-        val tempFile = File(updatesDir, "CarPlus-update-$safeTag.apk.tmp")
+        val targetFile = File(updatesDir, "QiriPlus-update-$safeTag.apk")
+        val tempFile = File(updatesDir, "QiriPlus-update-$safeTag.apk.tmp")
         if (tempFile.exists()) tempFile.delete()
 
         val conn = openFollowingRedirects(url)

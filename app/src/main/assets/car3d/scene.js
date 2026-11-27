@@ -23,6 +23,7 @@
   var hasCustomDemoAngle = false;
   var hasNotifiedFirstDrag = false;
   var collapsedVisibleRatio = 0.64;
+  var expandedVisibleRatio = 1.0;
   var smoothDeckProgress = 0;
   var lastViewOffsetY = -1;
   var lastViewOffsetW = 0;
@@ -1518,7 +1519,7 @@
     var effectiveHalfV = Math.atan(Math.tan(halfV) * vr);
     var hFovRad = 2 * Math.atan(Math.tan(halfV) * Math.max(aspect, 0.6));
 
-    var rTop = 2.72 / Math.sin(effectiveHalfV);
+    var rTop = 2.58 / Math.sin(effectiveHalfV);
     var distH = 2.74 / Math.sin(hFovRad / 2);
     var rHero = Math.max(6.4 / Math.max(vr, 0.72), distH);
 
@@ -1533,7 +1534,7 @@
     if (!camera) return;
     var w = lastResizeW || window.innerWidth || 360;
     var h = lastResizeH || window.innerHeight || 256;
-    var visRatio = lerp(collapsedVisibleRatio, 1.0, smoothDeckProgress);
+    var visRatio = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
     var yOff = Math.round((1.0 - visRatio) * h * 0.5);
     if (yOff !== lastViewOffsetY || w !== lastViewOffsetW || h !== lastViewOffsetH) {
       lastViewOffsetY = yOff;
@@ -1560,7 +1561,7 @@
     camera.aspect = aspect;
     lastViewOffsetY = -1;
     applyCameraViewOffset();
-    var visRatio = lerp(collapsedVisibleRatio, 1.0, smoothDeckProgress);
+    var visRatio = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
     var fitR = computeDynamicRadius(orbit.targetPhi, aspect, visRatio);
     orbit.targetRadius = fitR;
     if (elapsed < 0.1) {
@@ -1606,7 +1607,7 @@
     if (Math.abs(orbit.deckProgress - smoothDeckProgress) < 0.0005) {
       smoothDeckProgress = orbit.deckProgress;
     }
-    var visRatio = lerp(collapsedVisibleRatio, 1.0, smoothDeckProgress);
+    var visRatio = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
     applyCameraViewOffset();
 
     if (camera) {
@@ -1877,6 +1878,32 @@
         collapsedVisibleRatio = clamp(ratio, 0.40, 1.0);
         lastViewOffsetY = -1;
         applyCameraViewOffset();
+        if (camera) {
+          var vr = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
+          var fitR = computeDynamicRadius(orbit.targetPhi, camera.aspect, vr);
+          orbit.targetRadius = fitR;
+          if (elapsed < 0.25) {
+            orbit.radius = fitR;
+          }
+          updateCameraPosition();
+        }
+      }
+    },
+    setExpandedVisibleRatio: function (ratio) {
+      if (typeof ratio === 'number' && isFinite(ratio)) {
+        expandedVisibleRatio = clamp(ratio, 0.40, 1.0);
+        lastViewOffsetY = -1;
+        applyCameraViewOffset();
+        if (camera) {
+          var vr = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
+          var fitR = computeDynamicRadius(orbit.phi, camera.aspect, vr);
+          orbit.targetRadius = fitR;
+          orbit.radius = fitR;
+          updateCameraPosition();
+          if (renderActive && renderer && scene) {
+            renderer.render(scene, camera);
+          }
+        }
       }
     },
     setDeckProgress: function (progress) {
@@ -1921,7 +1948,7 @@
 
       applyCameraViewOffset();
       if (camera) {
-        var vr = lerp(collapsedVisibleRatio, 1.0, smoothDeckProgress);
+        var vr = lerp(collapsedVisibleRatio, expandedVisibleRatio, smoothDeckProgress);
         var exactR = computeDynamicRadius(orbit.phi, camera.aspect, vr);
         orbit.radius = exactR;
         orbit.targetRadius = exactR;

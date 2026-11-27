@@ -8,8 +8,6 @@ import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Outline
 import android.graphics.Typeface
@@ -420,7 +418,7 @@ class SettingsScreen(
         val identityCol = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
         }
-        val displayTitle = account.nickname.ifBlank { account.username.ifBlank { "CarPlus 车主" } }
+        val displayTitle = account.nickname.ifBlank { account.username.ifBlank { "Qiri+ 车主" } }
         identityCol.addView(
             text(displayTitle, 17.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 maxLines = 1
@@ -497,7 +495,7 @@ class SettingsScreen(
         // 3. Group 2: 通用 (vehicle-scoped trip track toggle lives in 安全性)
         body.addView(AppComponents.createSectionHeader(activity, "通用"))
 
-        // About CarPlus unified row with live version + update dot
+        // About Qiri+ unified row with live version + update dot
         val (curName, _) = AppUpdater.getCurrentVersion(activity)
         val dotSize = dp(7)
         val badgeDot = View(activity).apply {
@@ -514,7 +512,7 @@ class SettingsScreen(
         val aboutRow = AppComponents.createListRow(
             context = activity,
             icon = AppIconType.INFO_CIRCLE,
-            title = "关于 CarPlus",
+            title = "关于 Qiri+",
             trailingText = "v$curName",
             trailingView = badgeDot,
             showChevron = true,
@@ -871,7 +869,7 @@ class SettingsScreen(
     }
 
     // =========================================================================
-    // Page 3: About CarPlus ("关于 CarPlus")
+    // Page 3: About Qiri+ ("关于 Qiri+")
     // =========================================================================
 
     private fun buildAboutView(): View {
@@ -884,7 +882,7 @@ class SettingsScreen(
         root.addView(
             AppComponents.createTopBar(
                 context = activity,
-                title = "关于 CarPlus",
+                title = "关于 Qiri+",
                 onBack = { navigateTo(SubPage.MAIN, direction = -1) }
             )
         )
@@ -911,7 +909,7 @@ class SettingsScreen(
         brandSection.addView(buildAboutBrandBadge(), LinearLayout.LayoutParams(dp(68), dp(68)))
 
         brandSection.addView(
-            text("CarPlus", 20f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+            text("Qiri+", 20f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 gravity = Gravity.CENTER
                 letterSpacing = 0.02f
             },
@@ -1073,25 +1071,15 @@ class SettingsScreen(
                     outline.setRoundRect(0, 0, view.width, view.height, dpF(18f))
                 }
             }
-            contentDescription = "CarPlus 品牌标识"
+            contentDescription = "Qiri+ 品牌标识"
         }
 
-        // Convert black-on-white foreground vector artwork into crisp silver-white on transparent
-        // so the brand mark integrates seamlessly onto the dark automotive badge surface.
-        val invertToWhiteAlpha = ColorMatrix(
-            floatArrayOf(
-                0f, 0f, 0f, 0f, 245f,
-                0f, 0f, 0f, 0f, 247f,
-                0f, 0f, 0f, 0f, 250f,
-                -0.333f, -0.333f, -0.334f, 1f, 0f
-            )
-        )
+        // Crisp pure-white Qiri+ vector mark directly on the dark automotive badge surface.
         val logoImage = ImageView(activity).apply {
-            setImageResource(R.drawable.ic_launcher_foreground)
+            setImageResource(R.drawable.ic_qiri_adaptive_mark)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            colorFilter = ColorMatrixColorFilter(invertToWhiteAlpha)
         }
-        badge.addView(logoImage, FrameLayout.LayoutParams(dp(86), dp(86), Gravity.CENTER))
+        badge.addView(logoImage, FrameLayout.LayoutParams(dp(56), dp(18), Gravity.CENTER))
         return badge
     }
 
@@ -1285,7 +1273,7 @@ class SettingsScreen(
             when (val res = AppUpdater.installApkResult(activity, existingApk)) {
                 is InstallApkResult.Launched -> Unit
                 is InstallApkResult.NeedsPermission ->
-                    toast("请允许 CarPlus 安装未知应用，授权后再次点击安装")
+                    toast("请允许 Qiri+ 安装未知应用，授权后再次点击安装")
                 is InstallApkResult.Failed -> toast(res.message)
             }
             return
@@ -1334,7 +1322,7 @@ class SettingsScreen(
                 when (val res = AppUpdater.installApkResult(activity, apkFile)) {
                     is InstallApkResult.Launched -> Unit
                     is InstallApkResult.NeedsPermission ->
-                        toast("请允许 CarPlus 安装未知应用，授权后再次点击安装")
+                        toast("请允许 Qiri+ 安装未知应用，授权后再次点击安装")
                     is InstallApkResult.Failed -> toast(res.message)
                 }
             }.onFailure { err ->
@@ -1541,7 +1529,7 @@ class SettingsScreen(
 
         return AccountProfileData(
             nickname = savedNickname.ifBlank {
-                if (fallbackMobile.length >= 4) "车主 ${fallbackMobile.takeLast(4)}" else "CarPlus 车主"
+                if (fallbackMobile.length >= 4) "车主 ${fallbackMobile.takeLast(4)}" else "Qiri+ 车主"
             },
             username = savedUsername.ifBlank { fallbackUserId },
             mobile = savedMobile.ifBlank { fallbackMobile },
@@ -1671,7 +1659,7 @@ class SettingsScreen(
             }
             frame.addView(iv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         } else {
-            val monogram = displayName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "C"
+            val monogram = displayName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "Q"
             val tv = text(monogram, (sizeDp * 0.38f).coerceAtLeast(18f), ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 gravity = Gravity.CENTER
             }
@@ -1859,7 +1847,7 @@ class SettingsScreen(
             RegexOption.IGNORE_CASE
         )
         private val RELEASE_TITLE_ONLY_REGEX = Regex(
-            """^CarPlus\s+v[0-9]+(?:\.[0-9]+)*(?:\s*\(Build\s+\d+\))?$""",
+            """^(?:Qiri\+|CarPlus)\s+v[0-9]+(?:\.[0-9]+)*(?:\s*\(Build\s+\d+\))?$""",
             RegexOption.IGNORE_CASE
         )
     }

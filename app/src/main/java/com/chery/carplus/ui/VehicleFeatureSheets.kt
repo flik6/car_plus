@@ -2194,7 +2194,7 @@ internal class VehicleFeatureSheets(
             options += NavOption("高德地图", "步行 / 驾车导航前往车辆") {
                 val primary = Intent(
                     Intent.ACTION_VIEW,
-                    Uri.parse("androidamap://navi?sourceApplication=CarPlus&poiname=$encLabel&lat=$lat&lon=$lon&dev=0&style=2")
+                    Uri.parse("androidamap://navi?sourceApplication=QiriPlus&poiname=$encLabel&lat=$lat&lon=$lon&dev=0&style=2")
                 ).setPackage("com.autonavi.minimap")
                 val fallback = Intent(
                     Intent.ACTION_VIEW,
@@ -2218,7 +2218,7 @@ internal class VehicleFeatureSheets(
             options += NavOption("腾讯地图", "导航前往车辆位置") {
                 val intent = Intent(
                     Intent.ACTION_VIEW,
-                    Uri.parse("qqmap://map/routeplan?type=walk&to=$encLabel&tocoord=$lat,$lon&referer=CarPlus")
+                    Uri.parse("qqmap://map/routeplan?type=walk&to=$encLabel&tocoord=$lat,$lon&referer=QiriPlus")
                 ).setPackage("com.tencent.map")
                 runCatching { context.startActivity(intent) }.onFailure { toast("无法拉起腾讯地图") }
             }

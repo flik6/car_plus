@@ -907,8 +907,8 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
             PendingIntent.getActivity(this, 42089, it, piFlags)
         }
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("蓝牙无感钥匙运行中")
+            .setSmallIcon(R.drawable.ic_stat_qiri)
+            .setContentTitle("Qiri+ 蓝牙无感钥匙运行中")
             .setContentText(contentText)
             .setOngoing(true)
             .setSilent(true)

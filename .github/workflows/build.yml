@@ -44,13 +44,13 @@ jobs:
           exit "$rc"
 
       - name: Copy APK artifact
-        run: cp app/build/outputs/apk/debug/app-debug.apk CarPlus-debug.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk QiriPlus-debug.apk
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: CarPlus-debug-apk
-          path: CarPlus-debug.apk
+          name: QiriPlus-debug-apk
+          path: QiriPlus-debug.apk
 
       - name: Extract version metadata
         id: meta
@@ -81,9 +81,9 @@ jobs:
           ')
           echo "vcode=${VCODE}" >> "$GITHUB_OUTPUT"
           echo "vname=${VNAME}" >> "$GITHUB_OUTPUT"
-          echo "Prepared metadata: CarPlus v${VNAME} (Build ${VCODE})"
+          echo "Prepared metadata: Qiri+ v${VNAME} (Build ${VCODE})"
 
-      - name: Publish CarPlus-debug.apk to GitHub Release
+      - name: Publish QiriPlus-debug.apk to GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,7 +100,7 @@ jobs:
           sha = os.environ["SHA"]
           vname = os.environ["VNAME"]
           vcode = os.environ["VCODE"]
-          title = f"CarPlus v{vname} (Build {vcode})"
+          title = f"Qiri+ v{vname} (Build {vcode})"
           body = f"versionName={vname} versionCode={vcode} commit={sha}"
 
           def api(method, url, data=None, content_type="application/json"):
@@ -108,7 +108,7 @@ jobs:
                   "Authorization": f"Bearer {token}",
                   "Accept": "application/vnd.github+json",
                   "X-GitHub-Api-Version": "2022-11-28",
-                  "User-Agent": "carplus-ci",
+                  "User-Agent": "qiriplus-ci",
               }
               if data is not None:
                   if isinstance(data, (dict, list)):
@@ -137,21 +137,21 @@ jobs:
               print(f"::error::{msg}")
               sys.exit(1)
 
-          apk_bytes = open("CarPlus-debug.apk", "rb").read()
+          apk_bytes = open("QiriPlus-debug.apk", "rb").read()
 
           def upload_apk(rid):
               c, r = api("GET", f"https://api.github.com/repos/{repo}/releases/{rid}/assets")
               if c == 200 and isinstance(r, list):
                   for asset in r:
-                      if asset.get("name") == "CarPlus-debug.apk":
+                      if asset.get("name") in ("QiriPlus-debug.apk", "CarPlus-debug.apk"):
                           dc, dr = api("DELETE", f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}")
                           if dc not in (200, 204):
                               fail("delete_asset", dc, dr)
-              u = f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name=CarPlus-debug.apk"
+              u = f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name=QiriPlus-debug.apk"
               uc, ur = api("POST", u, data=apk_bytes, content_type="application/vnd.android.package-archive")
               if uc not in (200, 201):
                   fail("upload_asset", uc, ur)
-              print(f"Uploaded CarPlus-debug.apk to release {rid} ({len(apk_bytes)} B, HTTP {uc})")
+              print(f"Uploaded QiriPlus-debug.apk to release {rid} ({len(apk_bytes)} B, HTTP {uc})")
 
           # 1. Ensure git tag 'latest' points to current SHA
           code, res = api("PATCH", f"https://api.github.com/repos/{repo}/git/refs/tags/latest", {"sha": sha, "force": True})

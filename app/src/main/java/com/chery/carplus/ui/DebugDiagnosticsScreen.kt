@@ -44,7 +44,7 @@ import java.util.Locale
 
 /**
  * Hidden developer diagnostics screen unlocked by 5 rapid taps on the version
- * number in "关于 CarPlus". Provides live visibility into BLE matching & nearby
+ * number in "关于 Qiri+". Provides live visibility into BLE matching & nearby
  * Chery vehicles, vehicle telemetry, 3D model CDN cache, widgets, and BLE logs.
  */
 class DebugDiagnosticsScreen(
@@ -437,7 +437,7 @@ class DebugDiagnosticsScreen(
                 listOf(
                     "已添加桌面小组件" to "4×1:$cBar · 2×2:$cCompact · 4×2:$cMedium · 4×3:$cLarge",
                     "小组件最近同步" to if (widgetSnap.updatedAtMs > 0L) "${formatTime(widgetSnap.updatedAtMs)} (${widgetSnap.primaryStatus} · ${widgetSnap.fuelPercent}%)" else "尚未同步",
-                    "应用版本" to "CarPlus v$verName (Build $verCode)",
+                    "应用版本" to "Qiri+ v$verName (Build $verCode)",
                     "设备与系统" to "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
                     "屏幕参数" to "${dm.widthPixels}×${dm.heightPixels} · density=${String.format(Locale.US, "%.2f", dm.density)}",
                     "云端令牌状态" to "accessToken:${if (profile.accessToken.isNotBlank()) "有效(${profile.accessToken.length}B)" else "空"} · sdkToken:${if (profile.sdkToken.isNotBlank()) "有效" else "空"}"
@@ -504,7 +504,7 @@ class DebugDiagnosticsScreen(
         val ble = bleController.getDebugSnapshot(profile)
         val (verName, verCode) = AppUpdater.getCurrentVersion(context)
         val report = buildString {
-            appendLine("=== CarPlus Debug Report (Sanitized) ===")
+            appendLine("=== Qiri+ Debug Report (Sanitized) ===")
             appendLine("App: v$verName (Build $verCode)")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             appendLine("Vehicle: ${modelNameProvider()} / VIN=${maskMiddle(profile.vin, 6, 4)}")
@@ -522,7 +522,7 @@ class DebugDiagnosticsScreen(
             ble.recentLogs.take(30).forEach { appendLine("  $it") }
         }
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        cm?.setPrimaryClip(ClipData.newPlainText("CarPlus Debug Report", report))
+        cm?.setPrimaryClip(ClipData.newPlainText("Qiri+ Debug Report", report))
         toast("已复制脱敏诊断报告")
     }
 

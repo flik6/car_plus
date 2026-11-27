@@ -42,7 +42,7 @@ enum class CarWidgetStyle(val layoutRes: Int) {
 
 data class CarWidgetSnapshot(
     val vin: String = "",
-    val modelName: String = "CarPlus",
+    val modelName: String = "Qiri+",
     val plateNo: String = "",
     val fuelPercent: Int = 0,
     val hasFuelData: Boolean = false,
@@ -94,7 +94,8 @@ object CarWidgetStateStore {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return CarWidgetSnapshot(
             vin = prefs.getString(KEY_VIN, "").orEmpty(),
-            modelName = prefs.getString(KEY_MODEL_NAME, "CarPlus").orEmpty().ifBlank { "CarPlus" },
+            modelName = prefs.getString(KEY_MODEL_NAME, "Qiri+").orEmpty()
+                .let { if (it.isBlank() || it == "CarPlus") "Qiri+" else it },
             plateNo = prefs.getString(KEY_PLATE_NO, "").orEmpty(),
             fuelPercent = prefs.getInt(KEY_FUEL_PERCENT, 0).coerceIn(0, 100),
             hasFuelData = prefs.getBoolean(KEY_HAS_FUEL, false),
@@ -354,7 +355,7 @@ object CarWidgetManager {
     ): RemoteViews {
         val rv = RemoteViews(context.packageName, style.layoutRes)
 
-        // Tap header or vehicle image to launch CarPlus Home
+        // Tap header or vehicle image to launch Qiri+ Home
         val openAppPi = buildOpenAppPendingIntent(context)
         rv.setOnClickPendingIntent(R.id.widget_header_area, openAppPi)
         if (style != CarWidgetStyle.BAR) {

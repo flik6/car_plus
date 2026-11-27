@@ -88,7 +88,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Consumer-facing CarPlus minimalist dark interface.
+ * Consumer-facing Qiri+ minimalist dark interface.
  *
  * Flow:
  * 1. First-launch User Agreement & Privacy Policy modal (persisted once accepted).
@@ -142,21 +142,22 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
     }
 
-    private class PullDownInterceptScrollView(
+    private class DeckGestureLayout(
         context: Context,
-        private val isDeckExpanded: () -> Boolean,
-        private val canStartCollapseAt: (rawX: Float, rawY: Float) -> Boolean,
+        private val getDeckProgress: () -> Float,
+        private val isTouchInsideScrollArea: (rawX: Float, rawY: Float) -> Boolean,
+        private val canScrollAreaPullDown: () -> Boolean,
         private val onDragStart: (direction: Int) -> Unit,
         private val onDragMove: (dy: Float, velocityY: Float, direction: Int) -> Unit,
         private val onDragEnd: (totalDy: Float, velocityY: Float, direction: Int) -> Unit
-    ) : ScrollView(context) {
+    ) : LinearLayout(context) {
         private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
         private var downX = 0f
         private var downY = 0f
         private var activePointerId = MotionEvent.INVALID_POINTER_ID
         private var velocityTracker: android.view.VelocityTracker? = null
         private var dragDirection = 0 // +1 = pull down to expand, -1 = pull up to collapse
-        private var collapseEligible = false
+        private var touchInScrollArea = false
 
         private fun recycleVelocityTracker() {
             velocityTracker?.recycle()
@@ -211,16 +212,21 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private fun tryStartDrag(rawX: Float, rawY: Float): Boolean {
             val dx = rawX - downX
             val dy = rawY - downY
-            if (scrollY != 0) return false
-            if (!isDeckExpanded() && dy > touchSlop && dy > abs(dx) * 1.15f) {
+            val progress = getDeckProgress()
+            val atScrollTop = !touchInScrollArea || canScrollAreaPullDown()
+            if (!atScrollTop) return false
+
+            if (progress < 0.995f && dy > touchSlop && dy > abs(dx) * 1.15f) {
                 dragDirection = 1
                 downY = rawY
+                parent?.requestDisallowInterceptTouchEvent(true)
                 onDragStart(1)
                 return true
             }
-            if (isDeckExpanded() && collapseEligible && dy < -touchSlop && abs(dy) > abs(dx) * 1.15f) {
+            if (progress > 0.005f && dy < -touchSlop && abs(dy) > abs(dx) * 1.15f) {
                 dragDirection = -1
                 downY = rawY
+                parent?.requestDisallowInterceptTouchEvent(true)
                 onDragStart(-1)
                 return true
             }
@@ -235,7 +241,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     downX = ev.rawX
                     downY = ev.rawY
                     dragDirection = 0
-                    collapseEligible = isDeckExpanded() && canStartCollapseAt(ev.rawX, ev.rawY)
+                    touchInScrollArea = isTouchInsideScrollArea(ev.rawX, ev.rawY)
                     addMovementRaw(ev)
                 }
                 MotionEvent.ACTION_POINTER_UP -> {
@@ -250,43 +256,32 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     dragDirection = 0
-                    collapseEligible = false
+                    touchInScrollArea = false
                     activePointerId = MotionEvent.INVALID_POINTER_ID
                     recycleVelocityTracker()
                 }
             }
-            return super.onInterceptTouchEvent(ev)
+            return false
         }
 
         override fun onTouchEvent(ev: MotionEvent): Boolean {
-            if (ev.actionMasked == MotionEvent.ACTION_POINTER_UP) {
-                handlePointerUp(ev)
-                return if (dragDirection != 0) true else super.onTouchEvent(ev)
-            }
-            if (dragDirection == 0) {
-                if (ev.actionMasked == MotionEvent.ACTION_MOVE) {
-                    addMovementRaw(ev)
-                    val (rx, ry) = activeRawCoords(ev)
-                    if (tryStartDrag(rx, ry)) {
-                        val cancelEv = MotionEvent.obtain(ev)
-                        cancelEv.action = MotionEvent.ACTION_CANCEL
-                        super.onTouchEvent(cancelEv)
-                        cancelEv.recycle()
-                    }
-                }
-                if (dragDirection == 0) {
-                    if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
-                        activePointerId = MotionEvent.INVALID_POINTER_ID
-                        recycleVelocityTracker()
-                    }
-                    return super.onTouchEvent(ev)
-                }
-            }
             when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    // Claim ACTION_DOWN when no child consumed it (e.g., blank space in deck/pull strip)
+                    // so subsequent ACTION_MOVE events can initiate expand/collapse drag.
+                    return true
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    handlePointerUp(ev)
+                    return true
+                }
                 MotionEvent.ACTION_MOVE -> {
                     addMovementRaw(ev)
+                    val (rx, ry) = activeRawCoords(ev)
+                    if (dragDirection == 0 && !tryStartDrag(rx, ry)) {
+                        return true
+                    }
                     val vy = computeVelocityY()
-                    val (_, ry) = activeRawCoords(ev)
                     onDragMove(ry - downY, vy, dragDirection)
                     return true
                 }
@@ -296,10 +291,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     val (_, ry) = activeRawCoords(ev)
                     val dir = dragDirection
                     dragDirection = 0
-                    collapseEligible = false
+                    touchInScrollArea = false
                     activePointerId = MotionEvent.INVALID_POINTER_ID
                     recycleVelocityTracker()
-                    onDragEnd(ry - downY, vy, dir)
+                    if (dir != 0) {
+                        onDragEnd(ry - downY, vy, dir)
+                    }
                     return true
                 }
             }
@@ -396,8 +393,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var parkingStatusView: TextView? = null
     private var channelBadgeIcon: AppIconView? = null
     private var transientToastBanner: TextView? = null
-    private var homeStageFrame: LinearLayout? = null
-    private var lowerOverlayContainer: PullDownInterceptScrollView? = null
+    private var homeStageFrame: FrameLayout? = null
+    private var homeLowerSheetView: DeckGestureLayout? = null
+    private var lowerOverlayContainer: ScrollView? = null
+    private var homeCollapsedHeroHeightPx: Int = 0
+    private var homeExpandedHeroHeightPx: Int = 0
+    private var lastSentExpandedVisibleRatio: Float = 1.0f
     private var homeHeaderView: View? = null
     private var carHeroContainerView: FrameLayout? = null
     private var homeMenuSectionView: View? = null
@@ -692,7 +693,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 finish()
                             } else {
                                 lastBackExitPromptMs = now
-                                showHomeStatus("再按一次退出 CarPlus")
+                                showHomeStatus("再按一次退出 Qiri+")
                             }
                         }
                     }
@@ -1549,14 +1550,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         AppSystemInsets.applyBottomNavPadding(root)
         presentScreen(Screen.WELCOME, root)
 
-        // Centered oversized monochrome CHERY vector emblem only (no CarPlus text)
+        // Centered oversized monochrome Qiri+ vector emblem (3.333:1 natural ratio)
         val screenW = resources.displayMetrics.widthPixels
-        val logoW = (screenW * 0.68f).roundToInt().coerceIn(dp(200), dp(264))
-        val logoH = (logoW / 3.213f).roundToInt().coerceAtLeast(dp(64))
+        val logoW = (screenW * 0.72f).roundToInt().coerceIn(dp(216), dp(280))
+        val logoH = (logoW / 3.333f).roundToInt().coerceAtLeast(dp(64))
         val logoView = ImageView(this).apply {
-            setImageResource(R.drawable.ic_chery_adaptive_mark)
+            setImageResource(R.drawable.ic_qiri_adaptive_mark)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = "CHERY Logo"
+            contentDescription = "Qiri+ Logo"
         }
         root.addView(
             logoView,
@@ -1637,7 +1638,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     // =========================================================================
-    // Screen 2B: CarPlus Dark Login Form (Password & SMS + 0843 Device Binding)
+    // Screen 2B: Qiri+ Dark Login Form (Password & SMS + 0843 Device Binding)
     // =========================================================================
 
     private fun showLoginFormScreen(startWithSms: Boolean) {
@@ -2248,6 +2249,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         deckExpandAnimator?.cancel()
         deckHeightAnimator?.cancel()
         quickDeckTargetHeightPx = 0
+        homeCollapsedHeroHeightPx = 0
+        homeExpandedHeroHeightPx = 0
+        lastSentExpandedVisibleRatio = 1.0f
+        homeLowerSheetView = null
         deckExpandProgress = 0f
         deckDragStartProgress = 0f
         quickDeckExpanded = false
@@ -2311,16 +2316,21 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return
         }
 
-        // 2. Stage Layout: Fixed-height 3D Car Hero -> Fixed 4-button Quick Row -> Expandable Control Deck (below 4 buttons, above 温度) + Scrollable Menu Rows
-        val stageFrame = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        // 2. Stage Layout: FrameLayout holding full-height 3D Car Hero behind opaque Lower Sheet.
+        //    When pulled down, the 3D hero viewport expands smoothly (zero WebView resize!) while
+        //    the car rotates to top-down and enlarges, and the extra control deck unfolds strictly
+        //    below the 4 quick buttons & above the pull bar and scrollable menu (温度/地点/安全性).
+        val stageFrame = FrameLayout(this).apply {
             setBackgroundColor(BG_HOME)
             clipChildren = true
         }
         homeStageFrame = stageFrame
         homeShell.addView(stageFrame, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        val carStageHeight = dp(248)
+        val collapsedHeroH = dp(248)
+        val expandedStageH = computeExpandedStageHeight()
+        homeCollapsedHeroHeightPx = collapsedHeroH
+        homeExpandedHeroHeightPx = expandedStageH
 
         val carHeroContainer = FrameLayout(this).apply {
             setBackgroundColor(BG_HOME)
@@ -2329,7 +2339,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         carVisual = VehicleVisualView(this).apply {
             modelKey = uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "arrizo8" }
             vehicleLocked = true
-            setCollapsedVisibleRatio(1.0f)
+            setCollapsedVisibleRatio(collapsedHeroH.toFloat() / expandedStageH.toFloat())
             isClickable = true
             isFocusable = true
             contentDescription = "3D 车辆视图，单击闪灯，双击展开或收起更多车控"
@@ -2346,13 +2356,21 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         buildTpmsOverlay(carHeroContainer)
         stageFrame.addView(
             carHeroContainer,
-            LinearLayout.LayoutParams(MATCH_PARENT, carStageHeight)
+            FrameLayout.LayoutParams(MATCH_PARENT, expandedStageH, Gravity.TOP)
         )
 
-        // 3. Pinned 4-button Quick Action Row (stays fixed directly below 3D car; extra controls unfold strictly below it & above 温度)
-        buildIconQuickActionRow(stageFrame)
+        // 3. Lower Sheet (opaque BG_HOME):
+        //    - Pinned 4-button Quick Action Row
+        //    - Red-boxed Expandable Control Deck (OUTSIDE ScrollView so scrolling NEVER pushes it under the 4 buttons!)
+        //    - Pull Handle Pill ("小白条")
+        //    - Scrollable Menu Rows (温度 / 充电? / 地点 / 安全性) + Footer
+        val lowerScroll = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            setBackgroundColor(BG_HOME)
+        }
+        lowerOverlayContainer = lowerScroll
 
-        // 4. Lower Scrollable Section: Expandable Control Deck (between 4 quick buttons and 温度) + Pull Handle + Menu Rows + Footer
         val tempLocation = IntArray(2)
         fun isPointInsideView(view: View?, rawX: Float, rawY: Float): Boolean {
             if (view == null || view.visibility != View.VISIBLE || view.width <= 0 || view.height <= 0) return false
@@ -2362,13 +2380,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return rawX >= l && rawX <= l + view.width && rawY >= t && rawY <= t + view.height
         }
 
-        val lowerScroll = PullDownInterceptScrollView(
+        val lowerSheet = DeckGestureLayout(
             context = this,
-            isDeckExpanded = { quickDeckExpanded },
-            canStartCollapseAt = { rx, ry ->
-                isPointInsideView(quickDeckClipContainer, rx, ry) ||
-                    isPointInsideView(quickDeckPullHintStrip, rx, ry)
-            },
+            getDeckProgress = { deckExpandProgress },
+            isTouchInsideScrollArea = { rx, ry -> isPointInsideView(lowerScroll, rx, ry) },
+            canScrollAreaPullDown = { lowerScroll.scrollY == 0 },
             onDragStart = { dir ->
                 deckExpandAnimator?.cancel()
                 deckHeightAnimator?.cancel()
@@ -2380,16 +2396,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             },
             onDragMove = { dy, _, _ ->
-                val rangePx = quickDeckTargetHeightPx.takeIf { it > 0 }?.toFloat() ?: dpF(165f)
+                val deckH = quickDeckTargetHeightPx.takeIf { it > 0 } ?: dp(172)
+                val heroDelta = (effectiveExpandedHeroHeightPx(deckH) - collapsedHeroH).coerceAtLeast(0)
+                val rangePx = (heroDelta + deckH).toFloat().coerceAtLeast(dpF(180f))
                 val p = (deckDragStartProgress + dy / rangePx).coerceIn(0f, 1f)
                 applyDeckExpandProgress(p)
             },
             onDragEnd = { _, velocityY, dir ->
                 val shouldExpand = when {
-                    velocityY > 850f -> true
-                    velocityY < -850f -> false
-                    dir > 0 -> deckExpandProgress >= 0.36f
-                    else -> deckExpandProgress > 0.64f
+                    velocityY > 750f -> true
+                    velocityY < -750f -> false
+                    dir > 0 -> deckExpandProgress >= 0.32f
+                    else -> deckExpandProgress > 0.68f
                 }
                 if (shouldExpand != quickDeckExpanded) {
                     AppHaptics.perform(homeStageFrame, HapticLevel.MEDIUM_CONFIRM)
@@ -2397,24 +2415,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 animateDeckTo(shouldExpand)
             }
         ).apply {
-            isFillViewport = true
-            isVerticalScrollBarEnabled = false
-            setBackgroundColor(BG_HOME)
-        }
-        lowerOverlayContainer = lowerScroll
-
-        val lowerContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(BG_HOME)
-            setPadding(0, 0, 0, dp(28))
+            clipChildren = true
+            clipToPadding = true
         }
-        AppSystemInsets.applyBottomNavPadding(lowerScroll)
-        lowerScroll.addView(lowerContent, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        homeLowerSheetView = lowerSheet
 
-        // 4a. Expandable Control Deck sits strictly BELOW the 4 quick buttons and ABOVE the pull handle & 温度
-        buildExpandableQuickDeck(lowerContent)
+        // 3a. Pinned 4-button Quick Action Row (directly below 3D car)
+        buildIconQuickActionRow(lowerSheet)
 
-        // 4b. Subtle minimalist pull handle (between 4 quick buttons / expanded deck and 温度; tap or drag to toggle)
+        // 3b. Expandable Control Deck sits strictly BELOW the 4 quick buttons and ABOVE pull handle & 温度
+        buildExpandableQuickDeck(lowerSheet)
+
+        // 3c. Subtle minimalist pull handle (between 4 quick buttons / expanded deck and 温度; tap or drag to toggle)
         val pullHintStrip = FrameLayout(this).apply {
             isClickable = true
             isFocusable = true
@@ -2429,14 +2443,29 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         pullHintStrip.addView(pullHintBar, FrameLayout.LayoutParams(dp(36), dpF(3f).roundToInt(), Gravity.CENTER))
         quickDeckPullHintStrip = pullHintStrip
-        lowerContent.addView(pullHintStrip, lp(height = dp(20)))
+        lowerSheet.addView(pullHintStrip, lp(height = dp(20)))
 
+        // 3d. Scrollable Menu Rows (温度 / 充电? / 地点 / 安全性) + Footer
+        val lowerContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(BG_HOME)
+            setPadding(0, 0, 0, dp(28))
+        }
+        AppSystemInsets.applyBottomNavPadding(lowerScroll)
+        lowerScroll.addView(lowerContent, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         buildMenuRows(lowerContent)
         buildHomeFooter(lowerContent)
 
-        stageFrame.addView(
+        lowerSheet.addView(
             lowerScroll,
             LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
+        )
+
+        stageFrame.addView(
+            lowerSheet,
+            FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.TOP).apply {
+                topMargin = collapsedHeroH
+            }
         )
 
         // Floating transient feedback pill (hidden when idle so Screen 3 stays clean)
@@ -4079,7 +4108,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val rr = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.END, true, 0, 0, dp(20), dp(14))
         tpmsRrPressure = rr.first
         tpmsRrTemp = rr.second
-        heroContainer.addView(overlay, matchParent())
+        heroContainer.addView(
+            overlay,
+            FrameLayout.LayoutParams(
+                MATCH_PARENT,
+                homeCollapsedHeroHeightPx.takeIf { it > 0 } ?: dp(248),
+                Gravity.TOP
+            )
+        )
     }
 
     private fun formatCornerTyrePressure(pressureRaw: String): String {
@@ -4158,6 +4194,23 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         rebuildQuickActionRow()
     }
 
+    private fun computeExpandedStageHeight(): Int {
+        val screenH = resources.displayMetrics.heightPixels
+        return (screenH * 0.405f).roundToInt().coerceIn(dp(296), dp(364))
+    }
+
+    private fun effectiveExpandedHeroHeightPx(deckTargetH: Int): Int {
+        val collapsedHeroH = homeCollapsedHeroHeightPx.takeIf { it > 0 } ?: dp(248)
+        val expandedHeroH = homeExpandedHeroHeightPx.takeIf { it > 0 } ?: computeExpandedStageHeight()
+        val stageH = homeStageFrame?.height?.takeIf { it > 0 } ?: return expandedHeroH
+        val quickRowH = quickActionRow?.height?.takeIf { it > 0 } ?: dp(68)
+        val pullBarH = quickDeckPullHintStrip?.height?.takeIf { it > 0 } ?: dp(20)
+        val minMenuPeek = if (quickDeckEditMode) dp(12) else dp(52)
+        val maxSafeHero = (stageH - quickRowH - deckTargetH - pullBarH - minMenuPeek)
+            .coerceAtLeast(collapsedHeroH)
+        return expandedHeroH.coerceAtMost(maxSafeHero)
+    }
+
     private fun buildExpandableQuickDeck(parent: LinearLayout) {
         val clip = FrameLayout(this).apply {
             setBackgroundColor(BG_HOME)
@@ -4218,9 +4271,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         quickDeckGridHost = gridHost
         container.addView(gridHost, lp())
 
+        // Anchor to Gravity.TOP so collapsing genuinely folds/retracts the deck in place
+        // rather than sliding/shoving upper control rows upward underneath the 4 quick buttons.
         clip.addView(
             container,
-            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM)
+            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP)
         )
         parent.addView(clip, LinearLayout.LayoutParams(MATCH_PARENT, 0))
     }
@@ -4240,21 +4295,57 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         return measured
     }
 
+    private fun syncCarExpandedVisibleRatio(heroH: Int) {
+        val fullExpandedH = homeExpandedHeroHeightPx.takeIf { it > 0 } ?: computeExpandedStageHeight()
+        val ratio = (heroH.toFloat() / fullExpandedH.toFloat()).coerceIn(0.40f, 1.0f)
+        if (abs(ratio - lastSentExpandedVisibleRatio) > 0.002f) {
+            lastSentExpandedVisibleRatio = ratio
+            carVisual?.setExpandedVisibleRatio(ratio)
+        }
+    }
+
     private fun syncExpandedClipHeightAnimated() {
         val clip = quickDeckClipContainer ?: return
         val newTarget = measureQuickDeckTargetHeight()
         quickDeckTargetHeightPx = newTarget
         if (!quickDeckExpanded || deckExpandProgress < 0.95f) return
         val startH = clip.layoutParams?.height?.takeIf { it > 0 } ?: clip.height
-        if (startH == newTarget) return
+        val targetHeroH = effectiveExpandedHeroHeightPx(newTarget)
+        val sheetLp = homeLowerSheetView?.layoutParams as? FrameLayout.LayoutParams
+        val startHeroH = sheetLp?.topMargin ?: targetHeroH
+        if (startH == newTarget && startHeroH == targetHeroH) {
+            syncCarExpandedVisibleRatio(targetHeroH)
+            return
+        }
         deckHeightAnimator?.cancel()
-        deckHeightAnimator = ValueAnimator.ofInt(startH, newTarget).apply {
+        deckHeightAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 220L
             interpolator = MotionSpec.EASE_OUT_EXPO
             addUpdateListener { anim ->
-                val lp = clip.layoutParams ?: return@addUpdateListener
-                lp.height = anim.animatedValue as Int
-                clip.layoutParams = lp
+                val f = anim.animatedValue as Float
+                val curDeckH = (startH + (newTarget - startH) * f).roundToInt()
+                val curHeroH = (startHeroH + (targetHeroH - startHeroH) * f).roundToInt()
+                syncCarExpandedVisibleRatio(curHeroH)
+                clip.layoutParams?.let { lp ->
+                    if (lp.height != curDeckH) {
+                        lp.height = curDeckH
+                        clip.layoutParams = lp
+                    }
+                }
+                homeLowerSheetView?.let { sheet ->
+                    val lp = sheet.layoutParams as? FrameLayout.LayoutParams
+                    if (lp != null && lp.topMargin != curHeroH) {
+                        lp.topMargin = curHeroH
+                        sheet.layoutParams = lp
+                    }
+                }
+                tpmsOverlayContainer?.let { tpms ->
+                    val lp = tpms.layoutParams
+                    if (lp != null && lp.height != curHeroH) {
+                        lp.height = curHeroH
+                        tpms.layoutParams = lp
+                    }
+                }
             }
             start()
         }
@@ -4264,12 +4355,28 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val p = progress.coerceIn(0f, 1f)
         deckExpandProgress = p
 
-        // Drive 3D camera in exact 1:1 frame lockstep (rotates to top-down + TPMS inside fixed hero stage)
+        val targetH = quickDeckTargetHeightPx.takeIf { it > 0 } ?: measureQuickDeckTargetHeight()
+        quickDeckTargetHeightPx = targetH
+
+        val collapsedHeroH = homeCollapsedHeroHeightPx.takeIf { it > 0 } ?: dp(248)
+        val expandedHeroH = effectiveExpandedHeroHeightPx(targetH)
+        val curHeroH = (collapsedHeroH + (expandedHeroH - collapsedHeroH) * p).roundToInt()
+
+        // 1. Drive 3D camera in exact 1:1 lockstep (sync capped expanded viewport ratio before setting progress)
+        syncCarExpandedVisibleRatio(expandedHeroH)
         carVisual?.setDeckProgress(p)
         carHeroContainerView?.translationY = 0f
 
-        val targetH = quickDeckTargetHeightPx.takeIf { it > 0 } ?: measureQuickDeckTargetHeight()
-        quickDeckTargetHeightPx = targetH
+        // 2. Shift lowerSheet topMargin cleanly so 3D hero visibly enlarges without resizing WebView
+        homeLowerSheetView?.let { sheet ->
+            val lp = sheet.layoutParams as? FrameLayout.LayoutParams
+            if (lp != null && lp.topMargin != curHeroH) {
+                lp.topMargin = curHeroH
+                sheet.layoutParams = lp
+            }
+        }
+
+        // 3. Genuine fold/retract of the red-boxed deck strictly below the 4 quick buttons & above pull bar / 温度
         val visible = p > 0.002f
         val curH = if (visible) (targetH * p).roundToInt() else 0
 
@@ -4284,19 +4391,37 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         quickDeckContainer?.let { deck ->
             deck.visibility = if (visible) View.VISIBLE else View.GONE
-            deck.alpha = ((p - 0.06f) / 0.94f).coerceIn(0f, 1f)
+            val pivotW = deck.width.takeIf { it > 0 }
+                ?: homeStageFrame?.width?.takeIf { it > 0 }
+                ?: resources.displayMetrics.widthPixels
+            deck.pivotX = pivotW * 0.5f
+            deck.pivotY = 0f
+            deck.alpha = ((p - 0.08f) / 0.92f).coerceIn(0f, 1f)
+            deck.scaleX = 0.95f + 0.05f * p
+            deck.scaleY = 0.84f + 0.16f * p
             deck.translationY = 0f
 
-            quickDeckRowViews.forEach { row ->
-                row.alpha = 1f
+            val rowCount = quickDeckRowViews.size.coerceAtLeast(1)
+            quickDeckRowViews.forEachIndexed { rowIdx, row ->
+                val rowStart = (rowIdx.toFloat() / rowCount) * 0.48f
+                val rowEnd = (rowStart + 0.52f).coerceAtMost(1f)
+                val rowP = ((p - rowStart) / (rowEnd - rowStart)).coerceIn(0f, 1f)
+                val easedRow = rowP * rowP * (3f - 2f * rowP)
+                row.alpha = easedRow
+                val rowScale = 0.90f + 0.10f * easedRow
+                row.scaleX = rowScale
+                row.scaleY = rowScale
                 row.translationY = 0f
-                row.scaleX = 1f
-                row.scaleY = 1f
             }
         }
 
-        // Corner TPMS badges appear cleanly once the car settles near top-down view
+        // 4. Corner TPMS badges frame the visible expanded hero bounds once car settles near top-down view
         tpmsOverlayContainer?.let { tpms ->
+            val tpmsLp = tpms.layoutParams
+            if (tpmsLp != null && tpmsLp.height != curHeroH) {
+                tpmsLp.height = curHeroH
+                tpms.layoutParams = tpmsLp
+            }
             tpms.visibility = if (p <= 0.55f) View.GONE else View.VISIBLE
             val tpmsP = ((p - 0.55f) / 0.45f).coerceIn(0f, 1f)
             val inv = 1f - tpmsP
@@ -4316,15 +4441,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             updateTpmsBadges(activeTelemetry)
             renderQuickDeckGrid(animateLabels = false)
             quickDeckTargetHeightPx = measureQuickDeckTargetHeight()
-        } else {
-            quickDeckEditMode = false
         }
 
         val start = deckExpandProgress
         val end = if (targetExpanded) 1f else 0f
         if (abs(start - end) < 0.005f) {
             applyDeckExpandProgress(end)
-            if (!targetExpanded) rebuildQuickActionRow()
+            if (!targetExpanded) {
+                quickDeckEditMode = false
+                rebuildQuickActionRow()
+            }
             return
         }
 
@@ -4345,6 +4471,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
                 override fun onAnimationEnd(animation: android.animation.Animator) {
                     if (!cancelled && !targetExpanded) {
+                        quickDeckEditMode = false
                         rebuildQuickActionRow()
                     }
                 }
@@ -7077,6 +7204,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         lastGeocodeFailedAtMs = 0L
         locationAddressObservers.clear()
         quickDeckTileViews.clear()
+        homeStageFrame = null
+        homeLowerSheetView = null
+        lowerOverlayContainer = null
+        carHeroContainerView = null
+        quickDeckClipContainer = null
+        quickDeckContainer = null
+        quickDeckPullHintStrip = null
+        lastSentExpandedVisibleRatio = 1.0f
         sessionVehiclePin = ""
         bleConnected = false
         bleNearby = false

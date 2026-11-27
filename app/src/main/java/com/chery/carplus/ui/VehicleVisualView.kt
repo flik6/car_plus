@@ -40,7 +40,7 @@ import org.json.JSONObject
  *
  * Loading choreography:
  * - While the GLB is being downloaded (first time) or parsed, displays a calm
- *   ambient CHERY emblem on `#161719` plus a hairline progress bar (only when
+ *   ambient Qiri+ emblem on `#161719` plus a hairline progress bar (only when
  *   actually fetching from CDN).
  * - WebGL shaders pre-compile off-screen before reveal; on the first rendered
  *   frame, the WebView and ambient placeholder cross-fade seamlessly as the car
@@ -162,6 +162,7 @@ class VehicleVisualView @JvmOverloads constructor(
     private var pendingFlash = false
     private var deckProgress = 0f
     private var collapsedVisibleRatio = 0.64f
+    private var expandedVisibleRatio = 1.0f
     private var placeholderHidden = false
     private var hasDraggedOnce = false
     private var isDestroyed = false
@@ -222,10 +223,11 @@ class VehicleVisualView @JvmOverloads constructor(
         }
         addView(webView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
-        // Calm ambient loading stage on #161719: breathing CHERY emblem + optional hairline download progress
+        // Calm ambient loading stage on #161719: breathing Qiri+ emblem + optional hairline download progress
         ambientEmblem = ImageView(context).apply {
-            setImageResource(R.drawable.ic_chery_adaptive_mark)
+            setImageResource(R.drawable.ic_qiri_adaptive_mark)
             scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = "Qiri+ Logo"
             alpha = 0.22f
             isClickable = false
             isFocusable = false
@@ -271,7 +273,7 @@ class VehicleVisualView @JvmOverloads constructor(
         val stageCenterStack = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            addView(ambientEmblem, LinearLayout.LayoutParams(dp(116), dp(36)))
+            addView(ambientEmblem, LinearLayout.LayoutParams(dp(120), dp(36)))
             addView(
                 progressContainer,
                 LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
@@ -490,6 +492,7 @@ class VehicleVisualView @JvmOverloads constructor(
                 val safeKey = JSONObject.quote(ready.key)
                 val safeUrl = JSONObject.quote(ready.cacheUrl)
                 evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
+                evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
                 evalJs("window.Car3D && window.Car3D.loadModel($safeKey, $safeUrl);")
 
                 // Only check manifest in background when loaded from cache; never re-downloads unless updated
@@ -548,6 +551,14 @@ class VehicleVisualView @JvmOverloads constructor(
         collapsedVisibleRatio = clamped
         if (isDestroyed || !engineReady) return
         evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($clamped);")
+    }
+
+    fun setExpandedVisibleRatio(ratio: Float) {
+        val clamped = ratio.coerceIn(0.40f, 1.0f)
+        if (kotlin.math.abs(expandedVisibleRatio - clamped) < 0.0005f) return
+        expandedVisibleRatio = clamped
+        if (isDestroyed || !engineReady) return
+        evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($clamped);")
     }
 
     fun setDeckProgress(progress: Float) {
@@ -688,6 +699,7 @@ class VehicleVisualView @JvmOverloads constructor(
                 if (isDestroyed || engineReady) return@post
                 engineReady = true
                 evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
+                evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
                 evalJs("window.Car3D && window.Car3D.resize();")
                 requestModelLoad(modelKey, isVehicleSwitch = false)
             }
@@ -699,6 +711,7 @@ class VehicleVisualView @JvmOverloads constructor(
                 if (isDestroyed) return@post
                 sceneReady = true
                 evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
+                evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
                 evalJs("window.Car3D && window.Car3D.resize();")
                 pushStateToScene()
                 if (deckProgress > 0f) {
