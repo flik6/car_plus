@@ -70,6 +70,7 @@ internal class WheelColumnView(context: Context) : View(context) {
     private var downY = 0f
     private var lastTouchY = 0f
     private var dragging = false
+    private var programmaticScroll = false
 
     var onSelectedChanged: ((index: Int, label: String) -> Unit)? = null
 
@@ -83,6 +84,7 @@ internal class WheelColumnView(context: Context) : View(context) {
         items = newItems
         val clamped = if (newItems.isEmpty()) 0 else initialIndex.coerceIn(0, newItems.lastIndex)
         scroller.abortAnimation()
+        programmaticScroll = false
         selectedIndex = clamped
         lastReportedIndex = clamped
         scrollOffsetPx = clamped * itemHeightPx.toFloat()
@@ -99,16 +101,24 @@ internal class WheelColumnView(context: Context) : View(context) {
         val targetIdx = index.coerceIn(0, items.lastIndex)
         val targetOffset = targetIdx * itemHeightPx.toFloat()
         scroller.abortAnimation()
+        selectedIndex = targetIdx
+        lastReportedIndex = targetIdx
         if (!animate) {
+            programmaticScroll = false
             scrollOffsetPx = targetOffset
-            selectedIndex = targetIdx
-            lastReportedIndex = targetIdx
             invalidate()
         } else {
+            programmaticScroll = true
             val startY = scrollOffsetPx.roundToInt()
             val dy = targetOffset.roundToInt() - startY
-            scroller.startScroll(0, startY, 0, dy, 220)
-            postInvalidateOnAnimation()
+            if (dy == 0) {
+                programmaticScroll = false
+                scrollOffsetPx = targetOffset
+                invalidate()
+            } else {
+                scroller.startScroll(0, startY, 0, dy, 220)
+                postInvalidateOnAnimation()
+            }
         }
     }
 
@@ -178,6 +188,7 @@ internal class WheelColumnView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 scroller.abortAnimation()
+                programmaticScroll = false
                 downY = event.y
                 lastTouchY = event.y
                 dragging = false
@@ -204,8 +215,14 @@ internal class WheelColumnView(context: Context) : View(context) {
                     val deltaRows = ((event.y - height / 2f) / itemHeightPx.toFloat()).roundToInt()
                     if (deltaRows != 0) {
                         val target = (getSelectedIndex() + deltaRows).coerceIn(0, items.lastIndex)
+                        val changed = target != lastReportedIndex
                         setSelectedIndex(target, animate = true)
-                        notifyIfChanged(target, haptic = true)
+                        if (changed && target in items.indices) {
+                            AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
+                            onSelectedChanged?.invoke(target, items[target])
+                        }
+                    } else {
+                        snapToNearest()
                     }
                 } else {
                     velocityTracker?.computeCurrentVelocity(1000, maxFlingVelocity.toFloat())
@@ -256,13 +273,18 @@ internal class WheelColumnView(context: Context) : View(context) {
     override fun computeScroll() {
         if (scroller.computeScrollOffset()) {
             scrollOffsetPx = scroller.currY.toFloat()
-            updateCurrentSelection(fromUser = true)
+            if (!programmaticScroll) {
+                updateCurrentSelection(fromUser = true)
+            }
             postInvalidateOnAnimation()
-        } else if (!dragging && items.isNotEmpty()) {
-            val snapped = (scrollOffsetPx / itemHeightPx.toFloat()).roundToInt().coerceIn(0, items.lastIndex)
-            val targetPx = snapped * itemHeightPx.toFloat()
-            if (abs(scrollOffsetPx - targetPx) > 0.5f) {
-                snapToNearest()
+        } else {
+            programmaticScroll = false
+            if (!dragging && items.isNotEmpty()) {
+                val snapped = (scrollOffsetPx / itemHeightPx.toFloat()).roundToInt().coerceIn(0, items.lastIndex)
+                val targetPx = snapped * itemHeightPx.toFloat()
+                if (abs(scrollOffsetPx - targetPx) > 0.5f) {
+                    snapToNearest()
+                }
             }
         }
     }

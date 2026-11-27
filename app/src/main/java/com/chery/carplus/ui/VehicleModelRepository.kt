@@ -210,6 +210,7 @@ object VehicleModelRepository {
     fun ensureModelReady(
         context: Context,
         rawHint: String?,
+        isCancelled: (() -> Boolean)? = null,
         onProgress: ((percent: Int, downloadedBytes: Long, totalBytes: Long) -> Unit)? = null
     ): ModelReadyResult {
         val appCtx = context.applicationContext
@@ -246,7 +247,7 @@ object VehicleModelRepository {
                 ?: FALLBACK_CATALOG[key]
                 ?: FALLBACK_CATALOG.getValue("arrizo8")
 
-            downloadAndInstallModel(appCtx, entry, onProgress)
+            downloadAndInstallModel(appCtx, entry, onProgress, isCancelled)
             if (remoteCatalog != null) {
                 markManifestChecked(appCtx, key)
             }
@@ -381,7 +382,8 @@ object VehicleModelRepository {
     private fun downloadAndInstallModel(
         context: Context,
         entry: ModelCatalogEntry,
-        onProgress: ((percent: Int, downloadedBytes: Long, totalBytes: Long) -> Unit)?
+        onProgress: ((percent: Int, downloadedBytes: Long, totalBytes: Long) -> Unit)?,
+        isCancelled: (() -> Boolean)? = null
     ) {
         val dir = cacheDir(context)
         val finalFile = File(dir, "${entry.key}.glb")
@@ -391,6 +393,9 @@ object VehicleModelRepository {
         val querySuffix = if (entry.sha256.isNotBlank()) "?v=${entry.sha256.take(8)}" else "?v=${entry.version}"
 
         for (base in CDN_BASES) {
+            if (isCancelled?.invoke() == true || Thread.currentThread().isInterrupted) {
+                throw java.util.concurrent.CancellationException("Model download cancelled")
+            }
             val urlStr = "$base/${entry.file}$querySuffix"
             val ok = runCatching {
                 if (tmpFile.exists()) tmpFile.delete()
@@ -405,7 +410,11 @@ object VehicleModelRepository {
                     if (conn.responseCode !in 200..299) {
                         throw IllegalStateException("HTTP ${conn.responseCode} from $urlStr")
                     }
-                    val headerLen = conn.contentLengthLong
+                    val headerLen = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                        conn.contentLengthLong
+                    } else {
+                        conn.contentLength.toLong()
+                    }
                     val totalBytes = when {
                         headerLen > 0L -> headerLen
                         entry.sizeBytes > 0L -> entry.sizeBytes
@@ -419,6 +428,9 @@ object VehicleModelRepository {
                         FileOutputStream(tmpFile).use { output ->
                             val buffer = ByteArray(32 * 1024)
                             while (true) {
+                                if (isCancelled?.invoke() == true || Thread.currentThread().isInterrupted) {
+                                    throw java.util.concurrent.CancellationException("Model download cancelled")
+                                }
                                 val read = input.read(buffer)
                                 if (read <= 0) break
                                 output.write(buffer, 0, read)
@@ -470,8 +482,9 @@ object VehicleModelRepository {
                     conn.disconnect()
                 }
             }.onFailure { err ->
-                lastError = err
                 if (tmpFile.exists()) tmpFile.delete()
+                if (err is java.util.concurrent.CancellationException) throw err
+                lastError = err
             }.getOrDefault(false)
 
             if (ok) return

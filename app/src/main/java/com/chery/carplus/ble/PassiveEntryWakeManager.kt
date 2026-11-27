@@ -83,6 +83,28 @@ object PassiveEntryWakeManager {
             )
         }
 
+        // If passive entry was previously enabled on another vehicle, tear down its CDM presence observer first.
+        val previousActiveVin = PassiveEntryStore.getActiveEnabledVin(appContext)
+        if (previousActiveVin.isNotBlank() && !previousActiveVin.equals(profile.vin, ignoreCase = true)) {
+            val prevProfile = VehicleProfileStore(appContext).listProfiles()
+                .firstOrNull { it.vin.equals(previousActiveVin, ignoreCase = true) }
+            val prevCfg = PassiveEntryStore.load(appContext, previousActiveVin)
+            val prevMac = PassiveEntryPrerequisiteChecker.normalizeMac(prevProfile?.bleMac)
+                ?: PassiveEntryPrerequisiteChecker.normalizeMac(prevCfg.cdmAssociatedMac)
+            if (prevMac != null && !prevMac.equals(targetMac, ignoreCase = true) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val cdm = appContext.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
+                if (cdm != null) {
+                    runCatching {
+                        @Suppress("DEPRECATION")
+                        cdm.stopObservingDevicePresence(prevMac)
+                    }
+                }
+            }
+            if (prevCfg.enabled) {
+                PassiveEntryStore.save(appContext, prevCfg.copy(enabled = false))
+            }
+        }
+
         var piRegistered = false
         var cdmActive = false
         var piError = ""

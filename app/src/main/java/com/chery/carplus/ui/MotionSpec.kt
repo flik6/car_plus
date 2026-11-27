@@ -1,10 +1,14 @@
 package com.chery.carplus.ui
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.Dialog
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -110,17 +114,26 @@ object MotionSpec {
         pressedScale: Float = 0.94f,
         haptic: Boolean = false
     ) {
+        var restAlpha = 1f
+        var pressed = false
+        var animatingPress = false
         view.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     if (!v.isEnabled) return@setOnTouchListener false
+                    if (!animatingPress) {
+                        restAlpha = v.alpha
+                    }
+                    pressed = true
+                    animatingPress = true
                     v.animate().cancel()
                     v.animate()
                         .scaleX(pressedScale)
                         .scaleY(pressedScale)
-                        .alpha(0.86f)
+                        .alpha((restAlpha * 0.86f).coerceIn(0.15f, 1f))
                         .setDuration(90L)
                         .setInterpolator(EASE_OUT_EXPO)
+                        .setListener(null)
                         .start()
                     if (haptic) {
                         AppHaptics.perform(v, HapticLevel.LIGHT_TICK)
@@ -128,14 +141,29 @@ object MotionSpec {
                 }
                 MotionEvent.ACTION_UP,
                 MotionEvent.ACTION_CANCEL -> {
+                    if (!pressed) return@setOnTouchListener false
+                    pressed = false
                     v.animate().cancel()
-                    val targetAlpha = if (v.isEnabled) 1f else v.alpha
+                    val targetAlpha = if (v.isEnabled) restAlpha else v.alpha
+                    var releaseCancelled = false
                     v.animate()
                         .scaleX(1f)
                         .scaleY(1f)
                         .alpha(targetAlpha)
                         .setDuration(160L)
                         .setInterpolator(EASE_SPRING_RELEASE)
+                        .setListener(object : AnimatorListenerAdapter() {
+                            override fun onAnimationCancel(animation: Animator) {
+                                releaseCancelled = true
+                            }
+
+                            override fun onAnimationEnd(animation: Animator) {
+                                if (!releaseCancelled && !pressed) {
+                                    animatingPress = false
+                                }
+                                v.animate().setListener(null)
+                            }
+                        })
                         .start()
                 }
             }
@@ -294,6 +322,15 @@ object MotionSpec {
      * while fading its backdrop scrim to 0 in parallel, then dismisses [dialog] on completion.
      * Safe against duplicate calls and pre-layout invocation.
      */
+    private fun findHostActivity(context: Context?): Activity? {
+        var cur = context
+        while (cur is ContextWrapper) {
+            if (cur is Activity) return cur
+            cur = cur.baseContext
+        }
+        return cur as? Activity
+    }
+
     fun dismissSheetAnimated(
         sheetView: View,
         dialog: Dialog,
@@ -305,6 +342,14 @@ object MotionSpec {
 
         val scrim = findSheetScrim(sheetView)
         scrim?.isClickable = false
+
+        val hostActivity = findHostActivity(dialog.context)
+        if (hostActivity != null && (hostActivity.isFinishing || hostActivity.isDestroyed)) {
+            scrim?.animate()?.cancel()
+            sheetView.animate().cancel()
+            dismissSheetImmediately(dialog)
+            return
+        }
 
         // If dismissed before first draw while still invisible, close immediately without blocking touches
         if (!sheetView.isLaidOut && sheetView.alpha == 0f) {
@@ -331,11 +376,10 @@ object MotionSpec {
             val screenH = sheetView.resources.displayMetrics.heightPixels
             maxOf(lpHeight, screenH).toFloat()
         }
-        sheetView.animate()
-            .translationY(offscreenY)
-            .setDuration(200L)
-            .setInterpolator(EASE_STANDARD)
-            .withEndAction {
+        var finalized = false
+        val finalizeDismiss = {
+            if (!finalized) {
+                finalized = true
                 bypassDismissDialogs[dialog] = true
                 try {
                     if (dialog.isShowing) {
@@ -346,6 +390,17 @@ object MotionSpec {
                     dismissingDialogs.remove(dialog)
                 }
             }
+        }
+        sheetView.animate()
+            .translationY(offscreenY)
+            .setDuration(200L)
+            .setInterpolator(EASE_STANDARD)
+            .setListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    sheetView.animate().setListener(null)
+                    finalizeDismiss()
+                }
+            })
             .start()
     }
 
@@ -460,6 +515,8 @@ object MotionSpec {
         }
 
         // Cooperative touch handler on inner ScrollView: hands off to swipe-to-dismiss only when at top
+        var trackingScrollGesture = false
+        var scrollStartedAtTop = false
         scrollView?.setOnTouchListener { sv, event ->
             if (dismissingDialogs[dialog] == true) return@setOnTouchListener true
             when (event.actionMasked) {
@@ -467,14 +524,28 @@ object MotionSpec {
                     baseDim = dialog.window?.attributes?.dimAmount?.takeIf { it > 0f } ?: baseDim
                     downRawY = event.rawY
                     dragging = false
+                    trackingScrollGesture = true
+                    scrollStartedAtTop = sv.scrollY <= 0
                     velocityTracker?.recycle()
                     velocityTracker = VelocityTracker.obtain().apply { addMovement(event) }
                     false
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    if (!trackingScrollGesture) {
+                        // ACTION_DOWN was initially delivered to a clickable child inside ScrollView,
+                        // and ScrollView intercepted mid-gesture. Anchor fresh downRawY here so
+                        // stale coordinates from an earlier gesture can never trigger a false dismiss.
+                        trackingScrollGesture = true
+                        scrollStartedAtTop = sv.scrollY <= 0
+                        downRawY = event.rawY
+                        dragging = false
+                        velocityTracker?.recycle()
+                        velocityTracker = VelocityTracker.obtain().apply { addMovement(event) }
+                        return@setOnTouchListener false
+                    }
                     velocityTracker?.addMovement(event)
                     val rawDy = event.rawY - downRawY
-                    if (!dragging && sv.scrollY <= 0 && rawDy > touchSlop * 1.4f) {
+                    if (!dragging && scrollStartedAtTop && sv.scrollY <= 0 && rawDy > touchSlop * 1.4f) {
                         dragging = true
                         downRawY = event.rawY
                         sheetView.animate().cancel()
@@ -491,6 +562,8 @@ object MotionSpec {
                 }
                 MotionEvent.ACTION_UP,
                 MotionEvent.ACTION_CANCEL -> {
+                    trackingScrollGesture = false
+                    scrollStartedAtTop = false
                     velocityTracker?.addMovement(event)
                     if (dragging) {
                         finishDrag()

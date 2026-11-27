@@ -496,7 +496,24 @@ class InGeekCloudProvisioner(
                 controlPin = ""
             )
 
-            val saved = profileStore?.saveProfile(profile, activate = true) ?: profile
+            val saved = if (profileStore != null) {
+                profileStore.updateKeyMaterial(
+                    vin = normalizedVin,
+                    rootKeyHex = kRootHex,
+                    infoHex = infoHex,
+                    edfHex = edfHex,
+                    validFrom = parsed.validFrom,
+                    validTo = parsed.validTo,
+                    secAHex = parsed.secAHex,
+                    secBHex = parsed.secBHex,
+                    keyRole = parsed.keyRole,
+                    deviceId = resolvedDeviceId,
+                    bleName = bleName.trim(),
+                    bleMac = bleMac.trim().uppercase(Locale.US)
+                ) ?: profile
+            } else {
+                profile
+            }
             logger?.invoke("Provisioning completed; VIN=$normalizedVin keyId=$keyId")
             ProvisionResult(
                 success = true,
@@ -669,7 +686,7 @@ class InGeekCloudProvisioner(
         val tlv = parseDerTlv(encKey, offset)
         require(tlv.tag == 0x30) { "located wrapper is not a DER SEQUENCE" }
         val raw = encKey.copyOfRange(offset, tlv.end)
-        require(raw.size == 375) { "SecureKeyWrapper must be 375 bytes, got ${raw.size}" }
+        require(raw.size in 373..376) { "SecureKeyWrapper must be 373..376 bytes, got ${raw.size}" }
         return raw
     }
 

@@ -144,81 +144,171 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private class PullDownInterceptScrollView(
         context: Context,
-        private val canStartPullDown: () -> Boolean,
-        private val onDragStart: () -> Unit,
-        private val onDragMove: (dy: Float, velocityY: Float) -> Unit,
-        private val onDragEnd: (totalDy: Float, velocityY: Float) -> Unit
+        private val isDeckExpanded: () -> Boolean,
+        private val canStartCollapseAt: (rawX: Float, rawY: Float) -> Boolean,
+        private val onDragStart: (direction: Int) -> Unit,
+        private val onDragMove: (dy: Float, velocityY: Float, direction: Int) -> Unit,
+        private val onDragEnd: (totalDy: Float, velocityY: Float, direction: Int) -> Unit
     ) : ScrollView(context) {
         private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
         private var downX = 0f
         private var downY = 0f
-        private var lastY = 0f
-        private var lastTimeMs = 0L
-        private var velocityY = 0f
-        private var draggingDeck = false
+        private var activePointerId = MotionEvent.INVALID_POINTER_ID
+        private var velocityTracker: android.view.VelocityTracker? = null
+        private var dragDirection = 0 // +1 = pull down to expand, -1 = pull up to collapse
+        private var collapseEligible = false
+
+        private fun recycleVelocityTracker() {
+            velocityTracker?.recycle()
+            velocityTracker = null
+        }
+
+        private fun addMovementRaw(ev: MotionEvent) {
+            val vt = velocityTracker ?: android.view.VelocityTracker.obtain().also { velocityTracker = it }
+            val copy = MotionEvent.obtain(ev)
+            copy.setLocation(ev.rawX, ev.rawY)
+            vt.addMovement(copy)
+            copy.recycle()
+        }
+
+        private fun computeVelocityY(): Float {
+            val vt = velocityTracker ?: return 0f
+            vt.computeCurrentVelocity(1000)
+            return if (activePointerId != MotionEvent.INVALID_POINTER_ID) {
+                vt.getYVelocity(activePointerId)
+            } else {
+                vt.yVelocity
+            }
+        }
+
+        private fun activeRawCoords(ev: MotionEvent): Pair<Float, Float> {
+            val idx = if (activePointerId != MotionEvent.INVALID_POINTER_ID) {
+                ev.findPointerIndex(activePointerId)
+            } else {
+                -1
+            }
+            val safeIdx = if (idx >= 0) idx else 0
+            val rawOffsetX = ev.rawX - ev.x
+            val rawOffsetY = ev.rawY - ev.y
+            return (ev.getX(safeIdx) + rawOffsetX) to (ev.getY(safeIdx) + rawOffsetY)
+        }
+
+        private fun handlePointerUp(ev: MotionEvent) {
+            val liftedIdx = ev.actionIndex
+            val liftedId = ev.getPointerId(liftedIdx)
+            if (liftedId == activePointerId && ev.pointerCount > 1) {
+                val newIdx = if (liftedIdx == 0) 1 else 0
+                val rawOffsetY = ev.rawY - ev.y
+                val oldY = ev.getY(liftedIdx) + rawOffsetY
+                val newY = ev.getY(newIdx) + rawOffsetY
+                downY += (newY - oldY)
+                val rawOffsetX = ev.rawX - ev.x
+                downX += ((ev.getX(newIdx) + rawOffsetX) - (ev.getX(liftedIdx) + rawOffsetX))
+                activePointerId = ev.getPointerId(newIdx)
+            }
+        }
+
+        private fun tryStartDrag(rawX: Float, rawY: Float): Boolean {
+            val dx = rawX - downX
+            val dy = rawY - downY
+            if (scrollY != 0) return false
+            if (!isDeckExpanded() && dy > touchSlop && dy > abs(dx) * 1.15f) {
+                dragDirection = 1
+                downY = rawY
+                onDragStart(1)
+                return true
+            }
+            if (isDeckExpanded() && collapseEligible && dy < -touchSlop && abs(dy) > abs(dx) * 1.15f) {
+                dragDirection = -1
+                downY = rawY
+                onDragStart(-1)
+                return true
+            }
+            return false
+        }
 
         override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
-            if (!canStartPullDown()) return super.onInterceptTouchEvent(ev)
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    recycleVelocityTracker()
+                    activePointerId = ev.getPointerId(0)
                     downX = ev.rawX
                     downY = ev.rawY
-                    lastY = ev.rawY
-                    lastTimeMs = SystemClock.uptimeMillis()
-                    velocityY = 0f
-                    draggingDeck = false
+                    dragDirection = 0
+                    collapseEligible = isDeckExpanded() && canStartCollapseAt(ev.rawX, ev.rawY)
+                    addMovementRaw(ev)
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    handlePointerUp(ev)
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = ev.rawX - downX
-                    val dy = ev.rawY - downY
-                    if (scrollY == 0 && dy > touchSlop && dy > abs(dx) * 1.15f) {
-                        draggingDeck = true
-                        downY = ev.rawY
-                        lastY = ev.rawY
-                        lastTimeMs = SystemClock.uptimeMillis()
-                        onDragStart()
+                    addMovementRaw(ev)
+                    val (rx, ry) = activeRawCoords(ev)
+                    if (tryStartDrag(rx, ry)) {
                         return true
                     }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    draggingDeck = false
+                    dragDirection = 0
+                    collapseEligible = false
+                    activePointerId = MotionEvent.INVALID_POINTER_ID
+                    recycleVelocityTracker()
                 }
             }
             return super.onInterceptTouchEvent(ev)
         }
 
         override fun onTouchEvent(ev: MotionEvent): Boolean {
-            if (!draggingDeck) {
-                if (canStartPullDown() && scrollY == 0 && ev.actionMasked == MotionEvent.ACTION_MOVE) {
-                    val dx = ev.rawX - downX
-                    val dy = ev.rawY - downY
-                    if (dy > touchSlop && dy > abs(dx) * 1.15f) {
-                        draggingDeck = true
-                        downY = ev.rawY
-                        lastY = ev.rawY
-                        lastTimeMs = SystemClock.uptimeMillis()
-                        onDragStart()
+            if (ev.actionMasked == MotionEvent.ACTION_POINTER_UP) {
+                handlePointerUp(ev)
+                return if (dragDirection != 0) true else super.onTouchEvent(ev)
+            }
+            if (dragDirection == 0) {
+                if (ev.actionMasked == MotionEvent.ACTION_MOVE) {
+                    addMovementRaw(ev)
+                    val (rx, ry) = activeRawCoords(ev)
+                    if (tryStartDrag(rx, ry)) {
+                        val cancelEv = MotionEvent.obtain(ev)
+                        cancelEv.action = MotionEvent.ACTION_CANCEL
+                        super.onTouchEvent(cancelEv)
+                        cancelEv.recycle()
                     }
                 }
-                if (!draggingDeck) return super.onTouchEvent(ev)
+                if (dragDirection == 0) {
+                    if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
+                        activePointerId = MotionEvent.INVALID_POINTER_ID
+                        recycleVelocityTracker()
+                    }
+                    return super.onTouchEvent(ev)
+                }
             }
             when (ev.actionMasked) {
                 MotionEvent.ACTION_MOVE -> {
-                    val now = SystemClock.uptimeMillis()
-                    val dt = (now - lastTimeMs).coerceAtLeast(1L)
-                    velocityY = (ev.rawY - lastY) * 1000f / dt
-                    lastY = ev.rawY
-                    lastTimeMs = now
-                    onDragMove(ev.rawY - downY, velocityY)
+                    addMovementRaw(ev)
+                    val vy = computeVelocityY()
+                    val (_, ry) = activeRawCoords(ev)
+                    onDragMove(ry - downY, vy, dragDirection)
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    draggingDeck = false
-                    onDragEnd(ev.rawY - downY, velocityY)
+                    addMovementRaw(ev)
+                    val vy = if (ev.actionMasked == MotionEvent.ACTION_UP) computeVelocityY() else 0f
+                    val (_, ry) = activeRawCoords(ev)
+                    val dir = dragDirection
+                    dragDirection = 0
+                    collapseEligible = false
+                    activePointerId = MotionEvent.INVALID_POINTER_ID
+                    recycleVelocityTracker()
+                    onDragEnd(ry - downY, vy, dir)
                     return true
                 }
             }
             return true
+        }
+
+        override fun onDetachedFromWindow() {
+            recycleVelocityTracker()
+            super.onDetachedFromWindow()
         }
     }
 
@@ -248,6 +338,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var bleRssiPollJob: Job? = null
     private var geocodeJob: Job? = null
     private var pendingResumeBleRunnable: Runnable? = null
+    private var pendingShortcutRunnable: Runnable? = null
     private var liveLocationListener: android.location.LocationListener? = null
     private var liveLocationCancelSignal: android.os.CancellationSignal? = null
     @Volatile
@@ -267,6 +358,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private val locationAddressObservers = linkedSetOf<(String) -> Unit>()
     private var messagesOverlayView: View? = null
     private val subpageOverlayStack = ArrayDeque<Pair<View, (() -> Unit)?>>()
+    private val pendingExitDestroys = mutableListOf<Pair<View, () -> Unit>>()
     private var settingsScreen: SettingsScreen? = null
     private var pendingAvatarPickCallback: ((Uri) -> Unit)? = null
     private lateinit var avatarPickerLauncher: ActivityResultLauncher<String>
@@ -304,7 +396,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var parkingStatusView: TextView? = null
     private var channelBadgeIcon: AppIconView? = null
     private var transientToastBanner: TextView? = null
-    private var homeStageFrame: FrameLayout? = null
+    private var homeStageFrame: LinearLayout? = null
     private var lowerOverlayContainer: PullDownInterceptScrollView? = null
     private var homeHeaderView: View? = null
     private var carHeroContainerView: FrameLayout? = null
@@ -321,13 +413,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var tpmsRrTemp: TextView? = null
     private var quickActionRow: LinearLayout? = null
     private val quickActionIcons = mutableMapOf<QuickActionId, AppIconView>()
+    private var quickDeckClipContainer: FrameLayout? = null
     private var quickDeckContainer: LinearLayout? = null
+    private var quickDeckPullHintStrip: FrameLayout? = null
+    private var quickDeckTargetHeightPx: Int = 0
     private var quickDeckEditHeader: LinearLayout? = null
     private var quickDeckEditTitle: TextView? = null
     private var quickDeckGridHost: LinearLayout? = null
     private val quickDeckRowViews = mutableListOf<LinearLayout>()
+    private val quickDeckTileViews = mutableMapOf<QuickActionId, View>()
     private var deckExpandAnimator: ValueAnimator? = null
+    private var deckHeightAnimator: ValueAnimator? = null
     private var deckExpandProgress = 0f
+    private var deckDragStartProgress = 0f
     private var quickDeckExpanded = false
     private var quickDeckEditMode = false
     private var climateRowSubtitle: TextView? = null
@@ -360,6 +458,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var lastGeocodedKey = ""
     private var lastGeocodedAddress: String? = null
     private var lastGeocodeSettled = false
+    private var lastGeocodeFailedAtMs = 0L
     private var lastBackExitPromptMs = 0L
     private var lastCarTapTelemetryAtMs = 0L
     private var footerMetricIndex = 0
@@ -452,7 +551,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             },
             onOpenOverlaySubpage = { view, onDestroy -> pushSubpageOverlay(view, onDestroy) },
             onPopOverlaySubpage = { popSubpageOverlay() },
-            onOpenRemoteAuthManagement = { featureSheets.showRemoteAuthSheet() },
+            onOpenRemoteAuthManagement = { managementScreens.openDriversScreen() },
             liveDistanceLabelProvider = {
                 val lat = activeTelemetry?.latitude
                 val lon = activeTelemetry?.longitude
@@ -679,7 +778,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     )
 
     private fun parseSharedDestinationIntent(intent: Intent): ParsedSharedPoi {
-        // 1. Handle geo:lat,lon?q=...
+        fun isValidCoord(la: Double?, lo: Double?): Boolean =
+            la != null && lo != null &&
+                la in -90.0..90.0 && lo in -180.0..180.0 &&
+                (la != 0.0 || lo != 0.0)
+
+        // 1. Handle geo:lat,lon?q=... (Android geo: intents carry WGS-84 coordinates)
         val geoUri = intent.data
         if (intent.action == Intent.ACTION_VIEW && geoUri != null && geoUri.scheme.equals("geo", ignoreCase = true)) {
             val ssp = geoUri.schemeSpecificPart.orEmpty()
@@ -712,25 +816,25 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     }
                 }
             }
-            val resolvedLat = lat
-            val resolvedLon = lon
-            if (resolvedLat != null && resolvedLon != null) {
+            if (isValidCoord(lat, lon)) {
+                val (gcjLat, gcjLon) = wgs84ToGcj02(lat!!, lon!!)
                 val resolvedName = label.ifBlank {
-                    httpClient.reverseGeocodeApproxAddress(resolvedLat, resolvedLon).orEmpty().ifBlank { "共享位置" }
+                    httpClient.reverseGeocodeApproxAddress(gcjLat, gcjLon).orEmpty().ifBlank { "共享位置" }
                 }
-                return ParsedSharedPoi(name = resolvedName, address = resolvedName, lat = resolvedLat, lon = resolvedLon)
+                return ParsedSharedPoi(name = resolvedName, address = resolvedName, lat = gcjLat, lon = gcjLon)
             }
             if (label.isNotBlank()) {
                 return ParsedSharedPoi(name = label, searchQuery = label)
             }
         }
 
-        // 2. Handle ACTION_SEND plain text (Amap / Baidu / WeChat / Meituan shared links or text)
+        // 2. Handle ACTION_SEND plain text (Amap / Baidu / Google / OSM / WeChat / Meituan shared links or text)
         val rawText = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().trim()
         val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT).orEmpty().trim()
         val urlMatch = Regex("""https?://[^\s\u4e00-\u9fa5]+""").find(rawText)
         val resolvedUrl = urlMatch?.value?.let { httpClient.resolveSharedUrlRedirect(it) }.orEmpty()
         val combined = "$rawText\n$resolvedUrl"
+        val combinedLower = combined.lowercase(Locale.US)
 
         fun extractParam(vararg keys: String): String {
             for (k in keys) {
@@ -781,16 +885,37 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             .orEmpty()
         val bestName = firstNonBlank(urlName, subject, textTitle)
 
-        if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-            val finalName = bestName.ifBlank {
-                httpClient.reverseGeocodeApproxAddress(lat, lon).orEmpty().ifBlank { "共享位置" }
+        if (isValidCoord(lat, lon)) {
+            val isBaidu = combinedLower.contains("map.baidu.com") ||
+                combinedLower.contains("j.map.baidu.com") ||
+                combinedLower.contains("baidumap")
+            val isWgs84Source = combinedLower.contains("google.com/maps") ||
+                combinedLower.contains("maps.app.goo.gl") ||
+                combinedLower.contains("openstreetmap.org") ||
+                combinedLower.contains("osm.org")
+            val (finalLat, finalLon) = when {
+                isBaidu -> bd09ToGcj02(lat!!, lon!!)
+                isWgs84Source -> wgs84ToGcj02(lat!!, lon!!)
+                else -> lat!! to lon!!
             }
-            return ParsedSharedPoi(name = finalName, address = finalName, lat = lat, lon = lon)
+            val finalName = bestName.ifBlank {
+                httpClient.reverseGeocodeApproxAddress(finalLat, finalLon).orEmpty().ifBlank { "共享位置" }
+            }
+            return ParsedSharedPoi(name = finalName, address = finalName, lat = finalLat, lon = finalLon)
         }
         return ParsedSharedPoi(
             name = bestName,
             searchQuery = bestName.ifBlank { rawText.take(40) }
         )
+    }
+
+    private fun bd09ToGcj02(bdLat: Double, bdLon: Double): Pair<Double, Double> {
+        val xPi = PI * 3000.0 / 180.0
+        val x = bdLon - 0.0065
+        val y = bdLat - 0.006
+        val z = sqrt(x * x + y * y) - 0.00002 * sin(y * xPi)
+        val theta = atan2(y, x) - 0.000003 * cos(x * xPi)
+        return (z * sin(theta)) to (z * cos(theta))
     }
 
     private fun routePendingShortcutActionNow() {
@@ -824,47 +949,53 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val forcePinCache = pendingShortcutRequiresPinCache
         pendingShortcutAction = null
         pendingShortcutRequiresPinCache = false
-        contentFrame.postDelayed({
-            if (forcePinCache && act != CarWidgetManager.CMD_REFRESH) {
-                val profile = profileStore.getActiveProfile().also { currentProfile = it }
-                if (profile.vin.isNotBlank()) {
-                    val widgetSnap = CarWidgetStateStore.load(this)
-                    val (actionKey, label, temp) = when (act) {
-                        CarWidgetManager.CMD_TOGGLE_LOCK -> {
-                            val locked = activeTelemetry?.doorLocked ?: widgetSnap.doorLocked
-                            if (locked) Triple("unlock", "解锁", null) else Triple("lock", "锁车", null)
-                        }
-                        CarWidgetManager.CMD_TOGGLE_AC -> {
-                            val acOn = activeTelemetry?.acOn ?: widgetSnap.acOn
-                            if (acOn) Triple("ac_off", "关闭空调", null) else Triple("ac_on", "开启空调", climateTemperatureCelsius)
-                        }
-                        CarWidgetManager.CMD_FIND_CAR -> Triple("find_car", "闪灯鸣笛寻车", null)
-                        CarWidgetManager.CMD_TOGGLE_TRUNK -> {
-                            val open = activeTelemetry?.trunkOpen ?: widgetSnap.trunkOpen
-                            if (open) Triple("tailgate_close", "关闭后备箱", null) else Triple("trunk_open", "开启后备箱", null)
-                        }
-                        CarWidgetManager.CMD_TOGGLE_ENGINE -> {
-                            val running = activeTelemetry?.engineRunning ?: widgetSnap.engineRunning
-                            if (running) Triple("engine_stop", "远程熄火", null) else Triple("engine_start", "远程启动", null)
-                        }
-                        else -> Triple("", "", null)
-                    }
-                    if (actionKey.isNotBlank()) {
-                        showVehiclePinSheet(profile, actionKey, label, temp)
-                        return@postDelayed
-                    }
+        pendingShortcutRunnable?.let(contentFrame::removeCallbacks)
+        val task = Runnable {
+            pendingShortcutRunnable = null
+            if (isFinishing || isDestroyed || currentScreen != Screen.HOME) return@Runnable
+            val profile = profileStore.getActiveProfile().also { currentProfile = it }
+            if (act == CarWidgetManager.CMD_REFRESH) {
+                refreshTelemetry(silent = false)
+                return@Runnable
+            }
+            val widgetSnap = CarWidgetStateStore.load(this)
+            val useSnap = widgetSnap.vin.isBlank() || widgetSnap.vin.equals(profile.vin, ignoreCase = true)
+            val airExtra = mapOf("airType" to uiPrefs.getString(KEY_AIR_TYPE, "1").orEmpty().ifBlank { "1" })
+            val (actionKey, label, temp, extra) = when (act) {
+                CarWidgetManager.CMD_TOGGLE_LOCK -> {
+                    val locked = activeTelemetry?.doorLocked ?: if (useSnap) widgetSnap.doorLocked else (carVisual?.vehicleLocked ?: true)
+                    if (locked) Quadruple("unlock", "解锁", null, emptyMap()) else Quadruple("lock", "锁车", null, emptyMap())
                 }
+                CarWidgetManager.CMD_TOGGLE_AC -> {
+                    val acOn = activeTelemetry?.acOn ?: if (useSnap) widgetSnap.acOn else false
+                    if (acOn) Quadruple("ac_off", "关闭空调", null, airExtra) else Quadruple("ac_on", "开启空调", climateTemperatureCelsius, airExtra)
+                }
+                CarWidgetManager.CMD_FIND_CAR -> Quadruple("find_car", "闪灯鸣笛寻车", null, emptyMap())
+                CarWidgetManager.CMD_TOGGLE_TRUNK -> {
+                    val open = activeTelemetry?.trunkOpen ?: if (useSnap) widgetSnap.trunkOpen else false
+                    if (open) Quadruple("tailgate_close", "关闭后备箱", null, emptyMap()) else Quadruple("trunk_open", "开启后备箱", null, emptyMap())
+                }
+                CarWidgetManager.CMD_TOGGLE_ENGINE -> {
+                    val running = activeTelemetry?.engineRunning ?: if (useSnap) widgetSnap.engineRunning else false
+                    if (running) Quadruple("engine_stop", "远程熄火", null, emptyMap()) else Quadruple("engine_start", "远程启动", null, emptyMap())
+                }
+                else -> Quadruple("", "", null, emptyMap())
             }
-            when (act) {
-                CarWidgetManager.CMD_TOGGLE_LOCK -> triggerQuickAction(QuickActionId.LOCK)
-                CarWidgetManager.CMD_TOGGLE_AC -> triggerQuickAction(QuickActionId.CLIMATE)
-                CarWidgetManager.CMD_FIND_CAR -> triggerQuickAction(QuickActionId.FLASH)
-                CarWidgetManager.CMD_TOGGLE_TRUNK -> triggerQuickAction(QuickActionId.TRUNK)
-                CarWidgetManager.CMD_TOGGLE_ENGINE -> triggerQuickAction(QuickActionId.ENGINE)
-                CarWidgetManager.CMD_REFRESH -> refreshTelemetry(silent = false)
+            if (actionKey.isBlank()) return@Runnable
+            if (forcePinCache) {
+                if (profile.vin.isNotBlank()) {
+                    showVehiclePinSheet(profile, actionKey, label, temp, extra)
+                }
+            } else {
+                carVisual?.triggerActionFeedback(actionKey)
+                dispatchSmartVehicleCommand(actionKey, label, temp, extra)
             }
-        }, 220L)
+        }
+        pendingShortcutRunnable = task
+        contentFrame.postDelayed(task, 220L)
     }
+
+    private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun routeInitialScreen() {
         pendingShortcutAction = intent?.getStringExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION)
@@ -892,19 +1023,28 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         super.onResume()
         val passiveWasRunning = PassiveEntryRuntime.isServiceRunning()
         PassiveEntryRuntime.setForegroundAppActive(this, true)
-        carVisual?.onHostResume()
+        if (PassiveEntryStore.getActiveEnabledVin(this).isNotBlank() &&
+            !PassiveEntryRuntime.currentSnapshot().wakeChannelActive
+        ) {
+            PassiveEntryWakeManager.restoreIfEnabled(this)
+        }
+        val wasBg = wasBackgrounded
+        wasBackgrounded = false
+        val homeVisible = currentScreen == Screen.HOME && subpageOverlayStack.isEmpty()
+        if (homeVisible) {
+            carVisual?.onHostResume()
+        }
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
-        if (currentScreen == Screen.HOME) {
-            if (wasBackgrounded && !quickDeckExpanded) {
+        if (homeVisible) {
+            if (wasBg && !quickDeckExpanded) {
                 carVisual?.playEntranceAnimation()
             }
-            wasBackgrounded = false
             if (passiveWasRunning) {
                 // Allow PassiveEntryService to finish closing its GATT link so T-Box resumes advertising.
                 val task = Runnable {
                     pendingResumeBleRunnable = null
-                    if (currentScreen == Screen.HOME &&
+                    if ((currentScreen == Screen.HOME || currentScreen == Screen.SECURITY) &&
                         !wasBackgrounded &&
                         !isFinishing &&
                         !isDestroyed &&
@@ -922,9 +1062,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             startForegroundBleRssiPolling()
             startLiveDeviceLocationUpdates()
             refreshTelemetry(silent = true)
-        } else if (currentScreen == Screen.LOCATION) {
+        } else if (currentScreen == Screen.LOCATION && subpageOverlayStack.isEmpty()) {
             startLiveDeviceLocationUpdates()
         } else if (currentScreen == Screen.SECURITY) {
+            if (passiveWasRunning) {
+                val task = Runnable {
+                    pendingResumeBleRunnable = null
+                    if ((currentScreen == Screen.HOME || currentScreen == Screen.SECURITY) &&
+                        !wasBackgrounded &&
+                        !isFinishing &&
+                        !isDestroyed &&
+                        lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                    ) {
+                        startProximityWhenPermitted()
+                    }
+                }
+                pendingResumeBleRunnable = task
+                mainHandler.postDelayed(task, 600L)
+            } else {
+                startProximityWhenPermitted()
+            }
             startForegroundBleRssiPolling()
         }
         securityPassiveRefreshCallback?.invoke()
@@ -946,17 +1103,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     override fun onStop() {
         super.onStop()
         wasBackgrounded = true
-        // Stop foreground scanning; if passive entry is active, release foreground GATT cleanly before background handoff.
+        // Snapshot live foreground proximity state BEFORE tearing down GATT for background handoff.
+        val wasNear = bleController.isSessionReady() || bleConnected
+        val lastRssi = bleController.lastProximityRssi
         bleController.stopAutoProximityWatch()
         if (PassiveEntryStore.getActiveEnabledVin(this).isNotBlank()) {
             bleController.disconnect()
         }
-        PassiveEntryRuntime.setForegroundAppActive(this, false)
+        PassiveEntryRuntime.setForegroundAppActive(
+            context = this,
+            active = false,
+            handoffFromNearSession = wasNear,
+            handoffRssi = lastRssi
+        )
     }
 
     override fun onDestroy() {
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
+        pendingShortcutRunnable?.let(contentFrame::removeCallbacks)
+        pendingShortcutRunnable = null
         smsCountdownJob?.cancel()
         telemetryJob?.cancel()
         postActionRefreshJob?.cancel()
@@ -966,11 +1132,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         geocodeJob?.cancel()
         provisioningJob?.cancel()
         deckExpandAnimator?.cancel()
+        deckHeightAnimator?.cancel()
         stopStatusAutoHide()
+        dismissTopPairingPinDrawer(immediate = true)
         vehicleSwitcherPopup?.dismiss()
         vehicleSwitcherPopup = null
         dismissAppDialogImmediately()
         clearSubpageOverlayStack()
+        settingsScreen?.dismissTransientOverlays()
+        settingsScreen?.cancelBackgroundJobs()
         homeRootView = null
         settingsRootView = null
         securityOverlayView = null
@@ -1186,6 +1356,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         appDialog = null
     }
 
+    private fun trackAppDialog(dialog: android.app.Dialog, onDismissExtra: (() -> Unit)? = null): android.app.Dialog {
+        dismissAppDialogSync = null
+        appDialog = dialog
+        dialog.setOnDismissListener {
+            if (appDialog === dialog) {
+                appDialog = null
+                dismissAppDialogSync = null
+            }
+            onDismissExtra?.invoke()
+        }
+        return dialog
+    }
+
     private fun configureSystemBars(color: Int) {
         AppSystemInsets.applyEdgeToEdge(window, color)
     }
@@ -1323,7 +1506,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
     private fun showPolicyInfoDialog(title: String, body: String) {
-        appDialog?.dismiss()
+        dismissAppDialogImmediately()
         val dialog = android.app.Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val container = LinearLayout(this).apply {
@@ -1346,8 +1529,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             setLayout((resources.displayMetrics.widthPixels * 0.86f).roundToInt(), WRAP_CONTENT)
             setGravity(Gravity.CENTER)
         }
-        dialog.setOnDismissListener { if (appDialog === dialog) appDialog = null }
-        appDialog = dialog
+        trackAppDialog(dialog)
         dialog.show()
         MotionSpec.animateModalEnter(container)
     }
@@ -1410,7 +1592,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun showCreateAccountDialog() {
-        appDialog?.dismiss()
+        dismissAppDialogImmediately()
         val dialog = android.app.Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val sheet = LinearLayout(this).apply {
@@ -1449,8 +1631,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             setLayout((resources.displayMetrics.widthPixels * 0.88f).roundToInt(), WRAP_CONTENT)
             setGravity(Gravity.CENTER)
         }
-        dialog.setOnDismissListener { if (appDialog === dialog) appDialog = null }
-        appDialog = dialog
+        trackAppDialog(dialog)
         dialog.show()
         MotionSpec.animateModalEnter(sheet)
     }
@@ -1844,8 +2025,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 "检测到新设备登录，当前未自动发送换机绑定短信，请点击下方按钮重新发送验证码。"
             }
         }
-        showBottomSheet("新设备短信验证") { sheet, dialog ->
-            var resendCountdownJob: Job? = null
+        var resendCountdownJob: Job? = null
+        showBottomSheet(
+            title = "新设备短信验证",
+            onDismiss = { resendCountdownJob?.cancel() }
+        ) { sheet, dialog ->
             var verifying = false
 
             sheet.addView(text(promptMsg, 13f, TEXT_SECONDARY).apply {
@@ -1996,9 +2180,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             buttons.addView(cancelBtn, weightedLp(0, dp(46)))
             buttons.addView(confirmBtn, weightedLp(dp(10), dp(46)))
 
-            dialog.setOnDismissListener {
-                resendCountdownJob?.cancel()
-            }
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             codeInput.requestFocus()
         }
@@ -2053,18 +2234,25 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     // =========================================================================
 
     private fun showHomeScreen() {
+        clearSubpageOverlayStack()
         val existingHome = homeRootView
         if (existingHome != null && currentScreen == Screen.SETTINGS && existingHome.parent === contentFrame) {
             returnFromSettingsToHome()
             return
         }
 
+        settingsScreen?.dismissTransientOverlays()
+        settingsScreen?.cancelBackgroundJobs()
         settingsScreen = null
         settingsRootView = null
         deckExpandAnimator?.cancel()
+        deckHeightAnimator?.cancel()
+        quickDeckTargetHeightPx = 0
         deckExpandProgress = 0f
+        deckDragStartProgress = 0f
         quickDeckExpanded = false
         quickDeckEditMode = false
+        quickDeckTileViews.clear()
         configureSystemBars(BG_HOME)
         contentFrame.setBackgroundColor(BG_HOME)
         bleConnected = bleController.isSessionReady()
@@ -2074,6 +2262,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         lastGeocodedKey = ""
         lastGeocodedAddress = null
         lastGeocodeSettled = false
+        lastGeocodeFailedAtMs = 0L
 
         val profile = profileStore.getActiveProfile().also { currentProfile = it }
         sessionVehiclePin = profile.controlPin
@@ -2122,16 +2311,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return
         }
 
-        // 2. Stage Frame: Fixed-height 3D WebView (ZERO resize!) + Expanded Control Deck + Overlapping Collapsible Lower Sheet
-        val stageFrame = FrameLayout(this).apply {
+        // 2. Stage Layout: Fixed-height 3D Car Hero -> Fixed 4-button Quick Row -> Expandable Control Deck (below 4 buttons, above 温度) + Scrollable Menu Rows
+        val stageFrame = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setBackgroundColor(BG_HOME)
             clipChildren = true
         }
         homeStageFrame = stageFrame
         homeShell.addView(stageFrame, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
-        val expandedStageH = computeExpandedStageHeight()
-        val collapsedTop = dp(248)
+        val carStageHeight = dp(248)
 
         val carHeroContainer = FrameLayout(this).apply {
             setBackgroundColor(BG_HOME)
@@ -2140,10 +2329,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         carVisual = VehicleVisualView(this).apply {
             modelKey = uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "arrizo8" }
             vehicleLocked = true
-            setCollapsedVisibleRatio(collapsedTop.toFloat() / expandedStageH.toFloat())
+            setCollapsedVisibleRatio(1.0f)
             isClickable = true
             isFocusable = true
-            contentDescription = "3D 车辆视图，单击闪灯，双击切换顶部控制视图"
+            contentDescription = "3D 车辆视图，单击闪灯，双击展开或收起更多车控"
             setOnClickListener {
                 AppHaptics.perform(this, HapticLevel.MEDIUM_CONFIRM)
                 flashLights()
@@ -2157,30 +2346,52 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         buildTpmsOverlay(carHeroContainer)
         stageFrame.addView(
             carHeroContainer,
-            FrameLayout.LayoutParams(MATCH_PARENT, expandedStageH, Gravity.TOP)
+            LinearLayout.LayoutParams(MATCH_PARENT, carStageHeight)
         )
 
-        // 3. Expanded 12-action Control Deck (lives directly below fixed-height car stage; NO bottom handle bar!)
-        buildExpandableQuickDeck(stageFrame, expandedStageH)
+        // 3. Pinned 4-button Quick Action Row (stays fixed directly below 3D car; extra controls unfold strictly below it & above 温度)
+        buildIconQuickActionRow(stageFrame)
 
-        // 4. Collapsible Lower Overlay (Quick Row + subtle pull hint + 3 Menu Rows + Cycling Footer)
-        val dragRangePx = dpF(165f)
-        val expandThresholdPx = dpF(68f)
+        // 4. Lower Scrollable Section: Expandable Control Deck (between 4 quick buttons and 温度) + Pull Handle + Menu Rows + Footer
+        val tempLocation = IntArray(2)
+        fun isPointInsideView(view: View?, rawX: Float, rawY: Float): Boolean {
+            if (view == null || view.visibility != View.VISIBLE || view.width <= 0 || view.height <= 0) return false
+            view.getLocationOnScreen(tempLocation)
+            val l = tempLocation[0].toFloat()
+            val t = tempLocation[1].toFloat()
+            return rawX >= l && rawX <= l + view.width && rawY >= t && rawY <= t + view.height
+        }
+
         val lowerScroll = PullDownInterceptScrollView(
             context = this,
-            canStartPullDown = { !quickDeckExpanded },
-            onDragStart = {
-                deckExpandAnimator?.cancel()
-                updateTpmsBadges(activeTelemetry)
-                renderQuickDeckGrid(animateLabels = false)
+            isDeckExpanded = { quickDeckExpanded },
+            canStartCollapseAt = { rx, ry ->
+                isPointInsideView(quickDeckClipContainer, rx, ry) ||
+                    isPointInsideView(quickDeckPullHintStrip, rx, ry)
             },
-            onDragMove = { dy, _ ->
-                val p = (dy / dragRangePx).coerceIn(0f, 1f)
+            onDragStart = { dir ->
+                deckExpandAnimator?.cancel()
+                deckHeightAnimator?.cancel()
+                deckDragStartProgress = deckExpandProgress
+                if (dir > 0) {
+                    updateTpmsBadges(activeTelemetry)
+                    renderQuickDeckGrid(animateLabels = false)
+                    quickDeckTargetHeightPx = measureQuickDeckTargetHeight()
+                }
+            },
+            onDragMove = { dy, _, _ ->
+                val rangePx = quickDeckTargetHeightPx.takeIf { it > 0 }?.toFloat() ?: dpF(165f)
+                val p = (deckDragStartProgress + dy / rangePx).coerceIn(0f, 1f)
                 applyDeckExpandProgress(p)
             },
-            onDragEnd = { totalDy, velocityY ->
-                val shouldExpand = totalDy > expandThresholdPx || velocityY > 900f
-                if (shouldExpand) {
+            onDragEnd = { _, velocityY, dir ->
+                val shouldExpand = when {
+                    velocityY > 850f -> true
+                    velocityY < -850f -> false
+                    dir > 0 -> deckExpandProgress >= 0.36f
+                    else -> deckExpandProgress > 0.64f
+                }
+                if (shouldExpand != quickDeckExpanded) {
                     AppHaptics.perform(homeStageFrame, HapticLevel.MEDIUM_CONFIRM)
                 }
                 animateDeckTo(shouldExpand)
@@ -2200,31 +2411,32 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         AppSystemInsets.applyBottomNavPadding(lowerScroll)
         lowerScroll.addView(lowerContent, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        buildIconQuickActionRow(lowerContent)
-        // Subtle minimalist pull-down affordance bar (tappable or draggable; disappears cleanly on expand)
+        // 4a. Expandable Control Deck sits strictly BELOW the 4 quick buttons and ABOVE the pull handle & 温度
+        buildExpandableQuickDeck(lowerContent)
+
+        // 4b. Subtle minimalist pull handle (between 4 quick buttons / expanded deck and 温度; tap or drag to toggle)
         val pullHintStrip = FrameLayout(this).apply {
             isClickable = true
             isFocusable = true
-            contentDescription = "展开快捷控制面板"
+            contentDescription = "展开或收起更多车控按钮"
             setOnClickListener {
                 AppHaptics.perform(homeStageFrame, HapticLevel.MEDIUM_CONFIRM)
-                animateDeckTo(true)
+                animateDeckTo(!quickDeckExpanded)
             }
         }
         val pullHintBar = View(this).apply {
             background = rounded(Color.argb(56, 255, 255, 255), 2f)
         }
         pullHintStrip.addView(pullHintBar, FrameLayout.LayoutParams(dp(36), dpF(3f).roundToInt(), Gravity.CENTER))
-        lowerContent.addView(pullHintStrip, lp(height = dp(18)))
+        quickDeckPullHintStrip = pullHintStrip
+        lowerContent.addView(pullHintStrip, lp(height = dp(20)))
 
         buildMenuRows(lowerContent)
         buildHomeFooter(lowerContent)
 
         stageFrame.addView(
             lowerScroll,
-            FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT).apply {
-                topMargin = collapsedTop
-            }
+            LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
         )
 
         // Floating transient feedback pill (hidden when idle so Screen 3 stays clean)
@@ -2347,14 +2559,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         activate = true
                     )
                 }
-                uiPrefs.edit()
-                    .remove(KEY_MODEL_NAME)
-                    .remove(KEY_PLATE_NO)
-                    .apply()
-                bleController.stopAutoProximityWatch()
-                bleController.disconnect()
+                clearVehicleMetadata()
+                provisioningJob?.cancel()
+                provisioningActive = false
+                bleController.resetTargetAndDisconnect()
                 bleConnected = false
                 bleNearby = false
+                lastPairingPin = ""
+                CarWidgetStateStore.clear(this@MainActivity)
+                CarWidgetManager.updateAllWidgets(this@MainActivity)
                 currentProfile = profileStore.getActiveProfile()
                 activeTelemetry = null
                 clearSubpageOverlayStack()
@@ -2406,11 +2619,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
             val wasEmpty = carVisual == null || !currentVin.equals(chosenVin, ignoreCase = true)
             if (wasEmpty) {
+                provisioningJob?.cancel()
+                provisioningActive = false
                 telemetryJob?.cancel()
                 postActionRefreshJob?.cancel()
                 geocodeJob?.cancel()
                 lastGeocodedKey = ""
                 lastGeocodedAddress = null
+                lastGeocodeFailedAtMs = 0L
+                bleController.resetTargetAndDisconnect()
+                bleConnected = false
+                bleNearby = false
+                lastPairingPin = ""
                 activeTelemetry = null
                 homeRootView = null
                 clearSubpageOverlayStack()
@@ -2486,11 +2706,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             cloudTripTrackEnabled = chosen.isTracksOpen ?: cloudTripTrackEnabled
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
+            provisioningJob?.cancel()
+            provisioningActive = false
             telemetryJob?.cancel()
             postActionRefreshJob?.cancel()
             geocodeJob?.cancel()
             lastGeocodedKey = ""
             lastGeocodedAddress = null
+            lastGeocodeFailedAtMs = 0L
+            bleController.resetTargetAndDisconnect()
+            bleConnected = false
+            bleNearby = false
+            lastPairingPin = ""
             activeTelemetry = null
             homeRootView = null
             showHomeScreen()
@@ -2505,8 +2732,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         contentFrame.setBackgroundColor(BG_HOME)
         val overlay = settingsRootView
         settingsRootView = null
+        settingsScreen?.dismissTransientOverlays()
+        settingsScreen?.cancelBackgroundJobs()
         settingsScreen = null
         if (overlay != null) {
+            overlay.isClickable = false
+            overlay.isFocusable = false
             val endX = contentFrame.width.takeIf { it > 0 }?.toFloat()
                 ?: resources.displayMetrics.widthPixels.toFloat()
             overlay.animate().cancel()
@@ -2729,6 +2960,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             .putString(KEY_PLATE_NO, vehicle.plateNo.trim())
             .putString(KEY_ENGINE_TYPE, vehicle.engineType.trim())
             .putString(KEY_AIR_TYPE, vehicle.airType.trim())
+            .putString(KEY_SUNROOF_TYPE, vehicle.sunroofType.trim())
             .putString(KEY_TEMP_LO, vehicle.tempLo.trim())
             .putString(KEY_TEMP_HI, vehicle.tempHi.trim())
             .putString(KEY_OPEN_AIR, vehicle.openAir.trim())
@@ -2743,12 +2975,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             .remove(KEY_PLATE_NO)
             .remove(KEY_ENGINE_TYPE)
             .remove(KEY_AIR_TYPE)
+            .remove(KEY_SUNROOF_TYPE)
             .remove(KEY_TEMP_LO)
             .remove(KEY_TEMP_HI)
             .remove(KEY_OPEN_AIR)
             .remove(KEY_VEHICLE_SN)
             .remove(KEY_VEHICLE_ICCID)
             .apply()
+    }
+
+    private fun sunroofExtraParams(): Map<String, String> {
+        val raw = uiPrefs.getString(KEY_SUNROOF_TYPE, "").orEmpty().trim()
+        return if (raw == "0" || raw == "1") mapOf("sunroofType" to raw) else emptyMap()
     }
 
     private fun activePowertrain(telemetry: VehicleTelemetry? = activeTelemetry): VehiclePowertrain {
@@ -2770,19 +3008,29 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             onPinReady(cachedPin)
             return
         }
-        appDialog?.dismiss()
-        appDialog = SixDigitPinSheet.showVerifyPinSheet(
+        dismissAppDialogImmediately()
+        lateinit var dialog: android.app.Dialog
+        dialog = SixDigitPinSheet.showVerifyPinSheet(
             context = this,
             title = "输入 PIN 码",
             subtitle = "请输入 6 位云端 PIN 码以执行「$actionLabel」"
         ) { pin, showError, dismiss ->
             lifecycleScope.launch {
-                val verified = runCatching {
+                val res = runCatching {
                     withContext(Dispatchers.IO) {
                         httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
                     }
-                }.getOrDefault(false)
-                if (verified) {
+                }
+                if (isFinishing || isDestroyed || !dialog.isShowing) return@launch
+                res.onFailure { err ->
+                    if (err is CherySessionExpiredException) {
+                        dismiss()
+                    } else {
+                        showError("网络异常，PIN 码校验失败，请重试")
+                    }
+                    return@launch
+                }
+                if (res.getOrDefault(false)) {
                     sessionVehiclePin = pin
                     currentProfile = withContext(Dispatchers.IO) {
                         profileStore.updateControlPin(profile.vin, pin)
@@ -2794,6 +3042,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
         }
+        trackAppDialog(dialog)
     }
 
     private fun formatEnergyDisplay(telemetry: VehicleTelemetry?): String {
@@ -2927,19 +3176,29 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     Toast.makeText(this@MainActivity, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
                 } else {
                     val actionDesc = if (targetChecked) "开启" else "关闭"
-                    appDialog?.dismiss()
-                    appDialog = SixDigitPinSheet.showVerifyPinSheet(
+                    dismissAppDialogImmediately()
+                    lateinit var dialog: android.app.Dialog
+                    dialog = SixDigitPinSheet.showVerifyPinSheet(
                         context = this@MainActivity,
                         title = "验证 PIN 码",
                         subtitle = "请输入 6 位云端 PIN 码以${actionDesc}每次控车验证"
                     ) { pin, showError, dismiss ->
                         lifecycleScope.launch {
-                            val verified = runCatching {
+                            val res = runCatching {
                                 withContext(Dispatchers.IO) {
                                     httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
                                 }
-                            }.getOrDefault(false)
-                            if (verified) {
+                            }
+                            if (isFinishing || isDestroyed || !dialog.isShowing) return@launch
+                            res.onFailure { err ->
+                                if (err is CherySessionExpiredException) {
+                                    dismiss()
+                                } else {
+                                    showError("网络异常，PIN 码校验失败，请重试")
+                                }
+                                return@launch
+                            }
+                            if (res.getOrDefault(false)) {
                                 sessionVehiclePin = pin
                                 currentProfile = withContext(Dispatchers.IO) {
                                     profileStore.updateControlPin(profile.vin, pin)
@@ -2954,6 +3213,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             }
                         }
                     }
+                    trackAppDialog(dialog)
                 }
             }
         }
@@ -3048,21 +3308,24 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     }
                 }
             } else {
-                AppComponents.showConfirmDialog(
-                    context = this@MainActivity,
-                    title = "关闭蓝牙无感",
-                    message = "关闭后将停止靠近解锁与离车上锁。",
-                    confirmText = "确认关闭",
-                    cancelText = "取消",
-                    dangerConfirm = true
-                ) {
-                    val currentCfg = PassiveEntryStore.load(this@MainActivity, profile.vin)
-                    PassiveEntryStore.save(this@MainActivity, currentCfg.copy(enabled = false))
-                    PassiveEntryWakeManager.disable(this@MainActivity, profile.bleMac)
-                    passiveSwitch.setChecked(false, animate = true)
-                    refreshPassiveEntrySecurityRow()
-                    Toast.makeText(this@MainActivity, "已关闭蓝牙无感", Toast.LENGTH_SHORT).show()
-                }
+                dismissAppDialogImmediately()
+                trackAppDialog(
+                    AppComponents.showConfirmDialog(
+                        context = this@MainActivity,
+                        title = "关闭蓝牙无感",
+                        message = "关闭后将停止靠近解锁与离车上锁。",
+                        confirmText = "确认关闭",
+                        cancelText = "取消",
+                        dangerConfirm = true
+                    ) {
+                        val currentCfg = PassiveEntryStore.load(this@MainActivity, profile.vin)
+                        PassiveEntryStore.save(this@MainActivity, currentCfg.copy(enabled = false))
+                        PassiveEntryWakeManager.disable(this@MainActivity, profile.bleMac)
+                        passiveSwitch.setChecked(false, animate = true)
+                        refreshPassiveEntrySecurityRow()
+                        Toast.makeText(this@MainActivity, "已关闭蓝牙无感", Toast.LENGTH_SHORT).show()
+                    }
+                )
             }
         }
         content.addView(passiveRow, lp())
@@ -3120,6 +3383,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             alpha = 0.55f
         }
 
+        lateinit var promptAntiTheftPin: (Boolean) -> Unit
+
         fun submitAntiTheftToggle(targetEnabled: Boolean, verifiedPin: String) {
             val profile = profileStore.getActiveProfile()
             if (profile.vin.isBlank() || profile.accessToken.isBlank()) return
@@ -3129,7 +3394,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             theftSwitch.isEnabled = false
             theftSwitch.alpha = 0.55f
             lifecycleScope.launch {
-                val ok = runCatching {
+                val res = runCatching {
                     withContext(Dispatchers.IO) {
                         val payload = org.json.JSONObject().apply {
                             put("vin", profile.vin.trim().uppercase(Locale.US))
@@ -3140,27 +3405,80 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 put("safePasswd", httpClient.hashPasswordOrPin(verifiedPin))
                             }
                         }
-                        val env = httpClient.executeZyhlService("970", payload, profile.accessToken)
-                        httpClient.is970CommandAccepted(env)
+                        httpClient.executeZyhlService("970", payload, profile.accessToken)
                     }
-                }.getOrDefault(false)
+                }
                 theftBusy = false
                 theftSyncLabel.visibility = View.GONE
                 theftSwitch.isEnabled = true
                 theftSwitch.alpha = 1f
+                val env = res.getOrNull()
+                val ok = env != null && httpClient.is970CommandAccepted(env)
                 if (ok) {
                     theftEnabledState = targetEnabled
+                    lastKnownAntiTheftEnabled = targetEnabled
                     theftSwitch.setChecked(targetEnabled, animate = true)
                     Toast.makeText(
                         this@MainActivity,
                         if (targetEnabled) "已开启防盗提醒" else "已关闭防盗提醒",
                         Toast.LENGTH_SHORT
                     ).show()
+                } else if (env != null && httpClient.isPinRejectionEnvelope(env)) {
+                    theftSwitch.setChecked(theftEnabledState, animate = true)
+                    sessionVehiclePin = ""
+                    if (profile.vin.isNotBlank()) {
+                        withContext(Dispatchers.IO) {
+                            profileStore.updateControlPin(profile.vin, "")
+                        }?.let { currentProfile = it }
+                    }
+                    Toast.makeText(this@MainActivity, "本机 PIN 码已失效，请重新验证", Toast.LENGTH_SHORT).show()
+                    promptAntiTheftPin(targetEnabled)
                 } else {
                     theftSwitch.setChecked(theftEnabledState, animate = true)
-                    Toast.makeText(this@MainActivity, "防盗提醒设置同步失败，请稍后重试", Toast.LENGTH_SHORT).show()
+                    if (res.exceptionOrNull() !is CherySessionExpiredException) {
+                        Toast.makeText(this@MainActivity, "防盗提醒设置同步失败，请稍后重试", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
+        }
+
+        promptAntiTheftPin = { targetEnabled ->
+            val profile = profileStore.getActiveProfile()
+            dismissAppDialogImmediately()
+            lateinit var dialog: android.app.Dialog
+            dialog = SixDigitPinSheet.showVerifyPinSheet(
+                context = this@MainActivity,
+                title = "输入 PIN 码",
+                subtitle = "请输入 6 位云端 PIN 码以${if (targetEnabled) "开启" else "关闭"}防盗提醒"
+            ) { pin, showError, dismiss ->
+                lifecycleScope.launch {
+                    val res = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
+                        }
+                    }
+                    if (isFinishing || isDestroyed || !dialog.isShowing) return@launch
+                    res.onFailure { err ->
+                        if (err is CherySessionExpiredException) {
+                            dismiss()
+                        } else {
+                            showError("网络异常，PIN 码校验失败，请重试")
+                        }
+                        return@launch
+                    }
+                    if (res.getOrDefault(false)) {
+                        sessionVehiclePin = pin
+                        currentProfile = withContext(Dispatchers.IO) {
+                            profileStore.updateControlPin(profile.vin, pin)
+                        } ?: profileStore.getActiveProfile()
+                        dismiss()
+                        submitAntiTheftToggle(targetEnabled, pin)
+                    } else {
+                        showError("云端 PIN 码错误，请重试")
+                    }
+                }
+            }
+            trackAppDialog(dialog)
         }
 
         theftSwitch.onToggleAttempt = { targetEnabled ->
@@ -3172,45 +3490,25 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 } else {
                     "关闭后将不再接收车辆防盗异常告警提醒，确定关闭吗？"
                 }
-                AppComponents.showConfirmDialog(
-                    context = this@MainActivity,
-                    title = titleText,
-                    message = messageText,
-                    confirmText = "确认",
-                    cancelText = "取消",
-                    dangerConfirm = !targetEnabled
-                ) {
-                    val cachedPin = profile.controlPin.trim().ifBlank { sessionVehiclePin.trim() }
-                    val needPin = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) || cachedPin.length != 6
-                    if (needPin) {
-                        appDialog?.dismiss()
-                        appDialog = SixDigitPinSheet.showVerifyPinSheet(
-                            context = this@MainActivity,
-                            title = "输入 PIN 码",
-                            subtitle = "请输入 6 位云端 PIN 码以${if (targetEnabled) "开启" else "关闭"}防盗提醒"
-                        ) { pin, showError, dismiss ->
-                            lifecycleScope.launch {
-                                val verified = runCatching {
-                                    withContext(Dispatchers.IO) {
-                                        httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
-                                    }
-                                }.getOrDefault(false)
-                                if (verified) {
-                                    sessionVehiclePin = pin
-                                    currentProfile = withContext(Dispatchers.IO) {
-                                        profileStore.updateControlPin(profile.vin, pin)
-                                    } ?: profileStore.getActiveProfile()
-                                    dismiss()
-                                    submitAntiTheftToggle(targetEnabled, pin)
-                                } else {
-                                    showError("云端 PIN 码错误，请重试")
-                                }
-                            }
+                dismissAppDialogImmediately()
+                trackAppDialog(
+                    AppComponents.showConfirmDialog(
+                        context = this@MainActivity,
+                        title = titleText,
+                        message = messageText,
+                        confirmText = "确认",
+                        cancelText = "取消",
+                        dangerConfirm = !targetEnabled
+                    ) {
+                        val cachedPin = profile.controlPin.trim().ifBlank { sessionVehiclePin.trim() }
+                        val needPin = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) || cachedPin.length != 6
+                        if (needPin) {
+                            promptAntiTheftPin(targetEnabled)
+                        } else {
+                            submitAntiTheftToggle(targetEnabled, cachedPin)
                         }
-                    } else {
-                        submitAntiTheftToggle(targetEnabled, cachedPin)
                     }
-                }
+                )
             }
         }
         theftTrailing.addView(theftSwitch)
@@ -3468,17 +3766,28 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         locationOverlayView = null
         locationOverlayDestroy = null
         if (overlay != null) {
+            overlay.isClickable = false
+            overlay.isFocusable = false
             val endX = contentFrame.width.takeIf { it > 0 }?.toFloat()
                 ?: resources.displayMetrics.widthPixels.toFloat()
+            var finished = false
+            lateinit var entry: Pair<View, () -> Unit>
+            val finalizeExit = {
+                if (!finished) {
+                    finished = true
+                    pendingExitDestroys.remove(entry)
+                    destroyCb?.invoke()
+                    contentFrame.removeView(overlay)
+                }
+            }
+            entry = overlay to finalizeExit
+            pendingExitDestroys.add(entry)
             overlay.animate().cancel()
             overlay.animate()
                 .translationX(endX)
                 .setDuration(220L)
                 .setInterpolator(MotionSpec.EASE_STANDARD)
-                .withEndAction {
-                    destroyCb?.invoke()
-                    contentFrame.removeView(overlay)
-                }
+                .withEndAction { finalizeExit() }
                 .start()
         } else {
             destroyCb?.invoke()
@@ -3520,6 +3829,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val overlay = messagesOverlayView
         messagesOverlayView = null
         if (overlay != null) {
+            overlay.isClickable = false
+            overlay.isFocusable = false
             val endX = contentFrame.width.takeIf { it > 0 }?.toFloat()
                 ?: resources.displayMetrics.widthPixels.toFloat()
             overlay.animate().cancel()
@@ -3578,15 +3889,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val revealedTop = subpageOverlayStack.lastOrNull()?.first
         val endX = contentFrame.width.takeIf { it > 0 }?.toFloat()
             ?: resources.displayMetrics.widthPixels.toFloat()
+        overlay.isClickable = false
+        overlay.isFocusable = false
+        var finished = false
+        lateinit var exitEntry: Pair<View, () -> Unit>
+        val finalizeExit = {
+            if (!finished) {
+                finished = true
+                pendingExitDestroys.remove(exitEntry)
+                destroyCb?.invoke()
+                contentFrame.removeView(overlay)
+            }
+        }
+        exitEntry = overlay to finalizeExit
+        pendingExitDestroys.add(exitEntry)
         overlay.animate().cancel()
         overlay.animate()
             .translationX(endX)
             .setDuration(240L)
             .setInterpolator(MotionSpec.EASE_STANDARD)
-            .withEndAction {
-                destroyCb?.invoke()
-                contentFrame.removeView(overlay)
-            }
+            .withEndAction { finalizeExit() }
             .start()
 
         revealedTop?.let { bg ->
@@ -3601,13 +3923,32 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 .start()
         }
 
-        if (subpageOverlayStack.isEmpty() && currentScreen == Screen.HOME) {
-            carVisual?.onHostResume()
-            refreshHomeHeaderAndRows()
+        if (subpageOverlayStack.isEmpty()) {
+            when (currentScreen) {
+                Screen.HOME -> {
+                    carVisual?.onHostResume()
+                    refreshHomeHeaderAndRows()
+                    resumeHomeForegroundLoops()
+                }
+                Screen.SETTINGS -> {
+                    settingsScreen?.refreshVehicleRow()
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    private fun flushPendingExitDestroys() {
+        val snapshot = pendingExitDestroys.toList()
+        pendingExitDestroys.clear()
+        snapshot.forEach { (view, finalizeExit) ->
+            view.animate().cancel()
+            finalizeExit()
         }
     }
 
     private fun clearSubpageOverlayStack() {
+        flushPendingExitDestroys()
         while (subpageOverlayStack.isNotEmpty()) {
             val (overlay, destroyCb) = subpageOverlayStack.removeLast()
             overlay.animate().cancel()
@@ -3625,6 +3966,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         securitySubpageStatusText = null
         securityPassiveRefreshCallback = null
         if (overlay != null) {
+            overlay.isClickable = false
+            overlay.isFocusable = false
             val endX = contentFrame.width.takeIf { it > 0 }?.toFloat()
                 ?: resources.displayMetrics.widthPixels.toFloat()
             overlay.animate().cancel()
@@ -3724,16 +4067,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return pressureTv to tempTv
         }
 
-        val fl = makeMinimalTpmsCorner(Gravity.TOP or Gravity.START, false, dp(22), dp(22), 0, 0)
+        val fl = makeMinimalTpmsCorner(Gravity.TOP or Gravity.START, false, dp(20), dp(14), 0, 0)
         tpmsFlPressure = fl.first
         tpmsFlTemp = fl.second
-        val fr = makeMinimalTpmsCorner(Gravity.TOP or Gravity.END, true, 0, dp(22), dp(22), 0)
+        val fr = makeMinimalTpmsCorner(Gravity.TOP or Gravity.END, true, 0, dp(14), dp(20), 0)
         tpmsFrPressure = fr.first
         tpmsFrTemp = fr.second
-        val rl = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.START, false, dp(22), 0, 0, dp(22))
+        val rl = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.START, false, dp(20), 0, 0, dp(14))
         tpmsRlPressure = rl.first
         tpmsRlTemp = rl.second
-        val rr = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.END, true, 0, 0, dp(22), dp(22))
+        val rr = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.END, true, 0, 0, dp(20), dp(14))
         tpmsRrPressure = rr.first
         tpmsRrTemp = rr.second
         heroContainer.addView(overlay, matchParent())
@@ -3741,19 +4084,43 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun formatCornerTyrePressure(pressureRaw: String): String {
         val raw = pressureRaw.trim()
-        if (raw.isBlank() || raw == "0" || raw == "255") return "--"
+        if (raw.isBlank() || raw == "0" || raw.equals("FFFF", ignoreCase = true) || raw == "65535") return "--"
         val match = NUMBER_EXTRACT_REGEX.find(raw) ?: return "--"
         val num = match.value.toDoubleOrNull() ?: return "--"
-        if (num <= 0.0 || num >= 255.0) return "--"
+        val unit = activeTelemetry?.tyreUnit.orEmpty().trim().lowercase(Locale.US)
+        val rawLower = raw.lowercase(Locale.US)
         val bar = when {
-            num >= 100.0 -> num / 100.0
-            num >= 10.0 -> num / 10.0
-            else -> num
+            rawLower.contains("psi") || unit.contains("psi") -> {
+                if (num <= 0.0 || num > 100.0) return "--"
+                num * 0.0689476
+            }
+            rawLower.contains("kpa") || unit.contains("kpa") -> {
+                if (num <= 0.0 || num > 500.0) return "--"
+                num / 100.0
+            }
+            rawLower.contains("bar") || unit.contains("bar") -> {
+                if (num <= 0.0 || num > 10.0) return "--"
+                num
+            }
+            else -> {
+                if (num <= 0.0 || num > 500.0) return "--"
+                when {
+                    num >= 100.0 -> num / 100.0
+                    num >= 10.0 -> num / 10.0
+                    else -> num
+                }
+            }
         }
+        if (bar <= 0.0 || bar > 6.0) return "--"
         return String.format(Locale.US, "%.2f", bar)
     }
 
     private fun updateTpmsBadges(telemetry: VehicleTelemetry?) {
+        fun isValidTemp(s: String): Boolean {
+            if (s.isBlank() || s == "255" || s == "65535" || s.equals("FFFF", ignoreCase = true)) return false
+            val n = s.toDoubleOrNull() ?: return false
+            return n in -40.0..150.0
+        }
         fun applyCorner(
             pressureTv: TextView?,
             tempTv: TextView?,
@@ -3763,8 +4130,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             pressureTv?.text = formatCornerTyrePressure(pressureRaw)
 
             val temp = tempKeys.firstNotNullOfOrNull { key ->
-                telemetry?.conditionFields?.get(key)?.trim()?.takeIf { it.isNotBlank() && it != "255" }
-                    ?: telemetry?.conditionFields?.get(key.uppercase(Locale.US))?.trim()?.takeIf { it.isNotBlank() && it != "255" }
+                telemetry?.conditionFields?.get(key)?.trim()?.takeIf(::isValidTemp)
+                    ?: telemetry?.conditionFields?.get(key.uppercase(Locale.US))?.trim()?.takeIf(::isValidTemp)
             }
             if (temp != null) {
                 tempTv?.text = "${temp}°C"
@@ -3791,28 +4158,36 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         rebuildQuickActionRow()
     }
 
-    private fun computeExpandedStageHeight(): Int {
-        val screenH = resources.displayMetrics.heightPixels
-        return (screenH * 0.44f).roundToInt().coerceIn(dp(300), dp(400))
-    }
+    private fun buildExpandableQuickDeck(parent: LinearLayout) {
+        val clip = FrameLayout(this).apply {
+            setBackgroundColor(BG_HOME)
+            clipChildren = true
+            clipToPadding = true
+            visibility = View.GONE
+        }
+        quickDeckClipContainer = clip
 
-    private fun buildExpandableQuickDeck(stageFrame: FrameLayout, expandedStageH: Int) {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(BG_HOME)
             visibility = View.GONE
             alpha = 0f
-            setPadding(dp(18), dp(8), dp(18), dp(20))
+            setPadding(dp(18), dp(6), dp(18), dp(8))
         }
-        AppSystemInsets.applyBottomNavPadding(container)
         quickDeckContainer = container
+
+        container.addView(
+            View(this).apply { setBackgroundColor(ThemeTokens.DIVIDER) },
+            LinearLayout.LayoutParams(MATCH_PARENT, dpF(0.6f).roundToInt().coerceAtLeast(1)).apply {
+                bottomMargin = dp(8)
+            }
+        )
 
         val editHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
-            setPadding(dp(4), dp(2), dp(4), dp(12))
+            setPadding(dp(4), dp(2), dp(4), dp(10))
         }
         quickDeckEditHeader = editHeader
         val editTitle = text("", 12.5f, TEXT_SECONDARY, Typeface.BOLD)
@@ -3830,6 +4205,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 quickDeckEditMode = false
                 rebuildQuickActionRow()
                 renderQuickDeckGrid(animateLabels = false)
+                syncExpandedClipHeightAnimated()
                 showHomeStatus("首页快捷栏已保存")
             }
         }
@@ -3842,45 +4218,78 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         quickDeckGridHost = gridHost
         container.addView(gridHost, lp())
 
-        stageFrame.addView(
+        clip.addView(
             container,
-            FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT).apply {
-                topMargin = expandedStageH
-            }
+            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM)
         )
+        parent.addView(clip, LinearLayout.LayoutParams(MATCH_PARENT, 0))
+    }
+
+    private fun measureQuickDeckTargetHeight(): Int {
+        val deck = quickDeckContainer ?: return dp(172)
+        val width = homeStageFrame?.width?.takeIf { it > 0 }
+            ?: resources.displayMetrics.widthPixels
+        val prevVis = deck.visibility
+        deck.visibility = View.VISIBLE
+        deck.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val measured = deck.measuredHeight.coerceAtLeast(dp(84))
+        deck.visibility = prevVis
+        return measured
+    }
+
+    private fun syncExpandedClipHeightAnimated() {
+        val clip = quickDeckClipContainer ?: return
+        val newTarget = measureQuickDeckTargetHeight()
+        quickDeckTargetHeightPx = newTarget
+        if (!quickDeckExpanded || deckExpandProgress < 0.95f) return
+        val startH = clip.layoutParams?.height?.takeIf { it > 0 } ?: clip.height
+        if (startH == newTarget) return
+        deckHeightAnimator?.cancel()
+        deckHeightAnimator = ValueAnimator.ofInt(startH, newTarget).apply {
+            duration = 220L
+            interpolator = MotionSpec.EASE_OUT_EXPO
+            addUpdateListener { anim ->
+                val lp = clip.layoutParams ?: return@addUpdateListener
+                lp.height = anim.animatedValue as Int
+                clip.layoutParams = lp
+            }
+            start()
+        }
     }
 
     private fun applyDeckExpandProgress(progress: Float) {
         val p = progress.coerceIn(0f, 1f)
         deckExpandProgress = p
 
-        // Drive 3D camera in exact 1:1 frame lockstep with the sliding sheet (zero secondary lag)
+        // Drive 3D camera in exact 1:1 frame lockstep (rotates to top-down + TPMS inside fixed hero stage)
         carVisual?.setDeckProgress(p)
         carHeroContainerView?.translationY = 0f
 
-        val stageH = homeStageFrame?.height?.takeIf { it > 0 }
-            ?: (resources.displayMetrics.heightPixels - dp(120))
-        val slideDistance = (stageH - dp(248)).coerceAtLeast(dp(360)).toFloat()
+        val targetH = quickDeckTargetHeightPx.takeIf { it > 0 } ?: measureQuickDeckTargetHeight()
+        quickDeckTargetHeightPx = targetH
+        val visible = p > 0.002f
+        val curH = if (visible) (targetH * p).roundToInt() else 0
 
-        // Pure solid physical drawer slide: lower sheet stays opaque (alpha = 1f) and glides smoothly down/up
-        lowerOverlayContainer?.let { lower ->
-            lower.visibility = if (p >= 0.998f) View.GONE else View.VISIBLE
-            lower.translationY = slideDistance * p
-            lower.scaleX = 1f
-            lower.scaleY = 1f
-            lower.alpha = 1f
+        quickDeckClipContainer?.let { clip ->
+            clip.visibility = if (visible) View.VISIBLE else View.GONE
+            val lp = clip.layoutParams
+            if (lp != null && lp.height != curH) {
+                lp.height = curH
+                clip.layoutParams = lp
+            }
         }
 
-        // Control deck sits cleanly behind the opaque lower sheet (alpha = 1f, zero cross-fade ghosting)
-        // and rises subtly into place as the lower sheet glides out of the way
         quickDeckContainer?.let { deck ->
-            deck.visibility = if (p <= 0.002f) View.GONE else View.VISIBLE
-            deck.alpha = 1f
-            deck.translationY = (1f - p) * dpF(28f)
+            deck.visibility = if (visible) View.VISIBLE else View.GONE
+            deck.alpha = ((p - 0.06f) / 0.94f).coerceIn(0f, 1f)
+            deck.translationY = 0f
 
-            quickDeckRowViews.forEachIndexed { rowIdx, row ->
+            quickDeckRowViews.forEach { row ->
                 row.alpha = 1f
-                row.translationY = (1f - p) * dpF(rowIdx * 8f)
+                row.translationY = 0f
                 row.scaleX = 1f
                 row.scaleY = 1f
             }
@@ -3901,10 +4310,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun animateDeckTo(targetExpanded: Boolean) {
         deckExpandAnimator?.cancel()
+        deckHeightAnimator?.cancel()
         quickDeckExpanded = targetExpanded
         if (targetExpanded) {
             updateTpmsBadges(activeTelemetry)
             renderQuickDeckGrid(animateLabels = false)
+            quickDeckTargetHeightPx = measureQuickDeckTargetHeight()
         } else {
             quickDeckEditMode = false
         }
@@ -3918,8 +4329,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
         val spanFraction = abs(end - start).coerceIn(0.25f, 1f)
-        val totalDurationMs = (420f * spanFraction).roundToInt().coerceIn(220, 420).toLong()
+        val totalDurationMs = (360f * spanFraction).roundToInt().coerceIn(200, 360).toLong()
 
+        var cancelled = false
         deckExpandAnimator = ValueAnimator.ofFloat(start, end).apply {
             duration = totalDurationMs
             interpolator = MotionSpec.EASE_OUT_EXPO
@@ -3927,8 +4339,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 applyDeckExpandProgress(anim.animatedValue as Float)
             }
             addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: android.animation.Animator) {
+                    cancelled = true
+                }
+
                 override fun onAnimationEnd(animation: android.animation.Animator) {
-                    if (!targetExpanded) {
+                    if (!cancelled && !targetExpanded) {
                         rebuildQuickActionRow()
                     }
                 }
@@ -3956,8 +4372,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             QuickActionId.TRUNK -> t?.trunkOpen == true
             QuickActionId.ENGINE -> t?.engineRunning == true
             QuickActionId.WINDOW -> areWindowsOpen(t)
-            QuickActionId.SUNROOF -> isSkylightOpen(t?.skylightState)
-            QuickActionId.SUNROOF_TILT -> isSkylightTilted(t?.skylightState)
+            QuickActionId.SUNROOF -> isSkylightOpen(effectiveSkylightState(t))
+            QuickActionId.SUNROOF_TILT -> isSkylightTilted(effectiveSkylightState(t))
             else -> false
         }
     }
@@ -4017,8 +4433,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         gridHost.removeAllViews()
         quickDeckRowViews.clear()
-        val tileHeight = dp(78)
-        QuickActionId.values().toList().chunked(3).forEachIndexed { rowIdx, chunk ->
+        quickDeckTileViews.clear()
+        val displayActions = if (quickDeckEditMode) {
+            QuickActionId.values().toList()
+        } else {
+            QuickActionId.values().filter { it !in selectedSet }.ifEmpty { QuickActionId.values().toList() }
+        }
+        val columns = if (!quickDeckEditMode && displayActions.size <= 4) {
+            displayActions.size.coerceAtLeast(1)
+        } else {
+            3
+        }
+        val tileHeight = dp(74)
+        displayActions.chunked(columns).forEachIndexed { rowIdx, chunk ->
             val rowView = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
             }
@@ -4032,7 +4459,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 val btn = AppComponents.createControlIconButton(
                     context = this,
                     iconType = iconType,
-                    sizeDp = 28,
+                    sizeDp = 26,
                     active = !quickDeckEditMode && isStateActive,
                     label = tileLabel,
                     showCheckDot = quickDeckEditMode && isPinned,
@@ -4052,6 +4479,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 } else {
                                     mutable.remove(action)
                                     saveQuickActions(mutable)
+                                    rebuildQuickActionRow()
                                     renderQuickDeckGrid(animateLabels = false)
                                 }
                             } else {
@@ -4060,6 +4488,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 } else {
                                     mutable.add(action)
                                     saveQuickActions(mutable)
+                                    rebuildQuickActionRow()
                                     renderQuickDeckGrid(animateLabels = false)
                                 }
                             }
@@ -4072,6 +4501,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             AppHaptics.perform(this, HapticLevel.LONG_PRESS_MODE)
                             quickDeckEditMode = true
                             renderQuickDeckGrid(animateLabels = true)
+                            syncExpandedClipHeightAnimated()
                         }
                         true
                     }
@@ -4081,6 +4511,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 if (action == QuickActionId.CLIMATE && isStateActive && !quickDeckEditMode) {
                     iconView?.spinEnabled = true
                 }
+                quickDeckTileViews[action] = btn
                 if (quickDeckEditMode && animateLabels) {
                     btn.findViewWithTag<TextView>("control_label")?.apply {
                         alpha = 0f
@@ -4094,7 +4525,37 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
                 rowView.addView(btn, weightedLp(if (colIdx == 0) 0 else dp(8), tileHeight))
             }
-            gridHost.addView(rowView, lp(top = if (rowIdx == 0) 0 else dp(10)))
+            // Pad incomplete trailing row so icons align cleanly to the grid columns
+            val remainingSlots = columns - chunk.size
+            for (s in 0 until remainingSlots) {
+                rowView.addView(View(this), weightedLp(dp(8), tileHeight))
+            }
+            gridHost.addView(rowView, lp(top = if (rowIdx == 0) 0 else dp(6)))
+        }
+        if (quickDeckExpanded && !quickDeckEditMode) {
+            quickDeckTargetHeightPx = measureQuickDeckTargetHeight()
+        }
+    }
+
+    private fun updateQuickDeckTileStates() {
+        if (quickDeckEditMode) return
+        if (quickDeckTileViews.isEmpty()) {
+            renderQuickDeckGrid(animateLabels = false)
+            return
+        }
+        quickDeckTileViews.forEach { (action, tile) ->
+            val active = isQuickActionActive(action)
+            val iconType = resolveQuickActionIcon(action, active)
+            val labelText = resolveQuickActionLabel(action, active, editMode = false)
+            tile.findViewWithTag<AppIconView>("control_icon")?.apply {
+                this.iconType = iconType
+                MotionSpec.animateIconTint(this, if (active) ACCENT_BLUE else TEXT_PRIMARY)
+                spinEnabled = (action == QuickActionId.CLIMATE && active)
+            }
+            tile.findViewWithTag<TextView>("control_label")?.apply {
+                text = labelText
+                setTextColor(if (active) ACCENT_BLUE else ThemeTokens.TEXT_BODY)
+            }
         }
     }
 
@@ -4134,9 +4595,21 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             ).apply {
                 isClickable = true
                 isFocusable = true
+                isLongClickable = true
                 contentDescription = action.label
                 MotionSpec.attachPressPhysics(this, pressedScale = 0.88f)
                 setOnClickListener { triggerQuickAction(action) }
+                setOnLongClickListener {
+                    AppHaptics.perform(this, HapticLevel.LONG_PRESS_MODE)
+                    quickDeckEditMode = true
+                    if (quickDeckExpanded) {
+                        renderQuickDeckGrid(animateLabels = true)
+                        syncExpandedClipHeightAnimated()
+                    } else {
+                        animateDeckTo(true)
+                    }
+                    true
+                }
             }
             btn.findViewWithTag<AppIconView>("control_icon")?.let { iconView ->
                 quickActionIcons[action] = iconView
@@ -4160,16 +4633,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
             QuickActionId.CLIMATE -> {
+                val airExtra = mapOf("airType" to uiPrefs.getString(KEY_AIR_TYPE, "1").orEmpty().ifBlank { "1" })
                 if (activeTelemetry?.acOn == true) {
                     carVisual?.triggerActionFeedback("ac_off")
-                    dispatchSmartVehicleCommand("ac_off", "关闭空调")
+                    dispatchSmartVehicleCommand("ac_off", "关闭空调", extraParams = airExtra)
                 } else {
                     carVisual?.climateTemp = climateTemperatureCelsius
                     carVisual?.triggerActionFeedback("ac_on")
                     dispatchSmartVehicleCommand(
                         "ac_on",
                         "开启空调",
-                        temperatureCelsius = climateTemperatureCelsius
+                        temperatureCelsius = climateTemperatureCelsius,
+                        extraParams = airExtra
                     )
                 }
             }
@@ -4210,18 +4685,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 dispatchSmartVehicleCommand("window_ventilate", "车窗透气")
             }
             QuickActionId.SUNROOF -> {
-                if (isSkylightOpen(activeTelemetry?.skylightState)) {
+                val sunExtra = sunroofExtraParams()
+                if (isSkylightOpen(effectiveSkylightState(activeTelemetry))) {
                     carVisual?.triggerActionFeedback("skylight_close")
-                    dispatchSmartVehicleCommand("skylight_close", "关闭天窗")
+                    dispatchSmartVehicleCommand("skylight_close", "关闭天窗", extraParams = sunExtra)
                 } else {
                     carVisual?.triggerActionFeedback("skylight_open")
-                    dispatchSmartVehicleCommand("skylight_open", "打开天窗")
+                    dispatchSmartVehicleCommand("skylight_open", "打开天窗", extraParams = sunExtra)
                 }
             }
             QuickActionId.SUNROOF_TILT -> {
                 carVisual?.skylightMode = "tilt"
                 carVisual?.triggerActionFeedback("skylight_tilt")
-                dispatchSmartVehicleCommand("skylight_tilt", "天窗翘起")
+                dispatchSmartVehicleCommand("skylight_tilt", "天窗翘起", extraParams = sunroofExtraParams())
             }
         }
     }
@@ -4233,8 +4709,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val trunkIsOpen = telemetry?.trunkOpen == true
         val engineRunningNow = telemetry?.engineRunning == true
         val windowsOpenNow = areWindowsOpen(telemetry)
-        val sunroofOpenNow = isSkylightOpen(telemetry?.skylightState)
-        val sunroofTiltedNow = isSkylightTilted(telemetry?.skylightState)
+        val sunroofOpenNow = isSkylightOpen(effectiveSkylightState(telemetry))
+        val sunroofTiltedNow = isSkylightTilted(effectiveSkylightState(telemetry))
 
         quickActionIcons[QuickActionId.LOCK]?.apply {
             iconType = if (effectiveLocked) AppIconType.LOCK_CLOSED else AppIconType.LOCK_OPEN
@@ -4454,7 +4930,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 .withEndAction {
                     tv.text = nextText
                     tv.animate()
-                        .alpha(if (quickDeckExpanded) 0f else 1f)
+                        .alpha(1f)
                         .setDuration(140L)
                         .setInterpolator(MotionSpec.EASE_OUT_EXPO)
                         .start()
@@ -4742,7 +5218,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         if (powertrain.hasElectricDrive) {
             val chargeStateText = when {
                 telemetry?.isCharging == true -> {
-                    val rem = telemetry.remainingCharge.takeIf { it.isNotBlank() && it != "0" }
+                    val rem = formatRemainingChargeLabel(telemetry.remainingCharge)
                     if (rem != null) "充电中 · 剩余 $rem" else "充电中"
                 }
                 telemetry?.isChargingGunConnected == true -> "已插充电枪"
@@ -4769,8 +5245,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val acActive = telemetry?.acOn == true
         val trunkIsOpen = telemetry?.trunkOpen == true
 
-        val skylightIsOpen = isSkylightOpen(telemetry?.skylightState)
-        val skylightIsTilted = isSkylightTilted(telemetry?.skylightState)
+        val skylightRaw = effectiveSkylightState(telemetry)
+        val skylightIsOpen = isSkylightOpen(skylightRaw)
+        val skylightIsTilted = isSkylightTilted(skylightRaw)
         val resolvedSkylightMode = when {
             skylightIsTilted -> "tilt"
             skylightIsOpen -> "open"
@@ -4797,7 +5274,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         updateQuickActionIconStates()
         updateTpmsBadges(telemetry)
         if (quickDeckExpanded && !quickDeckEditMode) {
-            renderQuickDeckGrid()
+            updateQuickDeckTileStates()
         }
 
         val cabinTemp = cabinTemperature(telemetry)
@@ -4879,7 +5356,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             val address = if (key == lastGeocodedKey && !lastGeocodedAddress.isNullOrBlank()) {
                 lastGeocodedAddress!!
             } else {
-                if (key != lastGeocodedKey) {
+                val backoffOk = SystemClock.elapsedRealtime() - lastGeocodeFailedAtMs >= 30_000L
+                if (key != lastGeocodedKey && backoffOk) {
                     triggerHomeReverseGeocode(lat, lon, key)
                 }
                 null
@@ -4912,10 +5390,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     httpClient.reverseGeocodeApproxAddress(lat, lon)
                 }
             }.getOrNull()
-            if (isActive && key == lastGeocodedKey && !addr.isNullOrBlank()) {
-                lastGeocodedAddress = addr
-            }
             if (isActive && key == lastGeocodedKey) {
+                if (!addr.isNullOrBlank()) {
+                    lastGeocodedAddress = addr
+                    lastGeocodeFailedAtMs = 0L
+                } else {
+                    // Allow retry after 30s backoff instead of sticking blank forever.
+                    lastGeocodedKey = ""
+                    lastGeocodeFailedAtMs = SystemClock.elapsedRealtime()
+                }
                 lastGeocodeSettled = true
                 locationAddressObservers.toList().forEach { observer ->
                     observer(currentStreetLabel())
@@ -5445,13 +5928,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
             activeTelemetry = null
+            provisioningJob?.cancel()
+            provisioningActive = false
             telemetryJob?.cancel()
             postActionRefreshJob?.cancel()
             geocodeJob?.cancel()
             lastGeocodedKey = ""
             lastGeocodedAddress = null
-            bleController.stopAutoProximityWatch()
-            bleController.disconnect()
+            lastGeocodeFailedAtMs = 0L
+            bleController.resetTargetAndDisconnect()
             bleConnected = false
             bleNearby = false
             lastPairingPin = ""
@@ -5473,8 +5958,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val locked = telemetry?.doorLocked ?: true
         val doorsOpenNow = arePhysicalDoorsOpen(telemetry)
         val trunkOpenNow = telemetry?.trunkOpen == true
-        val skylightOpenNow = isSkylightOpen(telemetry?.skylightState)
-        val skylightTiltNow = telemetry?.skylightState.orEmpty().trim().lowercase(Locale.US) in setOf("12", "tilt")
+        val skylightRaw = effectiveSkylightState(telemetry)
+        val skylightOpenNow = isSkylightOpen(skylightRaw)
+        val skylightTiltNow = isSkylightTilted(skylightRaw)
         val engineRunningNow = telemetry?.engineRunning == true
 
         showBottomSheet("控制") { sheet, dialog ->
@@ -5482,7 +5968,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 "门锁 ${if (locked) "已锁" else "已解锁"}",
                 "四门 ${if (doorsOpenNow) "未关" else "已关"}",
                 "后备箱 ${if (trunkOpenNow) "已开" else "已关"}",
-                "天窗 ${formatSkylightLabel(telemetry?.skylightState)}",
+                "天窗 ${formatSkylightLabel(skylightRaw)}",
                 "引擎 ${if (engineRunningNow) "运行" else "熄火"}"
             ).joinToString(" · ")
             sheet.addView(text(statusSummary, 12.5f, TEXT_SECONDARY).apply {
@@ -5519,18 +6005,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             ), lp(top = dp(8)))
 
             sheet.addView(sectionLabel("天窗"), lp(top = dp(16)))
+            val sunExtra = sunroofExtraParams()
             sheet.addView(controlTileRow(
                 ControlTileSpec(AppIconType.SUNROOF_OPEN, "打开天窗", active = skylightOpenNow && !skylightTiltNow) {
                     dialog.dismiss()
-                    dispatchSmartVehicleCommand("skylight_open", "打开天窗")
+                    dispatchSmartVehicleCommand("skylight_open", "打开天窗", extraParams = sunExtra)
                 },
                 ControlTileSpec(AppIconType.SUNROOF_TILT, "天窗翘起", active = skylightTiltNow) {
                     dialog.dismiss()
-                    dispatchSmartVehicleCommand("skylight_tilt", "天窗翘起")
+                    dispatchSmartVehicleCommand("skylight_tilt", "天窗翘起", extraParams = sunExtra)
                 },
                 ControlTileSpec(AppIconType.SUNROOF_CLOSE, "关闭天窗", active = !skylightOpenNow && telemetry != null) {
                     dialog.dismiss()
-                    dispatchSmartVehicleCommand("skylight_close", "关闭天窗")
+                    dispatchSmartVehicleCommand("skylight_close", "关闭天窗", extraParams = sunExtra)
                 }
             ), lp(top = dp(8)))
 
@@ -5578,13 +6065,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         climateTemperatureCelsius = climateTemperatureCelsius.coerceIn(minTemp, maxTemp)
 
         var selectedDuration = 10
-        var frontDefrost = t?.fWinHeatingState == "1"
-        var rearDefrost = t?.rWinHeatingState == "1"
-        var airPm = t?.airPurification == "1"
-        var driverHeat = t?.dSeatHeatingState == "1" || t?.dSeatHeatingState == "2"
-        var passHeat = t?.pSeatHeatingState == "1" || t?.pSeatHeatingState == "2"
-        var driverVent = !driverHeat && t?.dSeatVentilateState == "1"
-        var passVent = !passHeat && t?.pSeatVentilateState == "1"
+        val initialFrontDefrost = t?.fWinHeatingState == "1"
+        val initialRearDefrost = t?.rWinHeatingState == "1"
+        val initialAirPm = t?.airPurification == "1"
+        val initialDriverHeat = t?.dSeatHeatingState == "1" || t?.dSeatHeatingState == "2"
+        val initialPassHeat = t?.pSeatHeatingState == "1" || t?.pSeatHeatingState == "2"
+        val initialDriverVent = !initialDriverHeat && t?.dSeatVentilateState == "1"
+        val initialPassVent = !initialPassHeat && t?.pSeatVentilateState == "1"
+        var frontDefrost = initialFrontDefrost
+        var rearDefrost = initialRearDefrost
+        var airPm = initialAirPm
+        var driverHeat = initialDriverHeat
+        var passHeat = initialPassHeat
+        var driverVent = initialDriverVent
+        var passVent = initialPassVent
         val airTypeInt = uiPrefs.getString(KEY_AIR_TYPE, "1").orEmpty().toIntOrNull()?.coerceIn(0, 1) ?: 1
 
         showBottomSheet("空调") { sheet, dialog ->
@@ -5657,16 +6151,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             // Clean 2-button primary action bar (Start/Apply + Off)
             val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             val startBtn = primaryActionButton(if (acActive) "更新空调设定" else "开启空调") {
-                val extra = buildMap {
+                val extra = buildMap<String, String> {
                     put("airType", airTypeInt.toString())
                     put("controlTime", selectedDuration.toString())
-                    if (airPm) put("airPM", "1")
-                    if (frontDefrost) put("frontDefrost", "1")
-                    if (rearDefrost) put("rearDefrost", "1")
-                    if (driverHeat) put("driverHeating", "1")
-                    if (passHeat) put("passengerHeating", "1")
-                    if (driverVent) put("driverVent", "1")
-                    if (passVent) put("passengerVent", "1")
+                    if (airPm) { put("airPM", "1") } else if (initialAirPm) { put("airPM", "0") }
+                    if (frontDefrost) { put("frontDefrost", "1") } else if (initialFrontDefrost) { put("frontDefrost", "0") }
+                    if (rearDefrost) { put("rearDefrost", "1") } else if (initialRearDefrost) { put("rearDefrost", "0") }
+                    if (driverHeat) { put("driverHeating", "1") } else if (initialDriverHeat) { put("driverHeating", "0") }
+                    if (passHeat) { put("passengerHeating", "1") } else if (initialPassHeat) { put("passengerHeating", "0") }
+                    if (driverVent) { put("driverVent", "1") } else if (initialDriverVent) { put("driverVent", "0") }
+                    if (passVent) { put("passengerVent", "1") } else if (initialPassVent) { put("passengerVent", "0") }
                 }
                 dialog.dismiss()
                 dispatchSmartVehicleCommand(
@@ -6026,34 +6520,61 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     return
                 }
             } else {
-                // BLE direct control also enforces the 6-digit cloud PIN gate when switch is ON
-                appDialog?.dismiss()
-                appDialog = SixDigitPinSheet.showVerifyPinSheet(
+                // BLE direct control also enforces the 6-digit PIN gate when switch is ON,
+                // with offline fallback against the locally cached PIN when BLE session is live.
+                dismissAppDialogImmediately()
+                lateinit var dialog: android.app.Dialog
+                dialog = SixDigitPinSheet.showVerifyPinSheet(
                     context = this,
                     title = "输入 PIN 码",
-                    subtitle = "请输入 6 位云端 PIN 码以执行「$label」"
+                    subtitle = "请输入 6 位 PIN 码以执行「$label」"
                 ) { pin, showError, dismiss ->
                     lifecycleScope.launch {
-                        val verified = runCatching {
+                        val res = runCatching {
                             withContext(Dispatchers.IO) {
                                 httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
                             }
-                        }.getOrDefault(false)
+                        }
+                        if (isFinishing || isDestroyed || !dialog.isShowing) return@launch
+                        val err = res.exceptionOrNull()
+                        if (err is CherySessionExpiredException) {
+                            dismiss()
+                            return@launch
+                        }
+                        val cachedLocalPin = profile.controlPin.trim().ifBlank { sessionVehiclePin.trim() }
+                        val offlineBleMatch = err is java.io.IOException &&
+                            bleController.isSessionReady() &&
+                            cachedLocalPin.length == 6 &&
+                            pin == cachedLocalPin
+                        val verified = res.getOrDefault(false) || offlineBleMatch
                         if (verified) {
                             sessionVehiclePin = pin
-                            val latestProfile = withContext(Dispatchers.IO) {
-                                profileStore.updateControlPin(profile.vin, pin)
-                            } ?: profileStore.getActiveProfile()
+                            val latestProfile = if (!offlineBleMatch) {
+                                withContext(Dispatchers.IO) {
+                                    profileStore.updateControlPin(profile.vin, pin)
+                                } ?: profileStore.getActiveProfile()
+                            } else {
+                                profile
+                            }
                             currentProfile = latestProfile
                             dismiss()
                             if (!executeBleActionImmediate(actionKey, label, temperatureCelsius)) {
                                 sendHttpVehicleCommand(latestProfile, actionKey, label, temperatureCelsius, pin, extraParams)
                             }
+                        } else if (err is java.io.IOException) {
+                            showError(
+                                if (bleController.isSessionReady() && cachedLocalPin.length == 6) {
+                                    "离线 PIN 码不匹配，请重试"
+                                } else {
+                                    "当前网络不可用，无法在线校验 PIN 码"
+                                }
+                            )
                         } else {
                             showError("云端 PIN 码错误，请重试")
                         }
                     }
                 }
+                trackAppDialog(dialog)
                 return
             }
         }
@@ -6074,8 +6595,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         temperatureCelsius: Double?,
         extraParams: Map<String, String> = emptyMap()
     ) {
-        appDialog?.dismiss()
-        val dialog = SixDigitPinSheet.showVerifyPinSheet(
+        dismissAppDialogImmediately()
+        lateinit var dialog: android.app.Dialog
+        dialog = SixDigitPinSheet.showVerifyPinSheet(
             context = this,
             title = "输入 PIN 码",
             subtitle = "请输入 6 位数字 PIN 码以执行「$label」"
@@ -6108,6 +6630,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         )
                     }
                 }
+                if (isFinishing || isDestroyed || !dialog.isShowing) return@launch
                 res.onFailure { err ->
                     if (err is CherySessionExpiredException) {
                         dismiss()
@@ -6154,7 +6677,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
         }
-        appDialog = dialog
+        trackAppDialog(dialog)
     }
 
     private fun sendHttpVehicleCommand(
@@ -6404,29 +6927,34 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         bleMac = profile.bleMac,
                         deviceId = profile.deviceId,
                         accountType = profile.accountType,
-                        profileStore = profileStore
+                        profileStore = null
                     )
                 }.getOrNull()
                 if (!isActive) return@launch
                 if (result?.success == true) {
                     val provisioned = result.profile ?: profile
-                    val stillActive = profileStore.getActiveProfile().vin.equals(provisioned.vin, ignoreCase = true)
+                    // Guard against writing into a logged-out or switched account.
+                    val latestActive = profileStore.getActiveProfile()
+                    val stillLoggedIn = latestActive.accessToken.isNotBlank() &&
+                        latestActive.vin.isNotBlank()
+                    if (!stillLoggedIn) return@launch
+                    val stillActive = latestActive.vin.equals(provisioned.vin, ignoreCase = true)
                     val merged = withContext(Dispatchers.IO) {
-                        profileStore.saveProfile(
-                            provisioned.copy(
-                                userId = profile.userId,
-                                mobileNo = profile.mobileNo,
-                                deviceId = profile.deviceId,
-                                accountType = profile.accountType,
-                                accessToken = profile.accessToken,
-                                sdkToken = profile.sdkToken,
-                                controlPin = ""
-                            ),
-                            activate = stillActive,
-                            preserveExistingPinIfBlank = true
+                        profileStore.updateKeyMaterial(
+                            vin = provisioned.vin,
+                            bleName = provisioned.bleName,
+                            bleMac = provisioned.bleMac,
+                            rootKeyHex = provisioned.rootKeyHex,
+                            infoHex = provisioned.infoHex,
+                            edfHex = provisioned.edfHex,
+                            validFrom = provisioned.validFrom,
+                            validTo = provisioned.validTo,
+                            secAHex = provisioned.secAHex,
+                            secBHex = provisioned.secBHex,
+                            keyRole = provisioned.keyRole
                         )
                     }
-                    if (stillActive) {
+                    if (stillActive && merged != null) {
                         currentProfile = merged
                         sessionVehiclePin = merged.controlPin
                         showHomeStatus("手机数字钥匙已同步")
@@ -6446,7 +6974,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun logoutToWelcome() {
-        clearActiveSessionAndUiState()
+        clearActiveSessionAndUiState(preserveOfflineKeys = false)
         SettingsScreen.clearCachedAccountProfile(this)
         CarWidgetStateStore.clear(this)
         CarWidgetManager.updateAllWidgets(this)
@@ -6455,8 +6983,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     /**
      * Global handler for zyhl resultCode `0406` (session/token expired):
-     * debounced across concurrent requests, clears expired session tokens & overlays,
-     * shows a clear prompt, and redirects directly to the login form.
+     * debounced across concurrent requests, clears expired session tokens & overlays
+     * while preserving offline BLE key material, shows a clear prompt, and redirects to login.
      */
     private fun handleSessionExpired(reason: String) {
         if (handlingSessionExpired) return
@@ -6470,7 +6998,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return
         }
         handlingSessionExpired = true
-        clearActiveSessionAndUiState()
+        clearActiveSessionAndUiState(preserveOfflineKeys = true)
         Toast.makeText(
             this,
             reason.ifBlank { "登录已失效，请重新登录" },
@@ -6480,7 +7008,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         mainHandler.post { handlingSessionExpired = false }
     }
 
-    private fun clearActiveSessionAndUiState() {
+    private fun clearActiveSessionAndUiState(preserveOfflineKeys: Boolean = false) {
+        pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
+        pendingResumeBleRunnable = null
+        pendingShortcutRunnable?.let(contentFrame::removeCallbacks)
+        pendingShortcutRunnable = null
+        pendingShortcutAction = null
+        pendingShortcutRequiresPinCache = false
+        pendingSharedPoiIntent = null
+        deckExpandAnimator?.cancel()
+        deckHeightAnimator?.cancel()
         provisioningJob?.cancel()
         provisioningActive = false
         telemetryJob?.cancel()
@@ -6493,21 +7030,27 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         smsCountdownJob?.cancel()
         stopStatusAutoHide()
         PassiveEntryWakeManager.disable(this)
-        bleController.stopAutoProximityWatch()
-        bleController.disconnect()
+        if (!preserveOfflineKeys) {
+            PassiveEntryStore.clearAll(this)
+        }
+        bleController.resetTargetAndDisconnect()
         httpClient.clearSession()
-        profileStore.clearAllProfiles()
+        if (preserveOfflineKeys) {
+            profileStore.clearTokensPreserveOfflineKeys()
+        } else {
+            profileStore.clearAllProfiles()
+        }
         // Keep privacy consent accepted when session expires or user logs out
-        uiPrefs.edit()
-            .remove(KEY_MODEL_NAME)
-            .remove(KEY_PLATE_NO)
-            .apply()
+        clearVehicleMetadata()
         vehicleSwitcherPopup?.dismiss()
         vehicleSwitcherPopup = null
+        dismissTopPairingPinDrawer(immediate = true)
         dismissAppDialogImmediately()
         if (::featureSheets.isInitialized) featureSheets.dismissAll()
         if (::managementScreens.isInitialized) managementScreens.dismissAll()
+        if (::passiveEntrySheets.isInitialized) passiveEntrySheets.dismiss()
         settingsScreen?.dismissTransientOverlays()
+        settingsScreen?.cancelBackgroundJobs()
         clearSubpageOverlayStack()
         settingsRootView?.let { contentFrame.removeView(it) }
         securityOverlayView?.let { contentFrame.removeView(it) }
@@ -6519,19 +7062,31 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         settingsRootView = null
         securityOverlayView = null
         securitySubpageStatusText = null
+        securityPassiveRefreshCallback = null
         locationOverlayView = null
         messagesOverlayView = null
         settingsScreen = null
+        carVisual = null
         currentProfile = null
         activeTelemetry = null
+        cloudTripTrackEnabled = null
+        lastKnownAntiTheftEnabled = null
+        lastGeocodedKey = ""
+        lastGeocodedAddress = null
+        lastGeocodeSettled = false
+        lastGeocodeFailedAtMs = 0L
+        locationAddressObservers.clear()
+        quickDeckTileViews.clear()
         sessionVehiclePin = ""
         bleConnected = false
         bleNearby = false
         lastPairingPin = ""
     }
 
-    private fun activateVehicleFromSummary(summary: VehicleSummary) {
-        val activeProfile = profileStore.getActiveProfile()
+    private fun activateVehicleFromSummary(
+        summary: VehicleSummary,
+        fallbackAccount: VehicleProfile = profileStore.getActiveProfile()
+    ) {
         val vinKey = summary.vin.trim().uppercase(Locale.US)
         if (vinKey.isBlank()) return
         val localMatch = profileStore.listProfiles()
@@ -6543,31 +7098,45 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             localProfile = localMatch,
             cloudSummary = summary
         )
-        activateSelectedVehicle(item, activeProfile, null)
+        activateSelectedVehicle(item, fallbackAccount, null)
     }
 
     private fun handleVehicleUnbound(unboundVin: String) {
         val activeProfile = profileStore.getActiveProfile()
+        if (PassiveEntryStore.getActiveEnabledVin(this).equals(unboundVin, ignoreCase = true)) {
+            val cfg = PassiveEntryStore.load(this, unboundVin)
+            PassiveEntryStore.save(this, cfg.copy(enabled = false))
+            PassiveEntryWakeManager.disable(this, activeProfile.bleMac)
+        }
         profileStore.deleteProfile(unboundVin)
         if (!activeProfile.vin.equals(unboundVin, ignoreCase = true)) {
             return
         }
         val remaining = profileStore.listProfiles().firstOrNull { it.vin.isNotBlank() }
+        provisioningJob?.cancel()
+        provisioningActive = false
         telemetryJob?.cancel()
         postActionRefreshJob?.cancel()
         geocodeJob?.cancel()
         lastGeocodedKey = ""
         lastGeocodedAddress = null
+        lastGeocodeFailedAtMs = 0L
+        bleController.resetTargetAndDisconnect()
+        bleConnected = false
+        bleNearby = false
+        lastPairingPin = ""
         if (remaining != null) {
             val switched = profileStore.setActiveVin(remaining.vin) ?: remaining
             currentProfile = switched
             sessionVehiclePin = switched.controlPin
+            clearVehicleMetadata()
             uiPrefs.edit()
                 .putString(KEY_MODEL_NAME, remaining.bleName.ifBlank { "我的座驾" })
-                .remove(KEY_PLATE_NO)
                 .apply()
             activeTelemetry = null
             refreshHomeHeaderAndRows()
+            startProximityWhenPermitted()
+            syncCloudVehicleMeta()
             refreshTelemetry(silent = true)
             return
         }
@@ -6580,13 +7149,47 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     }
                 }.getOrNull()?.firstOrNull { it.vin.isNotBlank() }
                 if (nextCloud != null) {
-                    activateVehicleFromSummary(nextCloud)
+                    activateVehicleFromSummary(nextCloud, fallbackAccount = activeProfile)
                 } else {
-                    uiPrefs.edit().remove(KEY_MODEL_NAME).remove(KEY_PLATE_NO).apply()
+                    withContext(Dispatchers.IO) {
+                        profileStore.saveProfile(
+                            VehicleProfile(
+                                vin = "",
+                                userId = activeProfile.userId,
+                                mobileNo = activeProfile.mobileNo,
+                                bleName = "",
+                                bleMac = "",
+                                deviceId = activeProfile.deviceId.ifBlank { profileStore.defaultDeviceId() },
+                                accountType = 0,
+                                rootKeyHex = "",
+                                infoHex = "",
+                                edfHex = "",
+                                accessToken = activeProfile.accessToken,
+                                sdkToken = activeProfile.sdkToken,
+                                controlPin = ""
+                            ),
+                            activate = true
+                        )
+                    }
+                    clearVehicleMetadata()
+                    CarWidgetStateStore.clear(this@MainActivity)
+                    CarWidgetManager.updateAllWidgets(this@MainActivity)
                     activeTelemetry = null
-                    refreshHomeHeaderAndRows()
+                    currentProfile = profileStore.getActiveProfile()
+                    clearSubpageOverlayStack()
+                    homeRootView = null
+                    showHomeScreen()
                 }
             }
+        } else {
+            clearVehicleMetadata()
+            CarWidgetStateStore.clear(this)
+            CarWidgetManager.updateAllWidgets(this)
+            activeTelemetry = null
+            currentProfile = profileStore.getActiveProfile()
+            clearSubpageOverlayStack()
+            homeRootView = null
+            showHomeScreen()
         }
     }
 
@@ -6641,7 +7244,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun startProximityWhenPermitted() {
-        if (currentScreen != Screen.HOME) return
+        if (currentScreen != Screen.HOME && currentScreen != Screen.SECURITY) return
         if (!ensureBlePermissions()) return
         val profile = profileStore.getActiveProfile()
         if (profile.vin.isBlank()) return
@@ -6889,19 +7492,29 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             onCompleted(false)
             return
         }
-        appDialog?.dismiss()
-        appDialog = SixDigitPinSheet.showVerifyPinSheet(
+        dismissAppDialogImmediately()
+        lateinit var dialog: android.app.Dialog
+        dialog = SixDigitPinSheet.showVerifyPinSheet(
             context = this,
             title = "验证 PIN 码",
             subtitle = "验证 PIN 码以开启蓝牙无感"
         ) { pin, showError, dismiss ->
             lifecycleScope.launch {
-                val verified = runCatching {
+                val res = runCatching {
                     withContext(Dispatchers.IO) {
                         httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
                     }
-                }.getOrDefault(false)
-                if (!verified) {
+                }
+                if (isFinishing || isDestroyed || !dialog.isShowing) return@launch
+                res.onFailure { err ->
+                    if (err is CherySessionExpiredException) {
+                        dismiss()
+                    } else {
+                        showError("网络异常，PIN 码校验失败，请重试")
+                    }
+                    return@launch
+                }
+                if (!res.getOrDefault(false)) {
                     showError("云端 PIN 码错误，请重试")
                     return@launch
                 }
@@ -6932,6 +7545,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
         }
+        trackAppDialog(dialog)
     }
 
     override fun onAuthenticated(sessionSnapshot: SessionSnapshot) {
@@ -7071,16 +7685,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
 
         topPairingDrawerView = drawer
+        drawer.visibility = View.INVISIBLE
         decor.addView(
             drawer,
             FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP)
         )
 
-        // Slide smoothly down from above the top edge
+        // Slide smoothly down from above the top edge without a pre-measure 1-frame flash
         drawer.alpha = 0.92f
         drawer.post {
+            if (topPairingDrawerView !== drawer || !drawer.isAttachedToWindow) return@post
             val h = drawer.height.takeIf { it > 0 }?.toFloat() ?: dpF(168f)
             drawer.translationY = -h
+            drawer.visibility = View.VISIBLE
             drawer.animate()
                 .translationY(0f)
                 .alpha(1f)
@@ -7151,17 +7768,24 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     override fun onError(message: String, throwable: Throwable?) {
         runOnUiThread {
-            if (currentScreen == Screen.HOME) {
-                val friendly = when {
-                    message.contains("GATT", ignoreCase = true) ||
-                        message.contains("BLE 握手", ignoreCase = true) ||
-                        message.contains("AES-CMAC", ignoreCase = true) ->
-                        "蓝牙钥匙连接中断，已切换远程网络"
-                    message.contains("BLE", ignoreCase = true) ->
-                        "蓝牙扫描异常，请确认手机蓝牙已开启"
-                    else -> message.take(60)
-                }
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val isPairingOrBondErr = message.contains("配对", ignoreCase = true) ||
+                message.contains("动态", ignoreCase = true) ||
+                message.contains("绑定", ignoreCase = true)
+            val friendly = when {
+                isPairingOrBondErr -> message.take(80)
+                message.contains("GATT", ignoreCase = true) ||
+                    message.contains("BLE 握手", ignoreCase = true) ||
+                    message.contains("AES-CMAC", ignoreCase = true) ->
+                    "蓝牙钥匙连接中断，已切换远程网络"
+                message.contains("BLE", ignoreCase = true) ->
+                    "蓝牙扫描异常，请确认手机蓝牙已开启"
+                else -> message.take(60)
+            }
+            if (currentScreen == Screen.HOME && subpageOverlayStack.isEmpty()) {
                 showHomeStatus(friendly)
+            } else if (isPairingOrBondErr || currentScreen == Screen.SECURITY) {
+                Toast.makeText(this, friendly, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -7197,7 +7821,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun showHomeStatus(message: String) {
-        if (currentScreen != Screen.HOME) return
+        if (isFinishing || isDestroyed) return
+        if (currentScreen != Screen.HOME || subpageOverlayStack.isNotEmpty() || transientToastBanner == null) {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            return
+        }
         stopStatusAutoHide()
         transientToastBanner?.let { banner ->
             banner.text = message
@@ -7217,6 +7845,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun showBottomSheet(
         title: String,
+        onDismiss: (() -> Unit)? = null,
         buildContent: (LinearLayout, android.app.Dialog) -> Unit
     ) {
         dismissAppDialogImmediately()
@@ -7292,6 +7921,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 sheetKeyStatusView = null
                 sheetKeyActionButton = null
             }
+            onDismiss?.invoke()
         }
         dismissAppDialogSync = {
             bypassImmediate = true
@@ -7508,21 +8138,41 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         return v == "1" || v == "open" || v == "opened" || v == "true"
     }
 
+    private fun effectiveSkylightState(telemetry: VehicleTelemetry?): String =
+        telemetry?.skylightState.orEmpty().trim()
+            .ifBlank { telemetry?.windowStates?.get("sunroof").orEmpty().trim() }
+
     private fun isSkylightOpen(state: String?): Boolean {
         val v = state.orEmpty().trim().lowercase(Locale.US)
         if (v.isBlank()) return false
-        // In DataResp910 ANGLE_SKYLIGHT: "0", "1" (0% closed), "255"/"0xff" are closed/invalid
-        if (v in setOf("0", "1", "255", "0xff", "closed", "close", "false", "off")) return false
+        // In DataResp910 ANGLE_SKYLIGHT: "0", "1" (0% closed), "255"/"0xff"/"ffff"/"65535" are closed/invalid
+        if (v in setOf("0", "1", "255", "0xff", "ffff", "0xffff", "65535", "closed", "close", "false", "off")) return false
         return true
     }
 
     private fun formatSkylightLabel(state: String?): String {
         val v = state.orEmpty().trim().lowercase(Locale.US)
         return when {
-            v.isBlank() || v == "255" || v == "0xff" -> "--"
+            v.isBlank() || v in setOf("255", "0xff", "ffff", "0xffff", "65535") -> "--"
             v in setOf("0", "1", "closed", "close", "false", "off") -> "已关闭"
-            v in setOf("12", "tilt") -> "已翘起"
+            v in setOf("12", "tilt", "cock") -> "已翘起"
             else -> "已开启"
+        }
+    }
+
+    private fun formatRemainingChargeLabel(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank() || trimmed == "0" || trimmed.equals("FFFF", ignoreCase = true) || trimmed == "65535") {
+            return null
+        }
+        val mins = trimmed.toIntOrNull() ?: return trimmed
+        if (mins <= 0 || mins > 24 * 60 * 7) return null
+        val h = mins / 60
+        val m = mins % 60
+        return when {
+            h > 0 && m > 0 -> "${h}小时${m}分钟"
+            h > 0 -> "${h}小时"
+            else -> "${m}分钟"
         }
     }
 
@@ -7581,6 +8231,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private const val KEY_PLATE_NO = "plateNo"
         private const val KEY_ENGINE_TYPE = "engineType"
         private const val KEY_AIR_TYPE = "airType"
+        private const val KEY_SUNROOF_TYPE = "sunroofType"
         private const val KEY_TEMP_LO = "tempLo"
         private const val KEY_TEMP_HI = "tempHi"
         private const val KEY_OPEN_AIR = "openAir"

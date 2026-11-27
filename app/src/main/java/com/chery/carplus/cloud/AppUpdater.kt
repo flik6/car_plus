@@ -32,6 +32,12 @@ data class UpdateCheckResult(
     val publishedAt: String
 )
 
+sealed class InstallApkResult {
+    object Launched : InstallApkResult()
+    object NeedsPermission : InstallApkResult()
+    data class Failed(val message: String) : InstallApkResult()
+}
+
 object AppUpdater {
 
     private const val LATEST_RELEASE_URL =
@@ -76,7 +82,7 @@ object AppUpdater {
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             if (code !in 200..299) {
-                throw IOException("GitHub Release 查询失败 (HTTP $code)")
+                throw IOException("检查更新失败，请稍后重试")
             }
             body
         } finally {
@@ -146,21 +152,32 @@ object AppUpdater {
     fun downloadApk(
         context: Context,
         url: String,
+        versionTag: String = "latest",
+        isCancelled: (() -> Boolean)? = null,
         onProgress: (downloaded: Long, total: Long) -> Unit
     ): File {
         require(url.isNotBlank()) { "下载地址为空" }
+        val safeTag = versionTag.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "latest" }
         val updatesDir = File(context.cacheDir, UPDATES_DIR_NAME).apply { mkdirs() }
-        val targetFile = File(updatesDir, UPDATE_APK_FILENAME)
-        val tempFile = File(updatesDir, "$UPDATE_APK_FILENAME.tmp")
+        // Clean up any older cached update APKs before downloading a new version.
+        updatesDir.listFiles()?.forEach { old ->
+            if (old.isFile && old.name.endsWith(".apk")) runCatching { old.delete() }
+        }
+        val targetFile = File(updatesDir, "CarPlus-update-$safeTag.apk")
+        val tempFile = File(updatesDir, "CarPlus-update-$safeTag.apk.tmp")
         if (tempFile.exists()) tempFile.delete()
 
         val conn = openFollowingRedirects(url)
         try {
             val code = conn.responseCode
             if (code !in 200..299) {
-                throw IOException("安装包下载失败 (HTTP $code)")
+                throw IOException("安装包下载失败，请稍后重试")
             }
-            val total = conn.contentLengthLong
+            val total = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                conn.contentLengthLong
+            } else {
+                conn.contentLength.toLong()
+            }
             var downloaded = 0L
             var lastReported = 0L
 
@@ -168,6 +185,9 @@ object AppUpdater {
                 FileOutputStream(tempFile).use { output ->
                     val buffer = ByteArray(16 * 1024)
                     while (true) {
+                        if (isCancelled?.invoke() == true || Thread.currentThread().isInterrupted) {
+                            throw java.util.concurrent.CancellationException("安装包下载已取消")
+                        }
                         val read = input.read(buffer)
                         if (read < 0) break
                         output.write(buffer, 0, read)
@@ -183,6 +203,9 @@ object AppUpdater {
 
             if (downloaded <= 0L) {
                 throw IOException("下载的安装包为空")
+            }
+            if (total > 0L && downloaded != total) {
+                throw IOException("安装包下载不完整，请重试")
             }
             onProgress(downloaded, if (total > 0L) total else downloaded)
 
@@ -200,33 +223,44 @@ object AppUpdater {
         }
     }
 
-    fun installApk(activity: Activity, apkFile: File): Boolean {
+    fun installApkResult(activity: Activity, apkFile: File): InstallApkResult {
         if (!apkFile.exists() || apkFile.length() <= 0L) {
-            return false
+            return InstallApkResult.Failed("安装包文件不存在，请重新下载")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !activity.packageManager.canRequestPackageInstalls()
         ) {
-            val settingsIntent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:${activity.packageName}")
-            )
-            activity.startActivity(settingsIntent)
-            return false
+            return runCatching {
+                val settingsIntent = Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${activity.packageName}")
+                )
+                activity.startActivity(settingsIntent)
+                InstallApkResult.NeedsPermission
+            }.getOrElse {
+                InstallApkResult.Failed("无法打开系统安装权限设置")
+            }
         }
 
-        val apkUri = FileProvider.getUriForFile(
-            activity,
-            "${activity.packageName}.fileprovider",
-            apkFile
-        )
-        val installIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(apkUri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching {
+            val apkUri = FileProvider.getUriForFile(
+                activity,
+                "${activity.packageName}.fileprovider",
+                apkFile
+            )
+            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            activity.startActivity(installIntent)
+            InstallApkResult.Launched
+        }.getOrElse {
+            InstallApkResult.Failed("无法调起系统安装器，请稍后重试")
         }
-        activity.startActivity(installIntent)
-        return true
     }
+
+    fun installApk(activity: Activity, apkFile: File): Boolean =
+        installApkResult(activity, apkFile) is InstallApkResult.Launched
 
     private fun openFollowingRedirects(startUrl: String, maxRedirects: Int = 5): HttpURLConnection {
         var currentUrl = startUrl

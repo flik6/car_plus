@@ -112,7 +112,10 @@
       var TILE_SIZE = 256;
       var ROUTE_PLAYBACK_MS = 1200;
       var AMBIENT_LOOP_MS = 3200;
+      var MAX_TILE_CACHE = 120;
       var tileCache = Object.create(null);
+      var tileCacheOrder = [];
+      var userHasPanned = false;
 
       // Map state (Chery zyhl cloud already returns GCJ-02 coordinates aligned 1:1 with Amap tiles)
       var view = {
@@ -149,9 +152,9 @@
 
       function radiusFromZoom(lat, z, w, h) {
         var raw = metersPerPixel(lat, z) * targetVisualRadiusPx(w, h);
-        var clamped = Math.max(100, Math.min(20000, raw));
+        var clamped = Math.max(100, Math.min(10000, raw));
         var step = clamped < 1000 ? 50 : 100;
-        return Math.max(100, Math.min(20000, Math.round(clamped / step) * step));
+        return Math.max(100, Math.min(10000, Math.round(clamped / step) * step));
       }
 
       function formatRadiusBadge(m) {
@@ -206,12 +209,31 @@
         return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
       }
 
+      function touchTileKey(key) {
+        var idx = tileCacheOrder.indexOf(key);
+        if (idx !== -1) tileCacheOrder.splice(idx, 1);
+        tileCacheOrder.push(key);
+        while (tileCacheOrder.length > MAX_TILE_CACHE) {
+          var oldestKey = tileCacheOrder.shift();
+          var oldEntry = tileCache[oldestKey];
+          if (oldEntry && oldEntry.img) {
+            oldEntry.img.onload = null;
+            oldEntry.img.onerror = null;
+            oldEntry.img.src = '';
+          }
+          delete tileCache[oldestKey];
+        }
+      }
+
       function getTile(z, x, y) {
         var max = Math.pow(2, z);
         if (y < 0 || y >= max) return null;
         var wx = ((x % max) + max) % max;
         var key = z + '/' + wx + '/' + y;
-        if (tileCache[key]) return tileCache[key];
+        if (tileCache[key]) {
+          touchTileKey(key);
+          return tileCache[key];
+        }
 
         var entry = { img: new Image(), loaded: false, failed: false };
         // Standard Amap road tile with readable Chinese street names and landmarks
@@ -230,6 +252,7 @@
         };
         entry.img.src = 'https://webrd0' + sub + '.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=' + wx + '&y=' + y + '&z=' + z;
         tileCache[key] = entry;
+        touchTileKey(key);
         return entry;
       }
 
@@ -283,15 +306,23 @@
         stopRouteLoop();
         routeAnimStartMs = performance.now();
         function tick() {
-          if (routePoints.length < 2) {
+          if (document.hidden || routePoints.length < 2) {
             routeAnimRafId = null;
             return;
           }
-          draw();
+          drawOverlay();
           routeAnimRafId = requestAnimationFrame(tick);
         }
         routeAnimRafId = requestAnimationFrame(tick);
       }
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          stopRouteLoop();
+        } else if (routePoints.length >= 2 && routeAnimRafId === null) {
+          startRouteLoop();
+        }
+      });
 
       var drawQueued = false;
       function requestDraw() {
@@ -318,40 +349,60 @@
         draw();
       }
 
-      function draw() {
+      function computeProjectionState() {
         var w = window.innerWidth || 340;
         var h = window.innerHeight || 240;
-
-        tileCtx.clearRect(0, 0, w, h);
-        overlayCtx.clearRect(0, 0, w, h);
-
         var z = view.zoom;
         var tileZ = Math.max(3, Math.min(18, Math.round(z)));
         var scale = Math.pow(2, z - tileZ);
-        var scaledTile = TILE_SIZE * scale;
-
         var centerWX = lonToWorldX(view.lon, tileZ);
         var centerWY = latToWorldY(view.lat, tileZ);
+        return {
+          w: w,
+          h: h,
+          tileZ: tileZ,
+          scale: scale,
+          scaledTile: TILE_SIZE * scale,
+          centerWX: centerWX,
+          centerWY: centerWY,
+          halfW: w / 2,
+          halfH: h / 2
+        };
+      }
 
-        var halfW = w / 2;
-        var halfH = h / 2;
-
-        var minTX = Math.floor((centerWX - halfW / scale) / TILE_SIZE);
-        var maxTX = Math.floor((centerWX + halfW / scale) / TILE_SIZE);
-        var minTY = Math.floor((centerWY - halfH / scale) / TILE_SIZE);
-        var maxTY = Math.floor((centerWY + halfH / scale) / TILE_SIZE);
+      function drawTiles(proj) {
+        var p = proj || computeProjectionState();
+        tileCtx.clearRect(0, 0, p.w, p.h);
+        var minTX = Math.floor((p.centerWX - p.halfW / p.scale) / TILE_SIZE);
+        var maxTX = Math.floor((p.centerWX + p.halfW / p.scale) / TILE_SIZE);
+        var minTY = Math.floor((p.centerWY - p.halfH / p.scale) / TILE_SIZE);
+        var maxTY = Math.floor((p.centerWY + p.halfH / p.scale) / TILE_SIZE);
 
         // Layer 1 (#tileCanvas): GPU-filtered minimal-label dark map tiles
         for (var tx = minTX; tx <= maxTX; tx++) {
           for (var ty = minTY; ty <= maxTY; ty++) {
-            var tile = getTile(tileZ, tx, ty);
+            var tile = getTile(p.tileZ, tx, ty);
             if (tile && tile.loaded) {
-              var sx = halfW + (tx * TILE_SIZE - centerWX) * scale;
-              var sy = halfH + (ty * TILE_SIZE - centerWY) * scale;
-              tileCtx.drawImage(tile.img, sx, sy, scaledTile + 0.6, scaledTile + 0.6);
+              var sx = p.halfW + (tx * TILE_SIZE - p.centerWX) * p.scale;
+              var sy = p.halfH + (ty * TILE_SIZE - p.centerWY) * p.scale;
+              tileCtx.drawImage(tile.img, sx, sy, p.scaledTile + 0.6, p.scaledTile + 0.6);
             }
           }
         }
+      }
+
+      function drawOverlay(proj) {
+        var p = proj || computeProjectionState();
+        var w = p.w;
+        var h = p.h;
+        var tileZ = p.tileZ;
+        var scale = p.scale;
+        var centerWX = p.centerWX;
+        var centerWY = p.centerWY;
+        var halfW = p.halfW;
+        var halfH = p.halfH;
+
+        overlayCtx.clearRect(0, 0, w, h);
 
         function project(lat, lon) {
           var wx = lonToWorldX(lon, tileZ);
@@ -471,6 +522,12 @@
           overlayCtx.stroke();
           overlayCtx.restore();
         }
+      }
+
+      function draw() {
+        var proj = computeProjectionState();
+        drawTiles(proj);
+        drawOverlay(proj);
       }
 
       function drawRouteBeacon(x, y, intensity) {
@@ -637,6 +694,8 @@
         stopRouteLoop();
         routePoints = [];
         routeCumDist = [];
+        pickedPoi = null;
+        userHasPanned = false;
         fitLiveLocations();
         badge.textContent = liveLocationLabel || '当前车辆位置';
         notifyRouteMode(false);
@@ -666,6 +725,7 @@
           drag.lx = cx; drag.ly = cy;
           var wx = lonToWorldX(view.lon, view.zoom) - dx;
           var wy = latToWorldY(view.lat, view.zoom) - dy;
+          if (drag.moved > 6) userHasPanned = true;
           view.lon = worldXToLon(wx, view.zoom);
           view.lat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
           if (geofencePicker.active) {
@@ -673,6 +733,7 @@
           }
           requestDraw();
         } else if (drag.pinching && e.touches.length === 2) {
+          userHasPanned = true;
           var pdx = e.touches[0].clientX - e.touches[1].clientX;
           var pdy = e.touches[0].clientY - e.touches[1].clientY;
           var dist = Math.sqrt(pdx * pdx + pdy * pdy);
@@ -718,6 +779,7 @@
       }, { passive: true });
 
       document.getElementById('btnZoomIn').addEventListener('click', function () {
+        userHasPanned = true;
         view.zoom = Math.min(18, view.zoom + 1);
         if (geofencePicker.active) {
           geofencePicker.radiusMeters = radiusFromZoom(
@@ -731,6 +793,7 @@
         requestDraw();
       });
       document.getElementById('btnZoomOut').addEventListener('click', function () {
+        userHasPanned = true;
         view.zoom = Math.max(4, view.zoom - 1);
         if (geofencePicker.active) {
           geofencePicker.radiusMeters = radiusFromZoom(
@@ -767,6 +830,7 @@
           liveLocationLabel = label || '当前车辆位置';
           routePoints = [];
           routeCumDist = [];
+          userHasPanned = false;
           badge.textContent = liveLocationLabel;
           notifyRouteMode(false);
           fitLiveLocations();
@@ -774,7 +838,7 @@
         setUserLocation: function (lat, lon) {
           if (typeof lat !== 'number' || typeof lon !== 'number' || (lat === 0 && lon === 0)) return;
           userPos = { lat: lat, lon: lon };
-          if (routePoints.length === 0 && !geofencePicker.active) {
+          if (routePoints.length === 0 && !geofencePicker.active && !userHasPanned && !pickedPoi) {
             fitLiveLocations();
           } else {
             requestDraw();
@@ -784,6 +848,7 @@
           stopRouteLoop();
           routePoints = [];
           routeCumDist = [];
+          userHasPanned = false;
           if (typeof vLat === 'number' && typeof vLon === 'number' && (vLat !== 0 || vLon !== 0)) {
             vehiclePos = { lat: vLat, lon: vLon };
           }
@@ -822,7 +887,7 @@
           routeCumDist = [];
           geofencePicker.active = true;
           var r = typeof radiusMeters === 'number' && isFinite(radiusMeters)
-            ? Math.max(100, Math.min(20000, Math.round(radiusMeters)))
+            ? Math.max(100, Math.min(10000, Math.round(radiusMeters)))
             : 500;
           geofencePicker.radiusMeters = r;
           if (typeof lat === 'number' && typeof lon === 'number' && (lat !== 0 || lon !== 0)) {
@@ -843,7 +908,7 @@
         },
         setGeofenceRadius: function (radiusMeters) {
           if (typeof radiusMeters !== 'number' || !isFinite(radiusMeters)) return;
-          var r = Math.max(100, Math.min(20000, Math.round(radiusMeters)));
+          var r = Math.max(100, Math.min(10000, Math.round(radiusMeters)));
           geofencePicker.active = true;
           geofencePicker.radiusMeters = r;
           view.zoom = zoomForRadius(

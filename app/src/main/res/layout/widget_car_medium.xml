@@ -31,11 +31,12 @@
 
                 <TextView
                     android:id="@+id/widget_model_name"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
+                    android:layout_weight="1"
                     android:ellipsize="end"
                     android:singleLine="true"
-                    android:text="艾瑞泽8"
+                    android:text="CarPlus"
                     android:textColor="#FFFFFF"
                     android:textSize="16sp"
                     android:textStyle="bold" />
@@ -52,9 +53,10 @@
                     android:paddingEnd="6dp"
                     android:paddingBottom="1.5dp"
                     android:singleLine="true"
-                    android:text="浙AQ014Q"
+                    android:text=""
                     android:textColor="#B0B4BE"
-                    android:textSize="10sp" />
+                    android:textSize="10sp"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <LinearLayout
@@ -70,16 +72,18 @@
                     android:layout_width="54dp"
                     android:layout_height="5dp"
                     android:max="100"
-                    android:progress="24"
+                    android:progress="0"
                     android:progressDrawable="@drawable/widget_fuel_progress" />
 
                 <TextView
                     android:id="@+id/widget_fuel_text"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_marginStart="7dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
                     android:singleLine="true"
-                    android:text="24% · 210km"
+                    android:text="--% · --km"
                     android:textColor="#D1D1D6"
                     android:textSize="11.5sp" />
             </LinearLayout>
@@ -91,7 +95,7 @@
                 android:layout_marginTop="4dp"
                 android:ellipsize="end"
                 android:singleLine="true"
-                android:text="已驻车"
+                android:text="状态待同步"
                 android:textColor="#8E9299"
                 android:textSize="11sp" />
         </LinearLayout>
@@ -114,7 +118,7 @@
             <LinearLayout
                 android:id="@+id/widget_btn_refresh"
                 android:layout_width="wrap_content"
-                android:layout_height="22dp"
+                android:layout_height="32dp"
                 android:layout_gravity="top|end"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
@@ -127,16 +131,16 @@
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="3dp"
                     android:singleLine="true"
-                    android:text="13:42 更新"
-                    android:textColor="#787C86"
-                    android:textSize="9.5sp" />
+                    android:text="待同步"
+                    android:textColor="#9EA3AE"
+                    android:textSize="10sp" />
 
                 <ImageView
                     android:layout_width="14dp"
                     android:layout_height="14dp"
                     android:contentDescription="刷新车况"
                     android:src="@drawable/ic_widget_refresh"
-                    android:tint="#8E9299" />
+                    android:tint="#9EA3AE" />
             </LinearLayout>
         </FrameLayout>
     </LinearLayout>

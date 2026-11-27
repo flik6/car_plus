@@ -14,7 +14,7 @@ abstract class BaseCarWidgetProvider(private val style: CarWidgetStyle) : AppWid
     ) {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
         CarWidgetManager.updateWidgetsForStyle(context, appWidgetManager, appWidgetIds, style)
-        CarWidgetManager.triggerBackgroundSyncIfStale(context)
+        CarWidgetManager.triggerBackgroundSyncIfStale(context, pendingResult = goAsync())
     }
 
     override fun onAppWidgetOptionsChanged(

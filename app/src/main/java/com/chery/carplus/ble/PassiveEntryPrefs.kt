@@ -145,6 +145,10 @@ object PassiveEntryStore {
         }.commit()
     }
 
+    fun clearAll(context: Context) {
+        prefs(context).edit().clear().commit()
+    }
+
     fun updateVehicleSafetyHint(
         context: Context,
         vin: String,

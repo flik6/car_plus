@@ -94,22 +94,12 @@ class PassiveEntrySheets(
         outer.addView(subtitleTv, lp(top = dp(5), bottom = dp(12)))
 
         val maxScrollH = (context.resources.displayMetrics.heightPixels * 0.50f).roundToInt()
-        val scroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
+        val scroll = createMaxHeightScrollView(maxScrollH)
         val listBody = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
         scroll.addView(listBody, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         outer.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        scroll.post {
-            if (scroll.height > maxScrollH) {
-                scroll.layoutParams = (scroll.layoutParams as LinearLayout.LayoutParams).apply {
-                    height = maxScrollH
-                }
-            }
-        }
 
         val ctaBtn = AppComponents.createActionButton(
             context = context,
@@ -148,7 +138,7 @@ class PassiveEntrySheets(
                 ctaBtn.isEnabled = true
                 ctaBtn.setOnClickListener {
                     AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
-                    dialog.dismiss()
+                    immediateDismiss()
                     onProceedEnableAfterPrerequisites(profile) { enabled ->
                         onEnabledCallback?.invoke(enabled)
                     }
@@ -214,22 +204,12 @@ class PassiveEntrySheets(
         outer.addView(titleRow, lp(top = dp(4), bottom = dp(14)))
 
         val maxBodyH = (context.resources.displayMetrics.heightPixels * 0.56f).roundToInt()
-        val scroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
+        val scroll = createMaxHeightScrollView(maxBodyH)
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
         scroll.addView(body, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         outer.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        scroll.post {
-            if (scroll.height > maxBodyH) {
-                scroll.layoutParams = (scroll.layoutParams as LinearLayout.LayoutParams).apply {
-                    height = maxBodyH
-                }
-            }
-        }
 
         var cfg = PassiveEntryStore.load(context, profile.vin)
 
@@ -398,7 +378,7 @@ class PassiveEntrySheets(
             isFocusable = true
             MotionSpec.attachPressPhysics(this, pressedScale = 0.985f, haptic = false)
             setOnClickListener {
-                dialog.dismiss()
+                immediateDismiss()
                 showPrerequisiteGateSheet(inspectOnly = true)
             }
         }
@@ -693,6 +673,21 @@ class PassiveEntrySheets(
             layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, hPx).apply {
                 marginStart = dp(startInsetDp)
             }
+        }
+    }
+
+    private fun createMaxHeightScrollView(maxHeightPx: Int): ScrollView {
+        return object : ScrollView(context) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val parentMode = MeasureSpec.getMode(heightMeasureSpec)
+                val parentSize = MeasureSpec.getSize(heightMeasureSpec)
+                val effectiveMax = if (parentMode == MeasureSpec.UNSPECIFIED) maxHeightPx else minOf(parentSize, maxHeightPx)
+                val mode = if (parentMode == MeasureSpec.EXACTLY) MeasureSpec.EXACTLY else MeasureSpec.AT_MOST
+                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(effectiveMax, mode))
+            }
+        }.apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
     }
 

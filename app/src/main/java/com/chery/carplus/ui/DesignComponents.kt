@@ -180,6 +180,7 @@ object AppSystemInsets {
         if (latestBottomNavInsetPx > 0) {
             sheetView.setPadding(baseLeft, baseTop, baseRight, baseBottom + latestBottomNavInsetPx)
         }
+        val topSafeGapPx = (16f * dialog.context.resources.displayMetrics.density).roundToInt()
         ViewCompat.setOnApplyWindowInsetsListener(backdrop) { _, insets ->
             val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
@@ -191,6 +192,12 @@ object AppSystemInsets {
                 baseRight + sysBars.right,
                 baseBottom + extraBottom
             )
+            val lp = sheetView.layoutParams as? FrameLayout.LayoutParams
+            val desiredTopMargin = sysBars.top + topSafeGapPx
+            if (lp != null && lp.topMargin != desiredTopMargin) {
+                lp.topMargin = desiredTopMargin
+                sheetView.layoutParams = lp
+            }
             insets
         }
         backdrop.post { ViewCompat.requestApplyInsets(backdrop) }
@@ -1276,6 +1283,7 @@ object SixDigitPinSheet {
     fun showChangePinWizardSheet(
         context: Context,
         requireOldPin: Boolean,
+        allowSkipOldPin: Boolean = false,
         onCompleted: (oldPin: String?, newPin: String, showError: (String) -> Unit, dismiss: () -> Unit) -> Unit
     ): Dialog {
         var step = if (requireOldPin) 0 else 1
@@ -1283,18 +1291,18 @@ object SixDigitPinSheet {
         var capturedNewPin: String? = null
 
         val initTitle = if (step == 0) "输入原 PIN 码" else "设置新 PIN 码"
-        val initSub = if (step == 0) "请输入当前 6 位 PIN 码" else "请输入新的 6 位数字 PIN 码"
+        val initSub = if (step == 0) "请输入当前 6 位 PIN 码（忘记请使用“忘记 PIN 码”重置）" else "请输入新的 6 位数字 PIN 码"
 
         return createPinSheetInternal(
             context = context,
             initialTitle = initTitle,
             initialSubtitle = initSub,
-            skipLinkText = if (requireOldPin) "首次设置？跳过原 PIN 码" else null,
-            onSkipClick = { ui ->
+            skipLinkText = if (requireOldPin && allowSkipOldPin) "首次设置？跳过原 PIN 码" else null,
+            onSkipClick = if (requireOldPin && allowSkipOldPin) { ui ->
                 step = 1
                 capturedOldPin = null
                 ui.transitionStep("设置新 PIN 码", "请输入新的 6 位数字 PIN 码", false)
-            },
+            } else null,
             onPinSixDigits = { pin, ui ->
                 when (step) {
                     0 -> {
@@ -1319,7 +1327,11 @@ object SixDigitPinSheet {
                                         step = 0
                                         capturedOldPin = null
                                         capturedNewPin = null
-                                        ui.transitionStep("输入原 PIN 码", "请输入当前 6 位 PIN 码", true)
+                                        ui.transitionStep(
+                                            "输入原 PIN 码",
+                                            "请输入当前 6 位 PIN 码（忘记请使用“忘记 PIN 码”重置）",
+                                            allowSkipOldPin
+                                        )
                                     }
                                     ui.showError(err)
                                 },

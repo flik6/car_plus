@@ -1094,6 +1094,36 @@
     };
   }
 
+  function disposeObject3D(root) {
+    if (!root) return;
+    var disposedGeos = new Set();
+    var disposedMats = new Set();
+    var disposedTexs = new Set();
+    var texKeys = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'alphaMap', 'bumpMap'];
+    root.traverse(function (obj) {
+      if (obj.geometry && !disposedGeos.has(obj.geometry)) {
+        disposedGeos.add(obj.geometry);
+        if (typeof obj.geometry.dispose === 'function') obj.geometry.dispose();
+      }
+      if (obj.material) {
+        var mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (var i = 0; i < mats.length; i++) {
+          var mat = mats[i];
+          if (!mat || disposedMats.has(mat)) continue;
+          disposedMats.add(mat);
+          for (var k = 0; k < texKeys.length; k++) {
+            var tex = mat[texKeys[k]];
+            if (tex && tex !== envMap && !disposedTexs.has(tex)) {
+              disposedTexs.add(tex);
+              if (typeof tex.dispose === 'function') tex.dispose();
+            }
+          }
+          if (typeof mat.dispose === 'function') mat.dispose();
+        }
+      }
+    });
+  }
+
   function loadModel(modelKey, customGlbUrl) {
     var cfg = global.CarModelRegistry.get(modelKey);
     var resolvedUrl = (typeof customGlbUrl === 'string' && customGlbUrl) ? customGlbUrl : cfg.glbUrl;
@@ -1107,6 +1137,7 @@
 
     if (currentContainer) {
       scene.remove(currentContainer);
+      disposeObject3D(currentContainer);
       currentContainer = null;
       currentChassis = null;
       currentEffects = null;
@@ -1413,6 +1444,13 @@
         touchTrackingTap = false;
         orbit.dragging = false;
       }
+    }, { passive: true });
+
+    domEl.addEventListener('touchcancel', function () {
+      touchTrackingTap = false;
+      orbit.dragging = false;
+      orbit.velTheta = 0;
+      orbit.velPhi = 0;
     }, { passive: true });
 
     var mouseTrackingTap = false;

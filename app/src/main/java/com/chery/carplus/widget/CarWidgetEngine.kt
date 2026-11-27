@@ -41,7 +41,8 @@ enum class CarWidgetStyle(val layoutRes: Int) {
 }
 
 data class CarWidgetSnapshot(
-    val modelName: String = "艾瑞泽8",
+    val vin: String = "",
+    val modelName: String = "CarPlus",
     val plateNo: String = "",
     val fuelPercent: Int = 0,
     val hasFuelData: Boolean = false,
@@ -68,6 +69,7 @@ data class CarWidgetSnapshot(
 
 object CarWidgetStateStore {
     private const val PREFS_NAME = "carplus_widget_state"
+    private const val KEY_VIN = "vin"
     private const val KEY_MODEL_NAME = "model_name"
     private const val KEY_PLATE_NO = "plate_no"
     private const val KEY_FUEL_PERCENT = "fuel_percent"
@@ -91,7 +93,8 @@ object CarWidgetStateStore {
     fun load(context: Context): CarWidgetSnapshot {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return CarWidgetSnapshot(
-            modelName = prefs.getString(KEY_MODEL_NAME, "艾瑞泽8").orEmpty().ifBlank { "艾瑞泽8" },
+            vin = prefs.getString(KEY_VIN, "").orEmpty(),
+            modelName = prefs.getString(KEY_MODEL_NAME, "CarPlus").orEmpty().ifBlank { "CarPlus" },
             plateNo = prefs.getString(KEY_PLATE_NO, "").orEmpty(),
             fuelPercent = prefs.getInt(KEY_FUEL_PERCENT, 0).coerceIn(0, 100),
             hasFuelData = prefs.getBoolean(KEY_HAS_FUEL, false),
@@ -116,6 +119,7 @@ object CarWidgetStateStore {
     fun save(context: Context, snapshot: CarWidgetSnapshot) {
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
+            .putString(KEY_VIN, snapshot.vin.trim().uppercase(Locale.US))
             .putString(KEY_MODEL_NAME, snapshot.modelName)
             .putString(KEY_PLATE_NO, snapshot.plateNo)
             .putInt(KEY_FUEL_PERCENT, snapshot.fuelPercent.coerceIn(0, 100))
@@ -177,43 +181,74 @@ object CarWidgetManager {
      * Silently refreshes cloud vehicle telemetry when the system triggers periodic
      * widget `onUpdate` (every 30 min) and the cached snapshot is stale (>= 15 min).
      */
-    fun triggerBackgroundSyncIfStale(context: Context, minStaleMs: Long = 15L * 60L * 1000L) {
+    fun triggerBackgroundSyncIfStale(
+        context: Context,
+        minStaleMs: Long = 15L * 60L * 1000L,
+        pendingResult: BroadcastReceiver.PendingResult? = null
+    ) {
         val appCtx = context.applicationContext
         val now = System.currentTimeMillis()
         val snap = CarWidgetStateStore.load(appCtx)
-        if (snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) return
+        if (snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) {
+            pendingResult?.finish()
+            return
+        }
 
         val prevAttempt = lastAutoSyncAttemptMs.get()
-        if (now - prevAttempt < 60_000L) return
-        if (!lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) return
+        if (now - prevAttempt < 60_000L || !lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) {
+            pendingResult?.finish()
+            return
+        }
 
         val store = VehicleProfileStore(appCtx)
         val profile = store.getActiveProfile()
-        if (profile.vin.isBlank() || profile.accessToken.isBlank()) return
+        if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+            pendingResult?.finish()
+            return
+        }
 
         bgSyncScope.launch {
-            val client = CheryHttpClient(defaultDeviceId = store.defaultDeviceId())
-            val telemetry = runCatching {
-                client.fetchVehicleStatus(
-                    vin = profile.vin,
-                    accessToken = profile.accessToken,
-                    sdkToken = profile.sdkToken,
-                    userId = profile.userId
-                )
-            }.getOrNull() ?: return@launch
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                    val client = CheryHttpClient(
+                        defaultDeviceId = store.defaultDeviceId(),
+                        connectTimeoutMs = 2_000,
+                        readTimeoutMs = 2_500
+                    )
+                    val telemetry = runCatching {
+                        client.fetchVehicleStatus(
+                            vin = profile.vin,
+                            accessToken = profile.accessToken,
+                            sdkToken = profile.sdkToken,
+                            userId = profile.userId
+                        )
+                    }.onFailure { err ->
+                        if (err is com.chery.carplus.cloud.CherySessionExpiredException &&
+                            store.getActiveProfile().accessToken == profile.accessToken
+                        ) {
+                            store.clearTokensPreserveOfflineKeys()
+                        }
+                    }.getOrNull() ?: return@withTimeoutOrNull
 
-            val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
-            val cachedModel = VehicleDisplayNames.normalizeCachedName(
-                uiPrefs.getString("modelName", snap.modelName).orEmpty(),
-                uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
-            )
-            val cachedPlate = uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
-            syncFromTelemetry(
-                context = appCtx,
-                modelName = cachedModel,
-                plateNo = cachedPlate,
-                telemetry = telemetry
-            )
+                    if (!store.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                        return@withTimeoutOrNull
+                    }
+                    val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+                    val cachedModel = VehicleDisplayNames.normalizeCachedName(
+                        uiPrefs.getString("modelName", snap.modelName).orEmpty(),
+                        uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
+                    )
+                    val cachedPlate = uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
+                    syncFromTelemetry(
+                        context = appCtx,
+                        modelName = cachedModel,
+                        plateNo = cachedPlate,
+                        telemetry = telemetry
+                    )
+                }
+            } finally {
+                pendingResult?.finish()
+            }
         }
     }
 
@@ -225,7 +260,15 @@ object CarWidgetManager {
         cabinTempC: Double? = null,
         primaryStatus: String? = null
     ) {
-        val current = CarWidgetStateStore.load(context)
+        val rawCurrent = CarWidgetStateStore.load(context)
+        val targetVin = telemetry?.vin?.trim()?.uppercase(Locale.US)
+            ?.takeIf { it.isNotBlank() }
+            ?: VehicleProfileStore(context).getActiveProfile().vin.trim().uppercase(Locale.US)
+        val sameVehicle = targetVin.isBlank() ||
+            rawCurrent.vin.isBlank() ||
+            rawCurrent.vin.equals(targetVin, ignoreCase = true)
+        val current = if (sameVehicle) rawCurrent else CarWidgetSnapshot(vin = targetVin)
+
         val uiPrefs = context.applicationContext.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
         val cachedEngineType = uiPrefs.getString("engineType", "").orEmpty()
         val resolvedModel = modelName.ifBlank { current.modelName }
@@ -242,12 +285,13 @@ object CarWidgetManager {
             else -> current.primaryStatus
         }
         val next = CarWidgetSnapshot(
+            vin = targetVin.ifBlank { current.vin },
             modelName = resolvedModel,
             plateNo = plateNo.ifBlank { telemetry?.licensePlate.orEmpty().ifBlank { current.plateNo } },
             fuelPercent = fuel?.roundToInt()?.coerceIn(0, 100) ?: current.fuelPercent,
-            hasFuelData = fuel != null || current.hasFuelData,
+            hasFuelData = if (telemetry != null) fuel != null else current.hasFuelData,
             batteryPercent = battery?.roundToInt()?.coerceIn(0, 100) ?: current.batteryPercent,
-            hasBatteryData = battery != null || current.hasBatteryData,
+            hasBatteryData = if (telemetry != null) battery != null else current.hasBatteryData,
             powertrainCode = powertrain.code,
             isCharging = isCharging,
             rangeKm = telemetry?.remainingRangeKm?.takeIf { it > 0.0 }?.roundToInt() ?: current.rangeKm,
@@ -400,6 +444,13 @@ object CarWidgetManager {
 
         // Large Dashboard extra telemetry cells
         if (style == CarWidgetStyle.LARGE) {
+            val energyLabel = when (s.powertrain) {
+                VehiclePowertrain.EV -> "电量续航"
+                VehiclePowertrain.PHEV -> "油电续航"
+                VehiclePowertrain.ICE -> "油量续航"
+            }
+            rv.setTextViewText(R.id.widget_fuel_label, energyLabel)
+
             val climateStr = when {
                 s.acOn && s.cabinTempC != Int.MIN_VALUE -> "开启 · ${s.cabinTempC}°C"
                 s.acOn -> "已开启"
@@ -559,150 +610,202 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         val mainHandler = Handler(Looper.getMainLooper())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun finishReceiverOnce() {
+            if (finished.compareAndSet(false, true)) {
+                runCatching { pendingResult.finish() }
+            }
+        }
+        val watchdog = Runnable { finishReceiverOnce() }
+        mainHandler.postDelayed(watchdog, 8_800L)
 
         scope.launch {
+            var commandSucceeded = false
             try {
-                val client = CheryHttpClient(defaultDeviceId = store.defaultDeviceId())
-                val snap = CarWidgetStateStore.load(appCtx)
-                val cachedModel = VehicleDisplayNames.normalizeCachedName(
-                    uiPrefs.getString("modelName", snap.modelName).orEmpty(),
-                    uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
-                )
-                val cachedPlate = uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
+                val completed = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                    val client = CheryHttpClient(
+                        defaultDeviceId = store.defaultDeviceId(),
+                        connectTimeoutMs = 2_000,
+                        readTimeoutMs = 2_500
+                    )
+                    val snap = CarWidgetStateStore.load(appCtx)
+                    val cachedModel = VehicleDisplayNames.normalizeCachedName(
+                        uiPrefs.getString("modelName", snap.modelName).orEmpty(),
+                        uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
+                    )
+                    val cachedPlate = uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
+                    val airType = uiPrefs.getString("airType", "1").orEmpty().ifBlank { "1" }
 
-                if (cmd == CarWidgetManager.CMD_REFRESH) {
-                    CarWidgetStateStore.setTransientHint(appCtx, "正在刷新车况...")
+                    if (cmd == CarWidgetManager.CMD_REFRESH) {
+                        CarWidgetStateStore.setTransientHint(appCtx, "正在刷新车况...")
+                        CarWidgetManager.updateAllWidgets(appCtx)
+                        var refreshExpired = false
+                        val telemetry = try {
+                            client.fetchVehicleStatus(
+                                vin = profile.vin,
+                                accessToken = profile.accessToken,
+                                sdkToken = profile.sdkToken,
+                                userId = profile.userId
+                            )
+                        } catch (_: com.chery.carplus.cloud.CherySessionExpiredException) {
+                            refreshExpired = true
+                            null
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        if (refreshExpired) {
+                            if (store.getActiveProfile().accessToken == profile.accessToken) {
+                                store.clearTokensPreserveOfflineKeys()
+                            }
+                            CarWidgetStateStore.setTransientHint(appCtx, "")
+                            CarWidgetManager.updateAllWidgets(appCtx)
+                            mainHandler.post {
+                                Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
+                                launchAppForAction(appCtx, cmd, needPinCache = false)
+                            }
+                            return@withTimeoutOrNull
+                        }
+                        if (telemetry != null && store.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                            CarWidgetManager.syncFromTelemetry(
+                                context = appCtx,
+                                modelName = cachedModel,
+                                plateNo = cachedPlate,
+                                telemetry = telemetry
+                            )
+                        } else {
+                            CarWidgetStateStore.setTransientHint(appCtx, "")
+                            CarWidgetManager.updateAllWidgets(appCtx)
+                            mainHandler.post {
+                                Toast.makeText(appCtx, "刷新车况失败，请检查网络", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        return@withTimeoutOrNull
+                    }
+
+                    val (remoteCmd, actionLabel, params) = when (cmd) {
+                        CarWidgetManager.CMD_TOGGLE_LOCK -> {
+                            if (snap.doorLocked) Triple(RemoteCommand.DOOR_UNLOCK, "解锁", emptyMap())
+                            else Triple(RemoteCommand.DOOR_LOCK, "锁车", emptyMap())
+                        }
+                        CarWidgetManager.CMD_TOGGLE_AC -> {
+                            if (snap.acOn) Triple(RemoteCommand.AC_OFF, "关闭空调", mapOf("airType" to airType))
+                            else Triple(RemoteCommand.AC_ON, "开启空调", mapOf("temperature" to "23", "airType" to airType))
+                        }
+                        CarWidgetManager.CMD_FIND_CAR -> Triple(RemoteCommand.FIND_CAR, "寻车", emptyMap())
+                        CarWidgetManager.CMD_TOGGLE_TRUNK -> {
+                            if (snap.trunkOpen) Triple(RemoteCommand.TAILGATE_CLOSE, "关闭后备箱", emptyMap())
+                            else Triple(RemoteCommand.TRUNK_UNLOCK, "开启后备箱", emptyMap())
+                        }
+                        CarWidgetManager.CMD_TOGGLE_ENGINE -> {
+                            if (snap.engineRunning) Triple(RemoteCommand.ENGINE_STOP, "熄火", emptyMap())
+                            else Triple(RemoteCommand.ENGINE_START, "远程启动", emptyMap())
+                        }
+                        else -> return@withTimeoutOrNull
+                    }
+
+                    CarWidgetStateStore.setTransientHint(appCtx, "正在${actionLabel}...")
                     CarWidgetManager.updateAllWidgets(appCtx)
-                    val telemetry = runCatching {
-                        client.fetchVehicleStatus(
+
+                    var sessionExpired = false
+                    val result = try {
+                        client.sendRemoteCommand(
                             vin = profile.vin,
+                            userId = profile.userId,
                             accessToken = profile.accessToken,
                             sdkToken = profile.sdkToken,
-                            userId = profile.userId
+                            command = remoteCmd,
+                            pin = savedPin,
+                            params = params
                         )
-                    }.getOrNull()
-                    if (telemetry != null) {
-                        CarWidgetManager.syncFromTelemetry(
-                            context = appCtx,
-                            modelName = cachedModel,
-                            plateNo = cachedPlate,
-                            telemetry = telemetry
-                        )
-                    } else {
+                    } catch (_: com.chery.carplus.cloud.CherySessionExpiredException) {
+                        sessionExpired = true
+                        null
+                    } catch (_: Throwable) {
+                        null
+                    }
+
+                    if (sessionExpired) {
+                        if (store.getActiveProfile().accessToken == profile.accessToken) {
+                            store.clearTokensPreserveOfflineKeys()
+                        }
                         CarWidgetStateStore.setTransientHint(appCtx, "")
                         CarWidgetManager.updateAllWidgets(appCtx)
                         mainHandler.post {
-                            Toast.makeText(appCtx, "刷新车况失败，请检查网络", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
+                            launchAppForAction(appCtx, cmd, needPinCache = false)
                         }
+                        return@withTimeoutOrNull
                     }
-                    return@launch
-                }
 
-                val (remoteCmd, actionLabel, params) = when (cmd) {
-                    CarWidgetManager.CMD_TOGGLE_LOCK -> {
-                        if (snap.doorLocked) Triple(RemoteCommand.DOOR_UNLOCK, "解锁", emptyMap())
-                        else Triple(RemoteCommand.DOOR_LOCK, "锁车", emptyMap())
-                    }
-                    CarWidgetManager.CMD_TOGGLE_AC -> {
-                        if (snap.acOn) Triple(RemoteCommand.AC_OFF, "关闭空调", emptyMap())
-                        else Triple(RemoteCommand.AC_ON, "开启空调", mapOf("temperature" to "23.0"))
-                    }
-                    CarWidgetManager.CMD_FIND_CAR -> Triple(RemoteCommand.FIND_CAR, "寻车", emptyMap())
-                    CarWidgetManager.CMD_TOGGLE_TRUNK -> {
-                        if (snap.trunkOpen) Triple(RemoteCommand.TAILGATE_CLOSE, "关闭后备箱", emptyMap())
-                        else Triple(RemoteCommand.TRUNK_UNLOCK, "开启后备箱", emptyMap())
-                    }
-                    CarWidgetManager.CMD_TOGGLE_ENGINE -> {
-                        if (snap.engineRunning) Triple(RemoteCommand.ENGINE_STOP, "熄火", emptyMap())
-                        else Triple(RemoteCommand.ENGINE_START, "远程启动", emptyMap())
-                    }
-                    else -> return@launch
-                }
-
-                CarWidgetStateStore.setTransientHint(appCtx, "正在${actionLabel}...")
-                CarWidgetManager.updateAllWidgets(appCtx)
-
-                var sessionExpired = false
-                val result = try {
-                    client.sendRemoteCommand(
-                        vin = profile.vin,
-                        userId = profile.userId,
-                        accessToken = profile.accessToken,
-                        sdkToken = profile.sdkToken,
-                        command = remoteCmd,
-                        pin = savedPin,
-                        params = params
-                    )
-                } catch (_: com.chery.carplus.cloud.CherySessionExpiredException) {
-                    sessionExpired = true
-                    null
-                } catch (_: Throwable) {
-                    null
-                }
-
-                if (sessionExpired) {
-                    CarWidgetStateStore.setTransientHint(appCtx, "")
-                    CarWidgetManager.updateAllWidgets(appCtx)
-                    mainHandler.post {
-                        Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
-                        launchAppForAction(appCtx, cmd, needPinCache = false)
-                    }
-                    return@launch
-                }
-
-                if (result?.isPinError == true) {
-                    store.updateControlPin(profile.vin, "")
-                    CarWidgetStateStore.setTransientHint(appCtx, "")
-                    CarWidgetManager.updateAllWidgets(appCtx)
-                    mainHandler.post {
-                        Toast.makeText(appCtx, "本机缓存的 PIN 码已失效，请重新验证", Toast.LENGTH_SHORT).show()
-                        launchAppForAction(appCtx, cmd, needPinCache = true)
-                    }
-                    return@launch
-                }
-
-                if (result?.success == true) {
-                    // Optimistic update immediately for crisp desktop responsiveness
-                    val optimistic = when (remoteCmd) {
-                        RemoteCommand.DOOR_UNLOCK -> snap.copy(doorLocked = false, transientHint = "已发送解锁")
-                        RemoteCommand.DOOR_LOCK -> snap.copy(doorLocked = true, transientHint = "已发送锁车")
-                        RemoteCommand.AC_ON -> snap.copy(acOn = true, transientHint = "已发送开空调")
-                        RemoteCommand.AC_OFF -> snap.copy(acOn = false, transientHint = "已发送关空调")
-                        RemoteCommand.TRUNK_UNLOCK -> snap.copy(trunkOpen = true, transientHint = "已发送开后备箱")
-                        RemoteCommand.TAILGATE_CLOSE -> snap.copy(trunkOpen = false, transientHint = "已发送关后备箱")
-                        RemoteCommand.ENGINE_START -> snap.copy(engineRunning = true, primaryStatus = "已启动", transientHint = "已发送启动")
-                        RemoteCommand.ENGINE_STOP -> snap.copy(engineRunning = false, primaryStatus = "已驻车", transientHint = "已发送熄火")
-                        else -> snap.copy(transientHint = "已发送${actionLabel}")
-                    }
-                    CarWidgetStateStore.save(appCtx, optimistic)
-                    CarWidgetManager.updateAllWidgets(appCtx)
-
-                    // Auto-sync real telemetry shortly after command
-                    delay(1600L)
-                    val refreshed = runCatching {
-                        client.fetchVehicleStatus(
-                            vin = profile.vin,
-                            accessToken = profile.accessToken,
-                            sdkToken = profile.sdkToken,
-                            userId = profile.userId
-                        )
-                    }.getOrNull()
-                    if (refreshed != null) {
-                        CarWidgetManager.syncFromTelemetry(appCtx, cachedModel, cachedPlate, refreshed)
-                    } else {
+                    if (result?.isPinError == true) {
+                        store.updateControlPin(profile.vin, "")
                         CarWidgetStateStore.setTransientHint(appCtx, "")
                         CarWidgetManager.updateAllWidgets(appCtx)
+                        mainHandler.post {
+                            Toast.makeText(appCtx, "本机缓存的 PIN 码已失效，请重新验证", Toast.LENGTH_SHORT).show()
+                            launchAppForAction(appCtx, cmd, needPinCache = true)
+                        }
+                        return@withTimeoutOrNull
                     }
-                } else {
+
+                    if (result?.success == true && store.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                        commandSucceeded = true
+                        val optimistic = when (remoteCmd) {
+                            RemoteCommand.DOOR_UNLOCK -> snap.copy(vin = profile.vin, doorLocked = false, transientHint = "已发送解锁")
+                            RemoteCommand.DOOR_LOCK -> snap.copy(vin = profile.vin, doorLocked = true, transientHint = "已发送锁车")
+                            RemoteCommand.AC_ON -> snap.copy(vin = profile.vin, acOn = true, transientHint = "已发送开空调")
+                            RemoteCommand.AC_OFF -> snap.copy(vin = profile.vin, acOn = false, transientHint = "已发送关空调")
+                            RemoteCommand.TRUNK_UNLOCK -> snap.copy(vin = profile.vin, trunkOpen = true, transientHint = "已发送开后备箱")
+                            RemoteCommand.TAILGATE_CLOSE -> snap.copy(vin = profile.vin, trunkOpen = false, transientHint = "已发送关后备箱")
+                            RemoteCommand.ENGINE_START -> snap.copy(vin = profile.vin, engineRunning = true, primaryStatus = "已启动", transientHint = "已发送启动")
+                            RemoteCommand.ENGINE_STOP -> snap.copy(vin = profile.vin, engineRunning = false, primaryStatus = "已驻车", transientHint = "已发送熄火")
+                            else -> snap.copy(vin = profile.vin, transientHint = "已发送${actionLabel}")
+                        }
+                        CarWidgetStateStore.save(appCtx, optimistic)
+                        CarWidgetManager.updateAllWidgets(appCtx)
+
+                        delay(1200L)
+                        val refreshed = runCatching {
+                            client.fetchVehicleStatus(
+                                vin = profile.vin,
+                                accessToken = profile.accessToken,
+                                sdkToken = profile.sdkToken,
+                                userId = profile.userId
+                            )
+                        }.getOrNull()
+                        if (refreshed != null && store.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                            CarWidgetManager.syncFromTelemetry(appCtx, cachedModel, cachedPlate, refreshed)
+                        } else {
+                            CarWidgetStateStore.setTransientHint(appCtx, "")
+                            CarWidgetManager.updateAllWidgets(appCtx)
+                        }
+                    } else if (result?.success != true) {
+                        CarWidgetStateStore.setTransientHint(appCtx, "")
+                        CarWidgetManager.updateAllWidgets(appCtx)
+                        val msg = result?.resultMessage?.takeIf { it.isNotBlank() } ?: "${actionLabel}失败，请打开应用重试"
+                        mainHandler.post {
+                            Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        // Command succeeded but active VIN changed mid-flight; clear any stale hint on matching snapshot.
+                        if (CarWidgetStateStore.load(appCtx).vin.equals(profile.vin, ignoreCase = true)) {
+                            CarWidgetStateStore.setTransientHint(appCtx, "")
+                            CarWidgetManager.updateAllWidgets(appCtx)
+                        }
+                    }
+                }
+                if (completed == null) {
                     CarWidgetStateStore.setTransientHint(appCtx, "")
                     CarWidgetManager.updateAllWidgets(appCtx)
-                    val msg = result?.resultMessage?.takeIf { it.isNotBlank() } ?: "${actionLabel}失败，请打开应用重试"
-                    mainHandler.post {
-                        Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show()
+                    if (!commandSucceeded) {
+                        mainHandler.post {
+                            Toast.makeText(appCtx, "网络响应超时，请稍后重试", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } finally {
-                pendingResult.finish()
+                mainHandler.removeCallbacks(watchdog)
+                finishReceiverOnce()
             }
         }
     }

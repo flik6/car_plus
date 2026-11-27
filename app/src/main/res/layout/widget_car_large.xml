@@ -29,11 +29,12 @@
 
                 <TextView
                     android:id="@+id/widget_model_name"
-                    android:layout_width="wrap_content"
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
+                    android:layout_weight="1"
                     android:ellipsize="end"
                     android:singleLine="true"
-                    android:text="艾瑞泽8"
+                    android:text="CarPlus"
                     android:textColor="#FFFFFF"
                     android:textSize="17sp"
                     android:textStyle="bold" />
@@ -50,9 +51,10 @@
                     android:paddingEnd="7dp"
                     android:paddingBottom="2dp"
                     android:singleLine="true"
-                    android:text="浙AQ014Q"
+                    android:text=""
                     android:textColor="#B0B4BE"
-                    android:textSize="10.5sp" />
+                    android:textSize="10.5sp"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <TextView
@@ -70,7 +72,7 @@
         <LinearLayout
             android:id="@+id/widget_btn_refresh"
             android:layout_width="wrap_content"
-            android:layout_height="28dp"
+            android:layout_height="34dp"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingStart="8dp"
@@ -82,16 +84,16 @@
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="4dp"
                 android:singleLine="true"
-                android:text="13:42 更新"
-                android:textColor="#787C86"
-                android:textSize="10sp" />
+                android:text="待同步"
+                android:textColor="#9EA3AE"
+                android:textSize="10.5sp" />
 
             <ImageView
                 android:layout_width="16dp"
                 android:layout_height="16dp"
                 android:contentDescription="刷新车况"
                 android:src="@drawable/ic_widget_refresh"
-                android:tint="#8E9299" />
+                android:tint="#9EA3AE" />
         </LinearLayout>
     </LinearLayout>
 
@@ -127,6 +129,7 @@
             android:orientation="vertical">
 
             <TextView
+                android:id="@+id/widget_fuel_label"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="油量续航"
@@ -135,11 +138,12 @@
 
             <TextView
                 android:id="@+id/widget_fuel_text"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
+                android:ellipsize="end"
                 android:singleLine="true"
-                android:text="24% · 210km"
+                android:text="--% · --km"
                 android:textColor="#FFFFFF"
                 android:textSize="12.5sp"
                 android:textStyle="bold" />
@@ -164,8 +168,9 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
+                android:ellipsize="end"
                 android:singleLine="true"
-                android:text="已关闭"
+                android:text="--"
                 android:textColor="#FFFFFF"
                 android:textSize="12.5sp"
                 android:textStyle="bold" />
@@ -190,8 +195,9 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
+                android:ellipsize="end"
                 android:singleLine="true"
-                android:text="34,617 km"
+                android:text="-- km"
                 android:textColor="#FFFFFF"
                 android:textSize="12.5sp"
                 android:textStyle="bold" />

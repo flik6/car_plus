@@ -156,7 +156,22 @@ class VehicleProfileStore(context: Context) {
     private val prefs: SharedPreferences = appContext
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val lock: Any get() = storeLock
-    private var accountDraft: VehicleProfile? = null
+
+    private fun readAccountDraftLocked(): VehicleProfile? {
+        val raw = prefs.getString(KEY_ACCOUNT_DRAFT, "").orEmpty().trim()
+        if (raw.isBlank()) return null
+        return runCatching { profileFromJson(JSONObject(raw)) }.getOrNull()
+    }
+
+    private fun writeAccountDraftLocked(draft: VehicleProfile?) {
+        val editor = prefs.edit()
+        if (draft == null) {
+            editor.remove(KEY_ACCOUNT_DRAFT)
+        } else {
+            editor.putString(KEY_ACCOUNT_DRAFT, draft.toJson().toString())
+        }
+        editor.commit()
+    }
 
     init {
         synchronized(lock) {
@@ -181,7 +196,7 @@ class VehicleProfileStore(context: Context) {
         val activeVin = prefs.getString(KEY_ACTIVE_VIN, "").orEmpty()
         val active = profiles.firstOrNull { it.vin.equals(activeVin, ignoreCase = true) }
             ?: profiles.firstOrNull()
-            ?: accountDraft
+            ?: readAccountDraftLocked()
             ?: emptyProfile()
         if (active.vin.isNotBlank() && !active.vin.equals(activeVin, ignoreCase = true)) {
             prefs.edit().putString(KEY_ACTIVE_VIN, active.vin).apply()
@@ -249,7 +264,7 @@ class VehicleProfileStore(context: Context) {
         )
 
         if (normalized.vin.isBlank()) {
-            accountDraft = normalized
+            writeAccountDraftLocked(normalized)
             return@synchronized normalized
         }
 
@@ -257,7 +272,7 @@ class VehicleProfileStore(context: Context) {
             .filterNot { it.vin.equals(normalized.vin, ignoreCase = true) }
             .toMutableList()
         profiles.add(0, normalized)
-        accountDraft = null
+        writeAccountDraftLocked(null)
 
         val activeVin = if (activate) {
             normalized.vin
@@ -268,6 +283,66 @@ class VehicleProfileStore(context: Context) {
         }
         persistLocked(profiles, activeVin)
         normalized
+    }
+
+    /**
+     * Atomically updates only BLE digital key material for an existing [vin] without
+     * overwriting accessToken, sdkToken, controlPin, or KEY_ACTIVE_VIN.
+     * Returns null if [vin] no longer exists in the store (e.g. after logout or unbind).
+     */
+    fun updateKeyMaterial(
+        vin: String,
+        rootKeyHex: String,
+        infoHex: String,
+        edfHex: String,
+        validFrom: String,
+        validTo: String,
+        secAHex: String,
+        secBHex: String,
+        keyRole: Int,
+        deviceId: String = "",
+        bleName: String = "",
+        bleMac: String = ""
+    ): VehicleProfile? = synchronized(lock) {
+        val targetVin = vin.trim().uppercase(Locale.US)
+        if (targetVin.isBlank()) return@synchronized null
+        val profiles = readProfilesLocked().toMutableList()
+        val index = profiles.indexOfFirst { it.vin.equals(targetVin, ignoreCase = true) }
+        if (index < 0) return@synchronized null
+        val existing = profiles[index]
+        val updated = existing.copy(
+            deviceId = deviceId.trim().ifBlank { existing.deviceId },
+            bleName = bleName.trim().ifBlank { existing.bleName },
+            bleMac = bleMac.trim().uppercase(Locale.US).ifBlank { existing.bleMac },
+            rootKeyHex = compactHex(rootKeyHex),
+            infoHex = compactHex(infoHex),
+            edfHex = compactHex(edfHex),
+            validFrom = validFrom.ifBlank { existing.validFrom },
+            validTo = validTo.ifBlank { existing.validTo },
+            secAHex = compactHex(secAHex).ifBlank { existing.secAHex },
+            secBHex = compactHex(secBHex).ifBlank { existing.secBHex },
+            keyRole = keyRole,
+            updatedAt = System.currentTimeMillis()
+        )
+        profiles[index] = updated
+        val activeVin = prefs.getString(KEY_ACTIVE_VIN, "").orEmpty()
+            .takeIf { active -> profiles.any { it.vin.equals(active, ignoreCase = true) } }
+            ?: updated.vin
+        persistLocked(profiles, activeVin)
+        updated
+    }
+
+    /**
+     * Clears cloud session tokens (accessToken/sdkToken) while preserving offline BLE
+     * key material and deviceId fallback UUID (used on 0406 session expiry).
+     */
+    fun clearTokensPreserveOfflineKeys() = synchronized(lock) {
+        val profiles = readProfilesLocked().map {
+            it.copy(accessToken = "", sdkToken = "", updatedAt = System.currentTimeMillis())
+        }
+        val activeVin = prefs.getString(KEY_ACTIVE_VIN, "").orEmpty()
+        writeAccountDraftLocked(null)
+        persistLocked(profiles, activeVin)
     }
 
     /**
@@ -294,7 +369,7 @@ class VehicleProfileStore(context: Context) {
 
     fun deleteProfile(vin: String) = synchronized(lock) {
         if (vin.isBlank()) {
-            accountDraft = null
+            writeAccountDraftLocked(null)
             return@synchronized
         }
         val remaining = readProfilesLocked()
@@ -309,10 +384,15 @@ class VehicleProfileStore(context: Context) {
         persistLocked(remaining, nextActive)
     }
 
-    /** Removes every persisted profile and account-only draft from the app. */
+    /** Removes every persisted profile and account-only draft while keeping stable fallback device UUID. */
     fun clearAllProfiles() = synchronized(lock) {
-        accountDraft = null
-        prefs.edit().clear().commit()
+        val fallbackUuid = prefs.getString(KEY_FALLBACK_DEVICE_UUID, "").orEmpty()
+        prefs.edit().apply {
+            clear()
+            if (fallbackUuid.isNotBlank()) {
+                putString(KEY_FALLBACK_DEVICE_UUID, fallbackUuid)
+            }
+        }.commit()
     }
 
     fun importFromRawHex(
@@ -460,6 +540,7 @@ class VehicleProfileStore(context: Context) {
         const val PREFS_NAME = "car_plus_profiles"
         private const val KEY_PROFILES = "profiles"
         private const val KEY_ACTIVE_VIN = "activeVin"
+        private const val KEY_ACCOUNT_DRAFT = "accountDraft"
         private const val KEY_FALLBACK_DEVICE_UUID = "fallbackDeviceUuid"
 
         // Kept as empty source-compatible defaults. Vehicle/account material is

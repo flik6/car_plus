@@ -51,6 +51,10 @@ class PassiveEntryScanReceiver : BroadcastReceiver() {
             PassiveEntryRuntime.appendLog("前台活跃期间收到 PendingIntent 广播 (${matched.rssi} dBm)，交由前台协同")
             return
         }
+        val throttleReason = PassiveEntryRuntime.shouldThrottleScanWake(matched.rssi, cfg, now)
+        if (throttleReason != null) {
+            return
+        }
         if (now - lastWakeElapsedMs < WAKE_THROTTLE_MS) return
         lastWakeElapsedMs = now
 
@@ -156,6 +160,9 @@ class PassiveEntryCompanionService : CompanionDeviceService() {
         val expectedMac = PassiveEntryPrerequisiteChecker.normalizeMac(profile.bleMac) ?: return
         if (!expectedMac.equals(targetMac, ignoreCase = true)) return
 
+        if (PassiveEntryRuntime.isServiceRunning()) {
+            return
+        }
         if (PassiveEntryRuntime.isForegroundAppActive()) {
             PassiveEntryRuntime.appendLog("伴随设备检测到本车出现 ($targetMac)，前台活跃中跳过后台抢连")
             return
@@ -172,6 +179,7 @@ class PassiveEntryCompanionService : CompanionDeviceService() {
 
     private fun handleDisappeared(rawAddress: String) {
         val mac = PassiveEntryPrerequisiteChecker.normalizeMac(rawAddress) ?: return
+        PassiveEntryRuntime.markCompanionDisappeared()
         PassiveEntryRuntime.appendLog("伴随设备报告本车远离 ($mac)")
         PassiveEntryService.notifyCompanionDisappeared(applicationContext, mac)
     }

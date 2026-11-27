@@ -58,7 +58,13 @@ class VehicleVisualView @JvmOverloads constructor(
             val nextResolved = VehicleModelRepository.resolveModelKey(normalized)
             field = normalized
             fallbackLabel.text = "${VehicleModelRepository.displayNameForKey(nextResolved)} · 3D 视图不可用"
-            if (engineReady && (activeLoadedKey != nextResolved || prevResolved != nextResolved)) {
+            val alreadyLoadingSameKey = modelLoadJob?.isActive == true && requestedModelKey == nextResolved
+            val alreadyFailedSameKey = downloadFailed && requestedModelKey == nextResolved
+            if (engineReady &&
+                !alreadyLoadingSameKey &&
+                !alreadyFailedSameKey &&
+                (activeLoadedKey != nextResolved || prevResolved != nextResolved)
+            ) {
                 requestModelLoad(normalized, isVehicleSwitch = activeLoadedKey != null && activeLoadedKey != nextResolved)
             } else {
                 pushStateToScene()
@@ -151,6 +157,7 @@ class VehicleVisualView @JvmOverloads constructor(
     private var sceneReady = false
     private var activeLoadedKey: String? = null
     private var activeLoadedUrl: String? = null
+    private var requestedModelKey: String? = null
     private var loadGeneration = 0
     private var pendingFlash = false
     private var deckProgress = 0f
@@ -423,6 +430,7 @@ class VehicleVisualView @JvmOverloads constructor(
         if (isDestroyed || !engineReady) return
         val resolvedKey = VehicleModelRepository.resolveModelKey(rawHint)
         val displayName = VehicleModelRepository.displayNameForKey(resolvedKey)
+        requestedModelKey = resolvedKey
         val gen = ++loadGeneration
         downloadFailed = false
         placeholderView.isClickable = false
@@ -448,7 +456,11 @@ class VehicleVisualView @JvmOverloads constructor(
         modelLoadJob = viewScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    VehicleModelRepository.ensureModelReady(context, rawHint) { pct, _, _ ->
+                    VehicleModelRepository.ensureModelReady(
+                        context = context,
+                        rawHint = rawHint,
+                        isCancelled = { isDestroyed || loadGeneration != gen }
+                    ) { pct, _, _ ->
                         mainHandler.post {
                             if (!isDestroyed && loadGeneration == gen) {
                                 val label = if (pct >= 99) {

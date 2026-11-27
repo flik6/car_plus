@@ -137,7 +137,12 @@ object BlePairingPinCalculator {
                     )?.let { return it }
                     selectRandomFromAdvertisingValue(value)?.let { return it }
                 }
-                0x16, 0x20 -> selectRandomFromAdvertisingValue(value)?.let { return it }
+                0x16 -> if (value.size >= 6) {
+                    selectRandomFromAdvertisingValue(value.copyOfRange(2, value.size))?.let { return it }
+                }
+                0x20 -> if (value.size >= 8) {
+                    selectRandomFromAdvertisingValue(value.copyOfRange(4, value.size))?.let { return it }
+                }
             }
             offset = next
         }

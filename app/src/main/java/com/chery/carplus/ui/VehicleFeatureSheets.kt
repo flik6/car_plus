@@ -155,6 +155,7 @@ internal class VehicleFeatureSheets(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), dp(32))
@@ -178,7 +179,7 @@ internal class VehicleFeatureSheets(
         )
         val (snWrap, snEt) = AppComponents.createUnderlineInput(
             context = context,
-            hint = "车辆 TBox SN 码",
+            hint = "车辆序列号 (SN)",
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
         )
         val (iccidWrap, iccidEt) = AppComponents.createUnderlineInput(
@@ -278,7 +279,7 @@ internal class VehicleFeatureSheets(
 
             val validationError = when {
                 vin.length != 17 -> "请输入完整的 17 位车架号 (VIN)"
-                sn.isBlank() -> "请输入车辆 TBox SN 码"
+                sn.isBlank() -> "请输入车辆序列号 (SN)"
                 iccid.isBlank() -> "请输入车辆 SIM 卡 ICCID"
                 !Regex("^\\d{6}$").matches(pin) -> "PIN 码必须为 6 位数字"
                 pin != confirmPin -> "两次输入的 PIN 码不一致"
@@ -331,7 +332,8 @@ internal class VehicleFeatureSheets(
                         MotionSpec.shakeError(errorTv)
                     }
                 }.onFailure { err ->
-                    errorTv.text = "绑定请求失败：${err.message.orEmpty().take(90)}"
+                    if (err is CherySessionExpiredException) return@onFailure
+                    errorTv.text = friendlyErrorMessage(err, "绑定失败，请稍后重试")
                     errorTv.visibility = View.VISIBLE
                     AppHaptics.perform(submitBtn, HapticLevel.ERROR_REJECT)
                     MotionSpec.shakeError(errorTv)
@@ -369,6 +371,7 @@ internal class VehicleFeatureSheets(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val contentHost = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), dp(24))
@@ -534,6 +537,7 @@ internal class VehicleFeatureSheets(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         scroll.addView(listHost, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
@@ -693,6 +697,7 @@ internal class VehicleFeatureSheets(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(32))
@@ -832,20 +837,44 @@ internal class VehicleFeatureSheets(
                         MotionSpec.shakeError(vin4Wrap)
                         return@setOnClickListener
                     }
-                    val pin = cachedPinProvider().ifBlank { profile.controlPin }
-                    dialog.dismiss()
-                    scope.launch {
-                        val ok = runCatching {
-                            withContext(Dispatchers.IO) {
-                                httpClient.unbindVehicle(profile.accessToken, vehicle.vin, pin)
+                    fun performUnbind(verifiedPin: String, onPinError: ((String) -> Unit)? = null, onDismissPin: (() -> Unit)? = null) {
+                        scope.launch {
+                            val res = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.unbindVehicle(profile.accessToken, vehicle.vin, verifiedPin)
+                                }
                             }
-                        }.getOrDefault(false)
-                        if (ok) {
-                            AppHaptics.perform(box, HapticLevel.MEDIUM_CONFIRM)
-                            toast("车辆已解绑")
-                            onUnbound()
-                        } else {
-                            toast("解绑失败，请核对 PIN 码或稍后重试")
+                            res.onSuccess { ok ->
+                                if (ok) {
+                                    onDismissPin?.invoke()
+                                    AppHaptics.perform(box, HapticLevel.MEDIUM_CONFIRM)
+                                    toast("车辆已解绑")
+                                    onUnbound()
+                                } else {
+                                    onPinError?.invoke("PIN 码校验失败，请重试")
+                                        ?: toast("解绑失败，请核对 PIN 码或稍后重试")
+                                }
+                            }.onFailure { err ->
+                                if (err is CherySessionExpiredException) {
+                                    onDismissPin?.invoke()
+                                } else {
+                                    val msg = friendlyErrorMessage(err, "解绑失败，请稍后重试")
+                                    onPinError?.invoke(msg) ?: toast(msg)
+                                }
+                            }
+                        }
+                    }
+                    val cachedPin = cachedPinProvider().ifBlank { profile.controlPin }.trim()
+                    dialog.dismiss()
+                    if (cachedPin.length == 6 && cachedPin.all { it.isDigit() }) {
+                        performUnbind(cachedPin)
+                    } else {
+                        secondaryDialog = SixDigitPinSheet.showVerifyPinSheet(
+                            context = context,
+                            title = "验证 PIN 码",
+                            subtitle = "请输入 6 位车控 PIN 码以解绑车辆"
+                        ) { pin, showError, dismissPin ->
+                            performUnbind(pin, showError, dismissPin)
                         }
                     }
                 }
@@ -894,6 +923,7 @@ internal class VehicleFeatureSheets(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         scroll.addView(listHost, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
@@ -1212,7 +1242,7 @@ internal class VehicleFeatureSheets(
         onReload: () -> Unit
     ): LinearLayout = cardBox().apply {
         val title = fence.name.ifBlank { "围栏 #${fence.keyId}" }
-        val isEnabled = fence.status == "1"
+        val fenceEnabled = fence.status == "1"
         isClickable = true
         isFocusable = true
         MotionSpec.attachPressPhysics(this, pressedScale = 0.985f)
@@ -1226,26 +1256,43 @@ internal class VehicleFeatureSheets(
             text(title, 15f, TEXT_PRIMARY, Typeface.BOLD),
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
-        val toggleSwitch = ToggleSwitch(context).apply {
-            setChecked(isEnabled, animate = false)
+        var togglingFence = false
+        lateinit var toggleSwitch: ToggleSwitch
+        toggleSwitch = ToggleSwitch(context).apply {
+            setChecked(fenceEnabled, animate = false)
             onToggleAttempt = { targetChecked ->
-                setChecked(targetChecked, animate = true)
-                scope.launch {
-                    val ok = runCatching {
-                        withContext(Dispatchers.IO) {
-                            httpClient.deleteOrToggleGeofence(
-                                keyId = fence.keyId,
-                                type = if (targetChecked) "1" else "0",
-                                accessToken = profile.accessToken
-                            )
+                if (!togglingFence) {
+                    togglingFence = true
+                    toggleSwitch.isEnabled = false
+                    toggleSwitch.alpha = 0.6f
+                    setChecked(targetChecked, animate = true)
+                    scope.launch {
+                        val res = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.deleteOrToggleGeofence(
+                                    keyId = fence.keyId,
+                                    type = if (targetChecked) "1" else "0",
+                                    accessToken = profile.accessToken
+                                )
+                            }
                         }
-                    }.getOrDefault(false)
-                    if (ok) {
-                        toast(if (targetChecked) "围栏已启用" else "围栏已停用")
-                        onReload()
-                    } else {
-                        setChecked(!targetChecked, animate = true)
-                        toast("围栏状态更新失败")
+                        togglingFence = false
+                        toggleSwitch.isEnabled = true
+                        toggleSwitch.alpha = 1f
+                        res.onSuccess { ok ->
+                            if (ok) {
+                                toast(if (targetChecked) "围栏已启用" else "围栏已停用")
+                                onReload()
+                            } else {
+                                setChecked(!targetChecked, animate = true)
+                                toast("围栏状态更新失败")
+                            }
+                        }.onFailure { err ->
+                            setChecked(!targetChecked, animate = true)
+                            if (err !is CherySessionExpiredException) {
+                                toast(friendlyErrorMessage(err, "围栏状态更新失败"))
+                            }
+                        }
                     }
                 }
             }
@@ -1261,11 +1308,14 @@ internal class VehicleFeatureSheets(
             addView(text(detail, 12.5f, TEXT_SUB), lp(top = dp(4)))
         }
 
-        val deleteBtn = AppComponents.createActionButton(
+        var deletingFence = false
+        lateinit var deleteBtn: TextView
+        deleteBtn = AppComponents.createActionButton(
             context = context,
             label = "删除围栏",
             style = ButtonStyle.DANGER_TEXT
         ) {
+            if (deletingFence) return@createActionButton
             AppComponents.showConfirmDialog(
                 context = context,
                 title = "删除电子围栏",
@@ -1274,8 +1324,13 @@ internal class VehicleFeatureSheets(
                 cancelText = "取消",
                 dangerConfirm = true
             ) {
+                if (deletingFence) return@showConfirmDialog
+                deletingFence = true
+                deleteBtn.isEnabled = false
+                deleteBtn.alpha = 0.55f
+                deleteBtn.text = "正在删除..."
                 scope.launch {
-                    val ok = runCatching {
+                    val res = runCatching {
                         withContext(Dispatchers.IO) {
                             httpClient.deleteOrToggleGeofence(
                                 keyId = fence.keyId,
@@ -1283,9 +1338,19 @@ internal class VehicleFeatureSheets(
                                 accessToken = profile.accessToken
                             )
                         }
-                    }.getOrDefault(false)
-                    toast(if (ok) "围栏已删除" else "删除围栏失败")
-                    if (ok) onReload()
+                    }
+                    deletingFence = false
+                    deleteBtn.isEnabled = true
+                    deleteBtn.alpha = 1f
+                    deleteBtn.text = "删除围栏"
+                    res.onSuccess { ok ->
+                        toast(if (ok) "围栏已删除" else "删除围栏失败")
+                        if (ok) onReload()
+                    }.onFailure { err ->
+                        if (err !is CherySessionExpiredException) {
+                            toast(friendlyErrorMessage(err, "删除围栏失败"))
+                        }
+                    }
                 }
             }
         }
@@ -1293,15 +1358,20 @@ internal class VehicleFeatureSheets(
     }
 
     private fun openGeofenceEditor(existing: GeofenceItem?, onReload: () -> Unit) {
-        activeDialog?.dismiss()
+        val hadActiveSheet = activeDialog?.isShowing == true
+        activeImmediateDismiss?.invoke() ?: activeDialog?.dismiss()
         val pushOverlay = onOpenOverlaySubpage
         if (pushOverlay != null) {
             val (editorView, destroyCb) = buildGeofenceEditorSubpageView(
                 existing = existing,
                 onBack = { onPopOverlaySubpage?.invoke() },
                 onSaved = {
-                    onReload()
                     onPopOverlaySubpage?.invoke()
+                    if (hadActiveSheet) {
+                        showGeofenceSheet()
+                    } else {
+                        onReload()
+                    }
                 }
             )
             pushOverlay(editorView, destroyCb)
@@ -1316,8 +1386,12 @@ internal class VehicleFeatureSheets(
             existing = existing,
             onBack = { dialog.dismiss() },
             onSaved = {
-                onReload()
                 dialog.dismiss()
+                if (hadActiveSheet) {
+                    showGeofenceSheet()
+                } else {
+                    onReload()
+                }
             }
         )
         dialog.setContentView(editorView)
@@ -1389,9 +1463,9 @@ internal class VehicleFeatureSheets(
             val radiusStr = selectedRadiusMeters.toString()
             saving = true
             scope.launch {
-                val ok = runCatching {
+                val res = runCatching {
                     withContext(Dispatchers.IO) {
-                        httpClient.saveGeofence(
+                        val savedOk = httpClient.saveGeofence(
                             vin = profile.vin,
                             name = name,
                             lat = latStr,
@@ -1399,12 +1473,28 @@ internal class VehicleFeatureSheets(
                             radiusMeters = radiusStr,
                             accessToken = profile.accessToken
                         )
+                        if (savedOk && existing != null && existing.keyId.isNotBlank()) {
+                            runCatching {
+                                httpClient.deleteOrToggleGeofence(
+                                    keyId = existing.keyId,
+                                    type = "2",
+                                    accessToken = profile.accessToken
+                                )
+                            }
+                        }
+                        savedOk
                     }
-                }.getOrDefault(false)
+                }
                 saving = false
                 if (mapDestroyed) return@launch
-                toast(if (ok) "电子围栏已保存" else "保存围栏失败，请重试")
-                if (ok) onSaved()
+                res.onSuccess { ok ->
+                    toast(if (ok) "电子围栏已保存" else "保存围栏失败，请重试")
+                    if (ok) onSaved()
+                }.onFailure { err ->
+                    if (err !is CherySessionExpiredException) {
+                        toast(friendlyErrorMessage(err, "保存围栏失败，请重试"))
+                    }
+                }
             }
         }
 
@@ -1540,6 +1630,7 @@ internal class VehicleFeatureSheets(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(4), dp(20), dp(22))
         }
+        AppSystemInsets.applyBottomNavPadding(controlPanel)
         controlPanel.addView(nameWrap, lp(bottom = dp(14)))
 
         val rangeRow = LinearLayout(context).apply {
@@ -1563,7 +1654,9 @@ internal class VehicleFeatureSheets(
                 mapDestroyed = true
                 mapReady = false
                 mapWebView?.let { webView ->
+                    webView.removeJavascriptInterface("CarMapBridge")
                     webView.stopLoading()
+                    webView.loadUrl("about:blank")
                     (webView.parent as? ViewGroup)?.removeView(webView)
                     webView.destroy()
                 }
@@ -2074,7 +2167,9 @@ internal class VehicleFeatureSheets(
                 mapReady = false
                 pendingMapJs = null
                 mapWebView?.let { webView ->
+                    webView.removeJavascriptInterface("CarMapBridge")
                     webView.stopLoading()
+                    webView.loadUrl("about:blank")
                     (webView.parent as? ViewGroup)?.removeView(webView)
                     webView.destroy()
                 }
@@ -2128,17 +2223,18 @@ internal class VehicleFeatureSheets(
                 runCatching { context.startActivity(intent) }.onFailure { toast("无法拉起腾讯地图") }
             }
         }
+        val (wgsLat, wgsLon) = gcj02ToWgs84(lat, lon)
         if (isPackageInstalled("com.google.android.apps.maps")) {
             options += NavOption("Google 地图", "打开地图定位并导航") {
                 val intent = Intent(
                     Intent.ACTION_VIEW,
-                    Uri.parse("geo:$lat,$lon?q=$lat,$lon($encLabel)")
+                    Uri.parse("geo:$wgsLat,$wgsLon?q=$wgsLat,$wgsLon($encLabel)")
                 ).setPackage("com.google.android.apps.maps")
                 runCatching { context.startActivity(intent) }.onFailure { toast("无法拉起 Google 地图") }
             }
         }
         options += NavOption("其他系统地图", "使用系统已安装的地图应用打开") {
-            val geoIntent = Intent(Intent.ACTION_VIEW, Uri.parse("geo:$lat,$lon?q=$lat,$lon($encLabel)"))
+            val geoIntent = Intent(Intent.ACTION_VIEW, Uri.parse("geo:$wgsLat,$wgsLon?q=$wgsLat,$wgsLon($encLabel)"))
             runCatching { context.startActivity(Intent.createChooser(geoIntent, "选择地图应用")) }
                 .onFailure { toast("未找到可用的地图应用") }
         }
@@ -2450,7 +2546,8 @@ internal class VehicleFeatureSheets(
             container.removeAllViews()
 
             res.onFailure { err ->
-                container.addView(errorHint("行程查询失败：${err.message.orEmpty().take(90)}"))
+                if (err is CherySessionExpiredException) return@launch
+                container.addView(errorHint(friendlyErrorMessage(err, "行程查询失败，请稍后重试")))
                 container.addView(secondaryBtn("轻触重试") {
                     container.removeAllViews()
                     loadTripHistoryTab(container, profile, isTabActive, autoPlotFirst, onClearSelectionRegistrar, onPlotTrip)
@@ -2476,7 +2573,7 @@ internal class VehicleFeatureSheets(
                     }, lp(top = dp(10), height = dp(42)))
                 } else {
                     val emptySub = if (tripTrackEnabledProvider() == false) {
-                        "行程轨迹记录未开启，可前往「设置 → 行程轨迹记录」开启"
+                        "行程轨迹记录未开启，可前往「安全性 → 行程轨迹记录」开启"
                     } else {
                         "行驶结束后将自动同步最近行程"
                     }
@@ -2562,7 +2659,7 @@ internal class VehicleFeatureSheets(
         fun highlightAndPlot(selectedIdx: Int) {
             val target = records.getOrNull(selectedIdx) ?: return
             if (target.points.isEmpty()) {
-                toast("该行程暂无 GPS 轨迹点")
+                toast("该行程暂无轨迹记录")
                 return
             }
             onPlotTrip(target)
@@ -2710,7 +2807,7 @@ internal class VehicleFeatureSheets(
                 "油耗 / 电耗" to trip.fuelConsumption.ifBlank { "--" },
                 "起点位置" to trip.startAddress.ifBlank { "--" },
                 "终点位置" to trip.endAddress.ifBlank { "--" },
-                "GPS 轨迹点数" to "${trip.points.size} 个"
+                "轨迹点数" to "${trip.points.size} 个"
             )
             pairs.forEachIndexed { idx, (k, v) ->
                 box.addView(kvRow(k, v), lp(top = if (idx == 0) dp(8) else dp(2)))
@@ -3076,7 +3173,7 @@ internal class VehicleFeatureSheets(
             infoBox.addView(text(meta, 13f, TEXT_SUB), lp(top = dp(6)))
             body.addView(infoBox, lp(top = dp(10)))
 
-            body.addView(secondaryBtn("车辆升级 (OTA)") {
+            body.addView(secondaryBtn("车辆升级") {
                 dialog.dismiss()
                 showVehicleUpgradeSheet()
             }, lp(top = dp(14), height = dp(46)))
@@ -3143,15 +3240,10 @@ internal class VehicleFeatureSheets(
                     val notes = info.releaseNote.ifBlank { info.descriptionText }
                     if (notes.isNotBlank()) {
                         card.addView(text("更新说明", 12.5f, TEXT_SUB, Typeface.BOLD), lp(top = dp(10), bottom = dp(4)))
-                        val notesScroll = ScrollView(context).apply {
-                            isVerticalScrollBarEnabled = true
-                            overScrollMode = View.OVER_SCROLL_NEVER
-                        }
-                        notesScroll.addView(
+                        card.addView(
                             text(notes, 13f, TEXT_BODY).apply { setLineSpacing(0f, 1.45f) },
-                            ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                            lp()
                         )
-                        card.addView(notesScroll, LinearLayout.LayoutParams(MATCH_PARENT, dp(180)))
                     }
                     host.addView(card)
 
@@ -3317,6 +3409,7 @@ internal class VehicleFeatureSheets(
 
     fun showChangeLoginPasswordModal(profile: VehicleProfile) {
         showModalDialog("修改登录密码") { box, dialog ->
+            var submitting = false
             val (oldWrap, oldEt) = underlineInput(
                 "原密码",
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
@@ -3333,31 +3426,63 @@ internal class VehicleFeatureSheets(
             box.addView(newWrap, lp(top = dp(8)))
             box.addView(confirmWrap, lp(top = dp(8)))
 
+            val errTv = text("", 12.5f, ThemeTokens.DANGER).apply { visibility = View.GONE }
+            box.addView(errTv, lp(top = dp(10)))
+
             val btns = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            box.addView(btns, lp(top = dp(22)))
-            btns.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(44)))
-            btns.addView(primaryBtn("保存") {
+            box.addView(btns, lp(top = dp(18)))
+            btns.addView(secondaryBtn("取消") { if (!submitting) dialog.dismiss() }, weightLp(0, dp(44)))
+            lateinit var saveBtn: TextView
+            saveBtn = primaryBtn("保存") {
+                if (submitting) return@primaryBtn
                 val oldPwd = oldEt.text.toString()
                 val newPwd = newEt.text.toString()
                 val confirmPwd = confirmEt.text.toString()
                 if (oldPwd.isBlank() || newPwd.length < 6) {
-                    toast("请填写原密码及至少 6 位新密码")
+                    errTv.text = "请填写原密码及至少 6 位新密码"
+                    errTv.visibility = View.VISIBLE
                     return@primaryBtn
                 }
                 if (newPwd != confirmPwd) {
-                    toast("两次输入的新密码不一致")
+                    errTv.text = "两次输入的新密码不一致"
+                    errTv.visibility = View.VISIBLE
                     return@primaryBtn
                 }
-                dialog.dismiss()
+                submitting = true
+                errTv.visibility = View.GONE
+                saveBtn.isEnabled = false
+                saveBtn.alpha = 0.6f
+                saveBtn.text = "保存中..."
                 scope.launch {
-                    val ok = runCatching {
+                    val res = runCatching {
                         withContext(Dispatchers.IO) {
                             httpClient.changeLoginPassword(oldPwd, newPwd, profile.accessToken)
                         }
-                    }.getOrDefault(false)
-                    toast(if (ok) "登录密码已更新" else "修改登录密码失败，请核对原密码")
+                    }
+                    if (!dialog.isShowing) return@launch
+                    submitting = false
+                    saveBtn.isEnabled = true
+                    saveBtn.alpha = 1f
+                    saveBtn.text = "保存"
+                    res.onSuccess { ok ->
+                        if (ok) {
+                            dialog.dismiss()
+                            toast("登录密码已更新")
+                        } else {
+                            errTv.text = "原密码校验失败，请核对后重试"
+                            errTv.visibility = View.VISIBLE
+                        }
+                    }.onFailure { err ->
+                        if (err is CherySessionExpiredException) {
+                            dialog.dismiss()
+                        } else {
+                            errTv.text = friendlyErrorMessage(err, "修改登录密码失败，请稍后重试")
+                            errTv.visibility = View.VISIBLE
+                        }
+                    }
                 }
-            }, weightLp(dp(10), dp(44)))
+            }
+            btns.addView(saveBtn, weightLp(dp(10), dp(44)))
         }
     }
 
@@ -3474,38 +3599,37 @@ internal class VehicleFeatureSheets(
 
     fun showPinManagementModal(profile: VehicleProfile) {
         secondaryDialog?.dismiss()
-        // Always start on Old-PIN step (with "首次设置？跳过原 PIN 码" escape hatch) so a fresh device
-        // with an existing cloud PIN is never deadlocked on initial-set service 126.
-        val sheet = SixDigitPinSheet.showChangePinWizardSheet(
+        lateinit var sheet: Dialog
+        sheet = SixDigitPinSheet.showChangePinWizardSheet(
             context = context,
-            requireOldPin = true
+            requireOldPin = true,
+            allowSkipOldPin = false
         ) { oldPin, newPin, showError, dismiss ->
+            val currentOldPin = oldPin.orEmpty().trim()
+            if (currentOldPin.length != 6) {
+                showError("请输入当前 6 位原 PIN 码")
+                return@showChangePinWizardSheet
+            }
             scope.launch {
-                if (!oldPin.isNullOrBlank()) {
-                    val ok = runCatching {
-                        withContext(Dispatchers.IO) {
-                            httpClient.changeVehicleControlPin(profile.vin, oldPin, newPin, profile.accessToken)
-                        }
-                    }.getOrDefault(false)
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        httpClient.changeVehicleControlPin(profile.vin, currentOldPin, newPin, profile.accessToken)
+                    }
+                }
+                if (!sheet.isShowing) return@launch
+                res.onSuccess { ok ->
                     if (ok) {
                         onPinUpdated(profile.vin, newPin)
                         dismiss()
                         toast("PIN 码已更新")
                     } else {
-                        showError("原 PIN 码校验失败，请重试")
+                        showError("原 PIN 码校验失败，请核对后重试")
                     }
-                } else {
-                    val ok = runCatching {
-                        withContext(Dispatchers.IO) {
-                            httpClient.setVehicleControlPin(profile.vin, newPin, profile.accessToken)
-                        }
-                    }.getOrDefault(false)
-                    if (ok) {
-                        onPinUpdated(profile.vin, newPin)
+                }.onFailure { err ->
+                    if (err is CherySessionExpiredException) {
                         dismiss()
-                        toast("PIN 码已保存")
                     } else {
-                        showError("云端 PIN 码设置失败，请重试")
+                        showError(friendlyErrorMessage(err, "PIN 码更新失败，请稍后重试"))
                     }
                 }
             }
@@ -3537,7 +3661,7 @@ internal class VehicleFeatureSheets(
             val vinEt = modalInput("17 位车架号 VIN", InputType.TYPE_CLASS_TEXT).apply {
                 if (profile.vin.isNotBlank()) setText(profile.vin)
             }
-            val snEt = modalInput("T-Box 序列号 SN", InputType.TYPE_CLASS_TEXT).apply {
+            val snEt = modalInput("车辆序列号 (SN)", InputType.TYPE_CLASS_TEXT).apply {
                 if (defaultSn.isNotBlank()) setText(defaultSn)
             }
             val iccidEt = modalInput("车载 SIM 卡 ICCID", InputType.TYPE_CLASS_TEXT).apply {
@@ -3715,11 +3839,22 @@ internal class VehicleFeatureSheets(
             boundsRow.addView(text("120 km/h", 12f, TEXT_SUB).apply { gravity = Gravity.END }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
             sheet.addView(boundsRow, lp(bottom = dp(18)))
 
+            var submittingSpeed = false
+            lateinit var saveSpeedBtn: TextView
+            var disableSpeedBtn: TextView? = null
+
             fun submitSpeed(targetEnabled: Boolean, targetSpeed: Int) {
+                if (submittingSpeed) return
                 val desc = if (targetEnabled) "开启限速提醒（${targetSpeed} km/h）" else "关闭限速提醒"
                 resolvePin(desc) { verifiedPin ->
+                    if (submittingSpeed) return@resolvePin
+                    submittingSpeed = true
+                    saveSpeedBtn.isEnabled = false
+                    saveSpeedBtn.alpha = 0.6f
+                    disableSpeedBtn?.isEnabled = false
+                    disableSpeedBtn?.alpha = 0.6f
                     scope.launch {
-                        val ok = runCatching {
+                        val res = runCatching {
                             withContext(Dispatchers.IO) {
                                 httpClient.setSpeedLimitReminder(
                                     vin = profile.vin,
@@ -3728,26 +3863,41 @@ internal class VehicleFeatureSheets(
                                     accessToken = profile.accessToken
                                 )
                             }
-                        }.getOrDefault(false)
-                        if (ok) {
-                            onUpdated(targetEnabled, if (targetEnabled) targetSpeed else 0)
-                            if (dialog.isShowing) dialog.dismiss()
-                            toast(if (targetEnabled) "已设置限速提醒：$targetSpeed km/h" else "已关闭限速提醒")
-                        } else {
-                            toast("限速提醒设置失败，请稍后重试")
+                        }
+                        submittingSpeed = false
+                        saveSpeedBtn.isEnabled = true
+                        saveSpeedBtn.alpha = 1f
+                        disableSpeedBtn?.isEnabled = true
+                        disableSpeedBtn?.alpha = 1f
+                        res.onSuccess { ok ->
+                            if (ok) {
+                                onUpdated(targetEnabled, if (targetEnabled) targetSpeed else 0)
+                                if (dialog.isShowing) dialog.dismiss()
+                                toast(if (targetEnabled) "已设置限速提醒：$targetSpeed km/h" else "已关闭限速提醒")
+                            } else {
+                                toast("限速提醒设置失败，请稍后重试")
+                            }
+                        }.onFailure { err ->
+                            if (err is CherySessionExpiredException) {
+                                if (dialog.isShowing) dialog.dismiss()
+                            } else {
+                                toast(friendlyErrorMessage(err, "限速提醒设置失败，请稍后重试"))
+                            }
                         }
                     }
                 }
             }
 
-            sheet.addView(primaryBtn("保存并开启限速提醒") {
+            saveSpeedBtn = primaryBtn("保存并开启限速提醒") {
                 submitSpeed(true, selectedSpeed)
-            }, lp(height = dp(48)))
+            }
+            sheet.addView(saveSpeedBtn, lp(height = dp(48)))
 
             if (currentEnabled) {
-                sheet.addView(secondaryBtn("关闭限速提醒") {
+                disableSpeedBtn = secondaryBtn("关闭限速提醒") {
                     submitSpeed(false, 0)
-                }, lp(top = dp(10), height = dp(46)))
+                }
+                sheet.addView(disableSpeedBtn, lp(top = dp(10), height = dp(46)))
             }
         }
     }
@@ -3777,8 +3927,8 @@ internal class VehicleFeatureSheets(
                 }
                 addView(text(stateLabel, 15.5f, if (telemetry?.isCharging == true) ThemeTokens.ACCENT_LIGHT else TEXT_PRIMARY, Typeface.BOLD))
                 val detailParts = mutableListOf(powertrain.label, "电量 $batStr", rangeStr)
-                telemetry?.remainingCharge?.takeIf { it.isNotBlank() && it != "0" }?.let {
-                    detailParts += "剩余时间 $it"
+                telemetry?.remainingCharge?.let { formatRemainingMinutes(it) }?.let { formatted ->
+                    detailParts += "剩余时间 $formatted"
                 }
                 addView(text(detailParts.joinToString(" · "), 12.5f, TEXT_SUB), lp(top = dp(6)))
             }
@@ -3793,13 +3943,17 @@ internal class VehicleFeatureSheets(
 
             var currentSchedules: List<ChargingScheduleItem> = emptyList()
             var masterEnabled = telemetry?.chargeAppintStatus == "1"
+            var savingSchedules = false
 
             lateinit var renderSchedules: () -> Unit
 
             fun persistSchedules(nextMaster: Boolean, nextList: List<ChargingScheduleItem>, actionDesc: String) {
+                if (savingSchedules) return
                 resolvePin(actionDesc) { verifiedPin ->
+                    if (savingSchedules) return@resolvePin
+                    savingSchedules = true
                     scope.launch {
-                        val ok = runCatching {
+                        val res = runCatching {
                             withContext(Dispatchers.IO) {
                                 httpClient.saveChargingSchedules(
                                     vin = profile.vin,
@@ -3809,14 +3963,25 @@ internal class VehicleFeatureSheets(
                                     accessToken = profile.accessToken
                                 )
                             }
-                        }.getOrDefault(false)
-                        if (ok) {
-                            masterEnabled = nextMaster
-                            currentSchedules = nextList
-                            if (dialog.isShowing) renderSchedules()
-                            toast("预约充电设置已下发")
-                        } else {
-                            toast("预约充电同步失败，请稍后重试")
+                        }
+                        savingSchedules = false
+                        res.onSuccess { ok ->
+                            if (ok) {
+                                masterEnabled = nextMaster
+                                currentSchedules = nextList
+                                if (dialog.isShowing) renderSchedules()
+                                toast("预约充电设置已下发")
+                            } else {
+                                if (dialog.isShowing) renderSchedules()
+                                toast("预约充电同步失败，请稍后重试")
+                            }
+                        }.onFailure { err ->
+                            if (err is CherySessionExpiredException) {
+                                if (dialog.isShowing) dialog.dismiss()
+                            } else {
+                                if (dialog.isShowing) renderSchedules()
+                                toast(friendlyErrorMessage(err, "预约充电同步失败，请稍后重试"))
+                            }
                         }
                     }
                 }
@@ -3825,7 +3990,7 @@ internal class VehicleFeatureSheets(
             fun openEditScheduleDialog(existingIndex: Int?) {
                 val existing = existingIndex?.let { currentSchedules.getOrNull(it) }
                 var startTimeStr = existing?.startTime?.takeIf { it.contains(":") } ?: "23:00"
-                var durationHours = existing?.durationHours ?: 4
+                var durationHours = (existing?.durationHours ?: 4).coerceIn(1, 24)
                 val selectedDays = (existing?.days ?: listOf(1, 2, 3, 4, 5, 6, 7)).toMutableSet()
                 val dayLabels = listOf("一", "二", "三", "四", "五", "六", "日")
 
@@ -3843,8 +4008,8 @@ internal class VehicleFeatureSheets(
                     val durLabel = text("充电时长：$durationHours 小时", 13.5f, TEXT_PRIMARY, Typeface.BOLD)
                     box.addView(durLabel, lp(top = dp(14)))
                     val durSeek = SeekBar(context).apply {
-                        max = 11
-                        progress = (durationHours - 1).coerceIn(0, 11)
+                        max = 23
+                        progress = (durationHours - 1).coerceIn(0, 23)
                         progressTintList = ColorStateList.valueOf(ThemeTokens.ACCENT_LIGHT)
                         thumbTintList = ColorStateList.valueOf(ThemeTokens.TEXT_PRIMARY)
                         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -3911,6 +4076,17 @@ internal class VehicleFeatureSheets(
                         mDialog.dismiss()
                         persistSchedules(true, updatedList, "保存预约充电计划")
                     }, weightLp(dp(10), dp(44)))
+
+                    if (existingIndex != null && existingIndex in currentSchedules.indices) {
+                        box.addView(
+                            AppComponents.createActionButton(context, "删除此计划", ButtonStyle.DANGER_TEXT) {
+                                val updatedList = currentSchedules.toMutableList().apply { removeAt(existingIndex) }
+                                mDialog.dismiss()
+                                persistSchedules(updatedList.any { it.enabled }, updatedList, "删除预约充电计划")
+                            },
+                            lp(top = dp(8), height = dp(42))
+                        )
+                    }
                 }
             }
 
@@ -3981,19 +4157,35 @@ internal class VehicleFeatureSheets(
                 }, lp(top = dp(14), height = dp(46)))
             }
 
-            scope.launch {
-                val res = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.fetchChargingSchedules(profile.vin, profile.accessToken)
+            fun loadSchedules() {
+                scheduleHost.removeAllViews()
+                scheduleHost.addView(text("正在读取预约充电计划...", 13f, TEXT_SUB).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(20), 0, dp(20))
+                })
+                scope.launch {
+                    val res = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.fetchChargingSchedules(profile.vin, profile.accessToken)
+                        }
                     }
-                }.getOrNull()
-                if (!dialog.isShowing) return@launch
-                if (res != null) {
-                    masterEnabled = res.masterEnabled
-                    currentSchedules = res.items
+                    if (!dialog.isShowing) return@launch
+                    res.onSuccess { summary ->
+                        masterEnabled = summary.masterEnabled
+                        currentSchedules = summary.items
+                        renderSchedules()
+                    }.onFailure { err ->
+                        if (err is CherySessionExpiredException) {
+                            dialog.dismiss()
+                            return@onFailure
+                        }
+                        scheduleHost.removeAllViews()
+                        scheduleHost.addView(errorHint(friendlyErrorMessage(err, "读取预约充电计划失败，请重试")))
+                        scheduleHost.addView(secondaryBtn("重新加载") { loadSchedules() }, lp(top = dp(10), height = dp(44)))
+                    }
                 }
-                renderSchedules()
             }
+            loadSchedules()
         }
     }
 
@@ -4015,14 +4207,11 @@ internal class VehicleFeatureSheets(
 
             val host = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             sheet.addView(host, lp(top = dp(14)))
-            host.addView(text("正在读取预约出行配置...", 13f, TEXT_SUB).apply {
-                gravity = Gravity.CENTER
-                setPadding(0, dp(20), 0, dp(20))
-            })
 
             fun render(enabled: Boolean, startTime: String) {
                 host.removeAllViews()
                 var isOn = enabled
+                var savingTravel = false
                 val initialTime = startTime.takeIf { it.contains(":") } ?: "08:00"
                 val (timeField, getTime) = AppComponents.createDateTimePickerField(
                     context = context,
@@ -4049,12 +4238,19 @@ internal class VehicleFeatureSheets(
                 host.addView(text("出发时间", 12.5f, TEXT_SUB))
                 host.addView(timeField, lp(top = dp(6), bottom = dp(18)))
 
-                host.addView(primaryBtn("保存预约出行") {
+                lateinit var saveBtn: TextView
+                saveBtn = primaryBtn("保存预约出行") {
+                    if (savingTravel) return@primaryBtn
                     val pickedTime = getTime().ifBlank { initialTime }
                     val desc = if (isOn) "开启预约出行（$pickedTime）" else "关闭预约出行"
                     resolvePin(desc) { verifiedPin ->
+                        if (savingTravel) return@resolvePin
+                        savingTravel = true
+                        saveBtn.isEnabled = false
+                        saveBtn.alpha = 0.6f
+                        saveBtn.text = "同步中..."
                         scope.launch {
-                            val ok = runCatching {
+                            val res = runCatching {
                                 withContext(Dispatchers.IO) {
                                     httpClient.saveTravelSchedule(
                                         vin = profile.vin,
@@ -4065,31 +4261,62 @@ internal class VehicleFeatureSheets(
                                         accessToken = profile.accessToken
                                     )
                                 }
-                            }.getOrDefault(false)
-                            if (ok) {
-                                if (dialog.isShowing) dialog.dismiss()
-                                toast(if (isOn) "预约出行已设置：$pickedTime" else "已关闭预约出行")
-                            } else {
-                                toast("预约出行同步失败，请稍后重试")
+                            }
+                            savingTravel = false
+                            saveBtn.isEnabled = true
+                            saveBtn.alpha = 1f
+                            saveBtn.text = "保存预约出行"
+                            res.onSuccess { ok ->
+                                if (ok) {
+                                    if (dialog.isShowing) dialog.dismiss()
+                                    toast(if (isOn) "预约出行已设置：$pickedTime" else "已关闭预约出行")
+                                } else {
+                                    toast("预约出行同步失败，请稍后重试")
+                                }
+                            }.onFailure { err ->
+                                if (err is CherySessionExpiredException) {
+                                    if (dialog.isShowing) dialog.dismiss()
+                                } else {
+                                    toast(friendlyErrorMessage(err, "预约出行同步失败，请稍后重试"))
+                                }
                             }
                         }
                     }
-                }, lp(height = dp(48)))
+                }
+                host.addView(saveBtn, lp(height = dp(48)))
             }
 
-            scope.launch {
-                val summary = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.fetchTravelSchedules(profile.vin, profile.accessToken)
+            fun loadTravel() {
+                host.removeAllViews()
+                host.addView(text("正在读取预约出行配置...", 13f, TEXT_SUB).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(20), 0, dp(20))
+                })
+                scope.launch {
+                    val res = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.fetchTravelSchedules(profile.vin, profile.accessToken)
+                        }
                     }
-                }.getOrNull()
-                if (!dialog.isShowing) return@launch
-                val first = summary?.items?.firstOrNull()
-                render(
-                    enabled = summary?.masterEnabled ?: (first?.enabled == true),
-                    startTime = first?.startTime.orEmpty().ifBlank { "08:00" }
-                )
+                    if (!dialog.isShowing) return@launch
+                    res.onSuccess { summary ->
+                        val first = summary.items.firstOrNull()
+                        render(
+                            enabled = summary.masterEnabled || (first?.enabled == true),
+                            startTime = first?.startTime.orEmpty().ifBlank { "08:00" }
+                        )
+                    }.onFailure { err ->
+                        if (err is CherySessionExpiredException) {
+                            dialog.dismiss()
+                            return@onFailure
+                        }
+                        host.removeAllViews()
+                        host.addView(errorHint(friendlyErrorMessage(err, "读取预约出行配置失败，请重试")))
+                        host.addView(secondaryBtn("重新加载") { loadTravel() }, lp(top = dp(10), height = dp(44)))
+                    }
+                }
             }
+            loadTravel()
         }
     }
 
@@ -4311,7 +4538,16 @@ internal class VehicleFeatureSheets(
         }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
 
-        outer = LinearLayout(context).apply {
+        val maxHeight = (context.resources.displayMetrics.heightPixels * 0.78f).roundToInt()
+        outer = object : LinearLayout(context) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val parentMode = MeasureSpec.getMode(heightMeasureSpec)
+                val parentSize = MeasureSpec.getSize(heightMeasureSpec)
+                val effectiveMax = if (parentMode == MeasureSpec.UNSPECIFIED) maxHeight else minOf(parentSize, maxHeight)
+                val mode = if (parentMode == MeasureSpec.EXACTLY) MeasureSpec.EXACTLY else MeasureSpec.AT_MOST
+                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(effectiveMax, mode))
+            }
+        }.apply {
             orientation = LinearLayout.VERTICAL
             background = topRounded(CARD_MODAL, 20f)
             setPadding(dp(20), dp(12), dp(20), dp(24))
@@ -4329,7 +4565,6 @@ internal class VehicleFeatureSheets(
         outer.addView(header)
         header.addView(text(title, 20f, TEXT_PRIMARY, Typeface.BOLD), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
-        val maxHeight = (context.resources.displayMetrics.heightPixels * 0.78f).roundToInt()
         val scroll = ScrollView(context).apply { isVerticalScrollBarEnabled = false }
         val body = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(body, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -4340,18 +4575,6 @@ internal class VehicleFeatureSheets(
         AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.68f)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog) {
             dialog.restoreDepthIfNeeded()
-        }
-        var clampedToMax = false
-        outer.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
-            val measuredHeight = bottom - top
-            if (measuredHeight > maxHeight && !clampedToMax) {
-                clampedToMax = true
-                val lp = outer.layoutParams
-                if (lp != null) {
-                    lp.height = maxHeight
-                    outer.layoutParams = lp
-                }
-            }
         }
         dialog.setOnDismissListener {
             onDismiss?.invoke()
@@ -4409,10 +4632,12 @@ internal class VehicleFeatureSheets(
         context = context,
         labels = labels,
         initial = initial,
-        bgColor = INPUT_BG,
-        pillColor = BTN_SECONDARY,
+        bgColor = ThemeTokens.SEGMENT_TRACK,
+        pillColor = ThemeTokens.SEGMENT_PILL,
         activeTextColor = Color.WHITE,
         inactiveTextColor = TEXT_SUB,
+        trackStrokeColor = ThemeTokens.SEGMENT_TRACK_BORDER,
+        pillStrokeColor = ThemeTokens.SEGMENT_PILL_BORDER,
         onSelect = onSelect
     )
 
@@ -4482,7 +4707,10 @@ internal class VehicleFeatureSheets(
     private fun smallBtn(label: String, danger: Boolean = false, onClick: () -> Unit): TextView =
         text(label, 13f, if (danger) ERROR_RED else TEXT_PRIMARY, Typeface.BOLD).apply {
             gravity = Gravity.CENTER
-            background = rounded(BTN_SECONDARY, 6f)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            background = rounded(BTN_SECONDARY, 8f, ThemeTokens.BTN_SECONDARY_BORDER, 0.8f)
+            setPadding(dp(10), 0, dp(10), 0)
             isClickable = true
             isFocusable = true
             setOnClickListener { onClick() }
@@ -4572,6 +4800,71 @@ internal class VehicleFeatureSheets(
 
     private fun maskMobile(mobile: String): String =
         if (mobile.length >= 7) mobile.take(3) + "****" + mobile.takeLast(4) else mobile
+
+    private fun friendlyErrorMessage(err: Throwable?, fallback: String): String {
+        val raw = err?.message.orEmpty().trim()
+        return when {
+            raw.isBlank() -> fallback
+            raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) ->
+                "网络连接超时，请稍后重试"
+            raw.contains("Unable to resolve host", ignoreCase = true) ||
+                raw.contains("Failed to connect", ignoreCase = true) ||
+                raw.contains("Socket", ignoreCase = true) ||
+                raw.contains("SSL", ignoreCase = true) ||
+                raw.contains("HTTP", ignoreCase = true) ||
+                raw.startsWith("{") ||
+                raw.contains("Exception") -> fallback
+            else -> raw.take(60)
+        }
+    }
+
+    private fun formatRemainingMinutes(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank() || trimmed == "0" || trimmed.equals("FFFF", ignoreCase = true) || trimmed == "65535") {
+            return null
+        }
+        val mins = trimmed.toDoubleOrNull()?.roundToInt() ?: return trimmed
+        if (mins <= 0 || mins > 24 * 60 * 7) return null
+        val h = mins / 60
+        val m = mins % 60
+        return when {
+            h > 0 && m > 0 -> "${h}小时${m}分钟"
+            h > 0 -> "${h}小时"
+            else -> "${m}分钟"
+        }
+    }
+
+    /**
+     * Converts GCJ-02 (Amap/Chery cloud) coordinates back to WGS-84 for Google Maps and generic geo: apps.
+     */
+    private fun gcj02ToWgs84(gcjLat: Double, gcjLon: Double): Pair<Double, Double> {
+        if (gcjLon !in 72.004..137.8347 || gcjLat !in 0.8293..55.8271) return gcjLat to gcjLon
+        fun transformLat(x: Double, y: Double): Double {
+            var ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * kotlin.math.sqrt(kotlin.math.abs(x))
+            ret += (20.0 * kotlin.math.sin(6.0 * x * Math.PI) + 20.0 * kotlin.math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0
+            ret += (20.0 * kotlin.math.sin(y * Math.PI) + 40.0 * kotlin.math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0
+            ret += (160.0 * kotlin.math.sin(y / 12.0 * Math.PI) + 320.0 * kotlin.math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0
+            return ret
+        }
+        fun transformLon(x: Double, y: Double): Double {
+            var ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * kotlin.math.sqrt(kotlin.math.abs(x))
+            ret += (20.0 * kotlin.math.sin(6.0 * x * Math.PI) + 20.0 * kotlin.math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0
+            ret += (20.0 * kotlin.math.sin(x * Math.PI) + 40.0 * kotlin.math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0
+            ret += (150.0 * kotlin.math.sin(x / 12.0 * Math.PI) + 300.0 * kotlin.math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0
+            return ret
+        }
+        val a = 6378245.0
+        val ee = 0.00669342162296594323
+        var dLat = transformLat(gcjLon - 105.0, gcjLat - 35.0)
+        var dLon = transformLon(gcjLon - 105.0, gcjLat - 35.0)
+        val radLat = gcjLat / 180.0 * Math.PI
+        var magic = kotlin.math.sin(radLat)
+        magic = 1.0 - ee * magic * magic
+        val sqrtMagic = kotlin.math.sqrt(magic)
+        dLat = (dLat * 180.0) / ((a * (1.0 - ee)) / (magic * sqrtMagic) * Math.PI)
+        dLon = (dLon * 180.0) / (a / sqrtMagic * kotlin.math.cos(radLat) * Math.PI)
+        return (gcjLat - dLat) to (gcjLon - dLon)
+    }
 
     private fun String.withUnit(unit: String): String =
         if (this == "--" || endsWith(unit, ignoreCase = true)) this else "$this $unit"

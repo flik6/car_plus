@@ -27,7 +27,7 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:singleLine="true"
-                android:text="艾瑞泽8"
+                android:text="CarPlus"
                 android:textColor="#FFFFFF"
                 android:textSize="14sp"
                 android:textStyle="bold" />
@@ -39,19 +39,19 @@
                 android:layout_marginTop="1dp"
                 android:ellipsize="end"
                 android:singleLine="true"
-                android:text="已驻车 · 24%"
+                android:text="状态待同步"
                 android:textColor="#8E9299"
                 android:textSize="10.5sp" />
         </LinearLayout>
 
         <ImageView
             android:id="@+id/widget_btn_refresh"
-            android:layout_width="24dp"
-            android:layout_height="24dp"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
             android:contentDescription="刷新车况"
-            android:padding="4dp"
+            android:padding="7dp"
             android:src="@drawable/ic_widget_refresh"
-            android:tint="#8E9299" />
+            android:tint="#9EA3AE" />
     </LinearLayout>
 
     <!-- Middle: Compact Car Visual -->
@@ -74,7 +74,7 @@
         android:layout_height="4dp"
         android:layout_marginBottom="8dp"
         android:max="100"
-        android:progress="24"
+        android:progress="0"
         android:progressDrawable="@drawable/widget_fuel_progress" />
 
     <!-- Bottom 2 Quick Actions -->

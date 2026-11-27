@@ -27,7 +27,7 @@
             android:layout_height="wrap_content"
             android:ellipsize="end"
             android:singleLine="true"
-            android:text="艾瑞泽8"
+            android:text="CarPlus"
             android:textColor="#FFFFFF"
             android:textSize="14sp"
             android:textStyle="bold" />
@@ -39,7 +39,7 @@
             android:layout_marginTop="2dp"
             android:ellipsize="end"
             android:singleLine="true"
-            android:text="已驻车 · 24%"
+            android:text="状态待同步"
             android:textColor="#8E9299"
             android:textSize="11sp" />
     </LinearLayout>

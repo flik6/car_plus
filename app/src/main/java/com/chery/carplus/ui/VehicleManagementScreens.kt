@@ -27,6 +27,7 @@ import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CherySessionExpiredException
 import com.chery.carplus.cloud.VehicleAuthorizationItem
 import com.chery.carplus.cloud.VehicleSummary
+import com.chery.carplus.cloud.VehicleTrafficInfo
 import com.chery.carplus.cloud.VehicleUpgradeInfo
 import com.chery.carplus.profile.VehicleProfile
 import kotlinx.coroutines.Dispatchers
@@ -573,47 +574,57 @@ internal class VehicleManagementScreens(
 
                 body.addView(View(context), LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
-                body.addView(
-                    AppComponents.createActionButton(context, "撤销驾驶员授权", ButtonStyle.DANGER_TEXT) {
-                        activeDialog?.dismiss()
-                        activeDialog = AppComponents.showConfirmDialog(
-                            context = context,
-                            title = "撤销驾驶员授权",
-                            message = "确认撤销「$currentName」的驾驶员权限？撤销后对方将无法查看车况或远程控车。",
-                            confirmText = "确认撤销",
-                            cancelText = "取消",
-                            dangerConfirm = true
-                        ) {
-                            val active = profileProvider()
-                            scope.launch {
-                                val res = runCatching {
-                                    withContext(Dispatchers.IO) {
-                                        httpClient.deleteRemoteAuthorization(
-                                            accessToken = active.accessToken,
-                                            keyId = item.keyId,
-                                            vin = vin
-                                        )
-                                    }
+                var revokingAuth = false
+                lateinit var revokeBtn: TextView
+                revokeBtn = AppComponents.createActionButton(context, "撤销驾驶员授权", ButtonStyle.DANGER_TEXT) {
+                    if (revokingAuth) return@createActionButton
+                    activeDialog?.dismiss()
+                    activeDialog = AppComponents.showConfirmDialog(
+                        context = context,
+                        title = "撤销驾驶员授权",
+                        message = "确认撤销「$currentName」的驾驶员权限？撤销后对方将无法查看车况或远程控车。",
+                        confirmText = "确认撤销",
+                        cancelText = "取消",
+                        dangerConfirm = true
+                    ) {
+                        if (revokingAuth) return@showConfirmDialog
+                        revokingAuth = true
+                        revokeBtn.isEnabled = false
+                        revokeBtn.alpha = 0.5f
+                        revokeBtn.text = "正在撤销..."
+                        val active = profileProvider()
+                        scope.launch {
+                            val res = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.deleteRemoteAuthorization(
+                                        accessToken = active.accessToken,
+                                        keyId = item.keyId,
+                                        vin = vin
+                                    )
                                 }
-                                res.onSuccess { ok ->
-                                    if (ok) {
-                                        AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
-                                        toast("已撤销驾驶员授权")
-                                        onPopOverlaySubpage()
-                                        onChanged()
-                                    } else {
-                                        toast("撤销失败，请重试")
-                                    }
-                                }.onFailure { err ->
-                                    if (err !is CherySessionExpiredException) {
-                                        toast("撤销失败：${err.message.orEmpty().take(80)}")
-                                    }
+                            }
+                            revokingAuth = false
+                            revokeBtn.isEnabled = true
+                            revokeBtn.alpha = 1f
+                            revokeBtn.text = "撤销驾驶员授权"
+                            res.onSuccess { ok ->
+                                if (ok) {
+                                    AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
+                                    toast("已撤销驾驶员授权")
+                                    onPopOverlaySubpage()
+                                    onChanged()
+                                } else {
+                                    toast("撤销失败，请重试")
+                                }
+                            }.onFailure { err ->
+                                if (err !is CherySessionExpiredException) {
+                                    toast("撤销失败：${err.message.orEmpty().take(80)}")
                                 }
                             }
                         }
-                    },
-                    lp(top = dp(4), height = dp(54))
-                )
+                    }
+                }
+                body.addView(revokeBtn, lp(top = dp(4), height = dp(54)))
             }
         }
 
@@ -732,8 +743,8 @@ internal class VehicleManagementScreens(
             selectedLevel = "1"
             renderPermSelection()
         }
-        permRow.addView(optViewOnly, LinearLayout.LayoutParams(0, dp(44), 1f))
-        permRow.addView(optViewAndControl, LinearLayout.LayoutParams(0, dp(44), 1.35f).apply {
+        permRow.addView(optViewOnly.apply { minHeight = dp(44) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        permRow.addView(optViewAndControl.apply { minHeight = dp(44) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1.35f).apply {
             marginStart = dp(10)
         })
         formCard.addView(permRow, lp(top = dp(10)))
@@ -1312,11 +1323,16 @@ internal class VehicleManagementScreens(
 
         var isEditing = startInEditMode
         var saving = false
+        var settingDefaultVehicle = false
         var currentVehicle: VehicleSummary? = initialVehicle
         var cachedUpgradeInfo: VehicleUpgradeInfo? = null
         var upgradeCheckedOnce = false
         var upgradeChecking = false
         var upgradeCheckFailed = false
+        var cachedTrafficInfo: VehicleTrafficInfo? = null
+        var trafficFetchedOnce = false
+        var trafficFetching = false
+        var applyTrafficToCurrentRow: ((VehicleTrafficInfo?) -> Unit)? = null
 
         fun renderDetail(vehicle: VehicleSummary) {
             currentVehicle = vehicle
@@ -1621,32 +1637,43 @@ internal class VehicleManagementScreens(
                     )
                 }
                 if (vehicle.isBoundVehicle && !vehicle.isSelected) {
-                    quickRow.addView(
-                        cardActionChip("设为默认车辆", accent = false) {
-                            val active = profileProvider()
-                            scope.launch {
-                                val res = runCatching {
-                                    withContext(Dispatchers.IO) {
-                                        httpClient.setDefaultVehicle(active.accessToken, vehicle.vin)
-                                    }
-                                }
-                                res.onSuccess { ok ->
-                                    if (ok) {
-                                        AppHaptics.perform(hero, HapticLevel.MEDIUM_CONFIRM)
-                                        toast("已将 $modelTitle 设为默认车辆")
-                                        onSelectVehicleSummary(vehicle.copy(selected = "1"))
-                                        renderDetail(vehicle.copy(selected = "1", simStatus = liveSimStatus))
-                                        onUpdated()
-                                    } else {
-                                        toast("设置默认车辆失败")
-                                    }
-                                }.onFailure { err ->
-                                    if (err !is CherySessionExpiredException) {
-                                        toast("设置失败：${err.message.orEmpty().take(70)}")
-                                    }
+                    lateinit var setDefaultChip: TextView
+                    setDefaultChip = cardActionChip("设为默认车辆", accent = false) {
+                        if (settingDefaultVehicle) return@cardActionChip
+                        settingDefaultVehicle = true
+                        setDefaultChip.isEnabled = false
+                        setDefaultChip.alpha = 0.55f
+                        setDefaultChip.text = "设置中..."
+                        val active = profileProvider()
+                        scope.launch {
+                            val res = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.setDefaultVehicle(active.accessToken, vehicle.vin)
                                 }
                             }
-                        },
+                            settingDefaultVehicle = false
+                            setDefaultChip.isEnabled = true
+                            setDefaultChip.alpha = 1f
+                            setDefaultChip.text = "设为默认车辆"
+                            res.onSuccess { ok ->
+                                if (ok) {
+                                    AppHaptics.perform(hero, HapticLevel.MEDIUM_CONFIRM)
+                                    toast("已将 $modelTitle 设为默认车辆")
+                                    onSelectVehicleSummary(vehicle.copy(selected = "1"))
+                                    renderDetail(vehicle.copy(selected = "1", simStatus = liveSimStatus))
+                                    onUpdated()
+                                } else {
+                                    toast("设置默认车辆失败")
+                                }
+                            }.onFailure { err ->
+                                if (err !is CherySessionExpiredException) {
+                                    toast("设置失败：${err.message.orEmpty().take(70)}")
+                                }
+                            }
+                        }
+                    }
+                    quickRow.addView(
+                        setDefaultChip,
                         LinearLayout.LayoutParams(0, dp(38), 1f).apply {
                             if (quickRow.childCount > 0) marginStart = dp(10)
                         }
@@ -1770,20 +1797,11 @@ internal class VehicleManagementScreens(
                         }
                     }
 
-                    scope.launch {
-                        val active = profileProvider()
-                        if (active.accessToken.isBlank()) {
-                            trafficValueTv.text = "--"
-                            return@launch
-                        }
-                        val traffic = runCatching {
-                            withContext(Dispatchers.IO) {
-                                httpClient.fetchVehicleTrafficPackage(vehicle.vin, active.accessToken)
-                            }
-                        }.getOrNull()
+                    fun applyTrafficToRow(traffic: VehicleTrafficInfo?) {
                         if (traffic == null) {
                             trafficValueTv.text = "暂不可用"
-                            return@launch
+                            trafficValueTv.setTextColor(ThemeTokens.TEXT_SUB)
+                            return
                         }
                         trafficDueDate = traffic.dueDate.trim().take(10)
                         val formatted = when {
@@ -1798,6 +1816,31 @@ internal class VehicleManagementScreens(
                         }
                         trafficValueTv.text = formatted
                         trafficValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
+                    }
+
+                    applyTrafficToCurrentRow = ::applyTrafficToRow
+
+                    if (trafficFetchedOnce) {
+                        applyTrafficToRow(cachedTrafficInfo)
+                    } else if (!trafficFetching) {
+                        trafficFetching = true
+                        scope.launch {
+                            val active = profileProvider()
+                            if (active.accessToken.isBlank()) {
+                                trafficFetching = false
+                                applyTrafficToCurrentRow?.invoke(null)
+                                return@launch
+                            }
+                            val traffic = runCatching {
+                                withContext(Dispatchers.IO) {
+                                    httpClient.fetchVehicleTrafficPackage(vehicle.vin, active.accessToken)
+                                }
+                            }.getOrNull()
+                            trafficFetching = false
+                            trafficFetchedOnce = true
+                            cachedTrafficInfo = traffic
+                            applyTrafficToCurrentRow?.invoke(traffic)
+                        }
                     }
                 }
 
@@ -2226,8 +2269,8 @@ internal class VehicleManagementScreens(
             setPadding(dp(20), dp(12), dp(20), dp(12))
             alpha = if (dimmed) 0.55f else 1f
             addView(
-                text(label, 14.5f, ThemeTokens.TEXT_SUB),
-                LinearLayout.LayoutParams(dp(84), WRAP_CONTENT)
+                text(label, 14.5f, ThemeTokens.TEXT_SUB).apply { minWidth = dp(84) },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
             )
             addView(
                 text(value, 15f, if (value == SensitiveUiText.MISSING || value == "未设置") ThemeTokens.TEXT_SUB else ThemeTokens.TEXT_PRIMARY).apply {
@@ -2247,8 +2290,8 @@ internal class VehicleManagementScreens(
             minimumHeight = dp(56)
             setPadding(dp(20), dp(6), dp(20), dp(6))
             addView(
-                text(label, 14.5f, ThemeTokens.TEXT_SUB),
-                LinearLayout.LayoutParams(dp(84), WRAP_CONTENT)
+                text(label, 14.5f, ThemeTokens.TEXT_SUB).apply { minWidth = dp(84) },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
             )
             addView(
                 inputView,
@@ -2283,8 +2326,8 @@ internal class VehicleManagementScreens(
                 }
             }
             addView(
-                text(label, 14.5f, ThemeTokens.TEXT_SUB),
-                LinearLayout.LayoutParams(dp(84), WRAP_CONTENT)
+                text(label, 14.5f, ThemeTokens.TEXT_SUB).apply { minWidth = dp(84) },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
             )
             addView(
                 TextView(context).apply {

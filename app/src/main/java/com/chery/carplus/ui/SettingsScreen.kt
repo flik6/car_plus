@@ -10,11 +10,14 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.Matrix
 import android.graphics.Outline
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.media.ExifInterface
 import android.net.Uri
+import android.os.Build
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -39,6 +42,7 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import com.chery.carplus.R
 import com.chery.carplus.cloud.AppUpdater
 import com.chery.carplus.cloud.CheryUserInfo
+import com.chery.carplus.cloud.InstallApkResult
 import com.chery.carplus.cloud.UpdateCheckResult
 import com.chery.carplus.profile.VehicleProfile
 import kotlinx.coroutines.Dispatchers
@@ -108,9 +112,12 @@ class SettingsScreen(
     private var downloadedApkFile: File? = null
     private var updateCheckJob: Job? = null
     private var updateDownloadJob: Job? = null
+    private var profileSyncJob: Job? = null
+    private var avatarSaveJob: Job? = null
     private var progressWidthAnimator: ValueAnimator? = null
 
     // Live UI hooks on MAIN page
+    private var mainVehicleTrailingTv: TextView? = null
     private var mainAboutBadgeDot: View? = null
     private var mainAboutValueText: TextView? = null
     private var activeConfirmDialog: Dialog? = null
@@ -148,9 +155,34 @@ class SettingsScreen(
         return host
     }
 
+    fun refreshVehicleRow() {
+        val trailing = listOfNotNull(
+            modelNameProvider().takeIf { it.isNotBlank() },
+            plateNoProvider().takeIf { it.isNotBlank() }
+        ).joinToString(" · ").ifBlank { "查看与编辑" }
+        mainVehicleTrailingTv?.text = trailing
+    }
+
+    fun cancelBackgroundJobs() {
+        updateCheckJob?.cancel()
+        updateCheckJob = null
+        updateDownloadJob?.cancel()
+        updateDownloadJob = null
+        profileSyncJob?.cancel()
+        profileSyncJob = null
+        avatarSaveJob?.cancel()
+        avatarSaveJob = null
+        progressWidthAnimator?.cancel()
+        progressWidthAnimator = null
+        isCheckingUpdate = false
+        isDownloadingUpdate = false
+        runCatching { pendingAvatarFile().delete() }
+    }
+
     private fun syncOfficialCloudProfileIfPossible() {
         val fetcher = fetchCloudUserInfo ?: return
-        scope.launch {
+        profileSyncJob?.cancel()
+        profileSyncJob = scope.launch {
             val userInfo = withContext(Dispatchers.IO) {
                 runCatching { fetcher() }.getOrNull()
             } ?: return@launch
@@ -186,7 +218,8 @@ class SettingsScreen(
         val rawSex = data?.optString("sex").orEmpty().trim()
         val cloudGender = when (rawSex.lowercase(Locale.US)) {
             "1", "m", "male", "男" -> "男"
-            "0", "2", "f", "female", "女" -> "女"
+            "2", "f", "female", "女" -> "女"
+            "0", "保密", "未知" -> "保密"
             else -> ""
         }
         val rawIcon = firstNonBlank(
@@ -309,7 +342,11 @@ class SettingsScreen(
         dismissTransientOverlays()
         return when (currentSubPage) {
             SubPage.MAIN -> false
-            SubPage.ACCOUNT_SECURITY,
+            SubPage.ACCOUNT_SECURITY -> {
+                pendingAvatarFile().delete()
+                navigateTo(SubPage.MAIN, direction = -1)
+                true
+            }
             SubPage.ABOUT -> {
                 navigateTo(SubPage.MAIN, direction = -1)
                 true
@@ -433,17 +470,16 @@ class SettingsScreen(
             modelNameProvider().takeIf { it.isNotBlank() },
             plateNoProvider().takeIf { it.isNotBlank() }
         ).joinToString(" · ").ifBlank { "查看与编辑" }
-        body.addView(
-            AppComponents.createListRow(
-                context = activity,
-                icon = AppIconType.CAR_CONTROLS,
-                title = "车辆管理",
-                trailingText = vehicleTrailing,
-                showChevron = true,
-                onClick = { onOpenVehicleSwitcher() }
-            ),
-            lp()
+        val vehicleRow = AppComponents.createListRow(
+            context = activity,
+            icon = AppIconType.CAR_CONTROLS,
+            title = "车辆管理",
+            trailingText = vehicleTrailing,
+            showChevron = true,
+            onClick = { onOpenVehicleSwitcher() }
         )
+        mainVehicleTrailingTv = vehicleRow.findViewWithTag("row_trailing_text")
+        body.addView(vehicleRow, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 58))
 
         // 3. Group 1: 账号与安全 (Login password only; vehicle PIN lives in 安全性)
@@ -520,9 +556,12 @@ class SettingsScreen(
             setBackgroundColor(ThemeTokens.BG_CANVAS)
         }
 
+        // Clean any leftover staged avatar from an abandoned edit session
+        runCatching { pendingAvatarFile().delete() }
         var savedSnapshot = loadAccountProfile()
         var selectedGender = savedSnapshot.gender.ifBlank { "保密" }
         var avatarDirty = false
+        var isSavingProfile = false
         var saveEnabled = false
         var saveColorAnim: ValueAnimator? = null
         var renderedSaveColor = Color.parseColor("#5A5E68")
@@ -540,7 +579,10 @@ class SettingsScreen(
             AppComponents.createTopBar(
                 context = activity,
                 title = "个人资料",
-                onBack = { navigateTo(SubPage.MAIN, direction = -1) },
+                onBack = {
+                    runCatching { pendingAvatarFile().delete() }
+                    navigateTo(SubPage.MAIN, direction = -1)
+                },
                 rightView = saveActionBtn
             )
         )
@@ -555,10 +597,19 @@ class SettingsScreen(
             setPadding(0, dp(8), 0, dp(36))
         }
 
-        // Inputs created before avatar callback so dirty check can read all fields
+        // Inputs created before avatar callback so dirty check can read all fields.
+        // Username and mobile are cloud account identifiers (read-only).
         val nicknameInput = buildBorderlessInput("请输入昵称", savedSnapshot.nickname, InputType.TYPE_CLASS_TEXT)
-        val usernameInput = buildBorderlessInput("请输入用户名", savedSnapshot.username, InputType.TYPE_CLASS_TEXT)
-        val mobileInput = buildBorderlessInput("请输入手机号", savedSnapshot.mobile, InputType.TYPE_CLASS_PHONE)
+        val usernameInput = buildBorderlessInput("未设置", savedSnapshot.username, InputType.TYPE_CLASS_TEXT).apply {
+            isEnabled = false
+            isFocusable = false
+            setTextColor(ThemeTokens.TEXT_SUB)
+        }
+        val mobileInput = buildBorderlessInput("未绑定", maskMobile(savedSnapshot.mobile), InputType.TYPE_CLASS_PHONE).apply {
+            isEnabled = false
+            isFocusable = false
+            setTextColor(ThemeTokens.TEXT_SUB)
+        }
         val emailInput = buildBorderlessInput(
             "请输入邮箱地址",
             savedSnapshot.email,
@@ -568,15 +619,15 @@ class SettingsScreen(
 
         fun currentDraft(): AccountProfileData = AccountProfileData(
             nickname = nicknameInput.text.toString().trim(),
-            username = usernameInput.text.toString().trim(),
-            mobile = mobileInput.text.toString().trim(),
+            username = savedSnapshot.username,
+            mobile = savedSnapshot.mobile,
             email = emailInput.text.toString().trim(),
             gender = selectedGender,
             region = regionInput.text.toString().trim()
         )
 
         fun updateSaveState() {
-            val dirty = avatarDirty || currentDraft() != savedSnapshot
+            val dirty = !isSavingProfile && (avatarDirty || currentDraft() != savedSnapshot)
             if (dirty == saveEnabled) return
             saveEnabled = dirty
             saveActionBtn.isEnabled = dirty
@@ -606,7 +657,7 @@ class SettingsScreen(
                 updateSaveState()
             }
         }
-        listOf(nicknameInput, usernameInput, mobileInput, emailInput, regionInput).forEach {
+        listOf(nicknameInput, emailInput, regionInput).forEach {
             it.addTextChangedListener(dirtyWatcher)
         }
 
@@ -622,14 +673,14 @@ class SettingsScreen(
             isFocusable = true
         }
         val avatarImageSlot = FrameLayout(activity)
-        fun refreshAvatarSlot(displayName: String) {
+        fun refreshAvatarSlot(displayName: String, preferPending: Boolean = avatarDirty) {
             avatarImageSlot.removeAllViews()
             avatarImageSlot.addView(
-                buildAvatarView(sizeDp = 78, displayName = displayName),
+                buildAvatarView(sizeDp = 78, displayName = displayName, preferPending = preferPending),
                 FrameLayout.LayoutParams(dp(78), dp(78), Gravity.CENTER)
             )
         }
-        refreshAvatarSlot(savedSnapshot.nickname.ifBlank { savedSnapshot.username })
+        refreshAvatarSlot(savedSnapshot.nickname.ifBlank { savedSnapshot.username }, preferPending = false)
         avatarFrame.addView(avatarImageSlot, FrameLayout.LayoutParams(dp(78), dp(78), Gravity.CENTER))
 
         val editBadge = FrameLayout(activity).apply {
@@ -651,16 +702,17 @@ class SettingsScreen(
         MotionSpec.attachPressPhysics(avatarFrame, pressedScale = 0.94f)
         avatarFrame.setOnClickListener {
             onPickAvatarImage { pickedUri ->
-                scope.launch {
+                avatarSaveJob?.cancel()
+                avatarSaveJob = scope.launch {
                     val saved = withContext(Dispatchers.IO) {
-                        saveScaledAvatar(pickedUri)
+                        saveScaledAvatar(pickedUri, pendingAvatarFile())
                     }
                     if (saved) {
-                        val draft = currentDraft()
-                        refreshAvatarSlot(draft.nickname.ifBlank { draft.username })
                         avatarDirty = true
+                        val draft = currentDraft()
+                        refreshAvatarSlot(draft.nickname.ifBlank { draft.username }, preferPending = true)
                         updateSaveState()
-                        toast("头像已更新")
+                        toast("头像已选择，点击右上角保存生效")
                     } else {
                         toast("头像读取失败，请重试")
                     }
@@ -680,21 +732,24 @@ class SettingsScreen(
 
         // Wire top-right Save action (persists locally and syncs changed fields via zyhl 113)
         saveActionBtn.setOnClickListener {
-            if (!saveEnabled) return@setOnClickListener
+            if (!saveEnabled || isSavingProfile) return@setOnClickListener
             AppHaptics.perform(saveActionBtn, HapticLevel.MEDIUM_CONFIRM)
             val prev = savedSnapshot
             val updated = currentDraft()
-            saveAccountProfile(updated)
-            savedSnapshot = updated
-            avatarDirty = false
-            refreshAvatarSlot(updated.nickname.ifBlank { updated.username })
-            updateSaveState()
+
+            fun commitPendingAvatarIfAny() {
+                val staged = pendingAvatarFile()
+                if (avatarDirty && staged.exists() && staged.length() > 0L) {
+                    val target = avatarFile()
+                    if (target.exists()) target.delete()
+                    if (!staged.renameTo(target)) {
+                        runCatching { staged.copyTo(target, overwrite = true) }
+                        runCatching { staged.delete() }
+                    }
+                }
+            }
 
             val updater = updateCloudProfileField
-            if (updater == null) {
-                toast("个人资料已保存")
-                return@setOnClickListener
-            }
             val cloudUpdates = mutableListOf<Pair<String, String>>()
             if (updated.nickname != prev.nickname && updated.nickname.isNotBlank()) {
                 cloudUpdates += "0" to updated.nickname
@@ -713,17 +768,40 @@ class SettingsScreen(
             if (updated.region != prev.region) {
                 cloudUpdates += "3" to updated.region
             }
-            if (cloudUpdates.isEmpty()) {
+            if (updater == null || cloudUpdates.isEmpty()) {
+                commitPendingAvatarIfAny()
+                saveAccountProfile(updated)
+                savedSnapshot = updated
+                avatarDirty = false
+                refreshAvatarSlot(updated.nickname.ifBlank { updated.username }, preferPending = false)
+                updateSaveState()
                 toast("个人资料已保存")
                 return@setOnClickListener
             }
+
+            isSavingProfile = true
+            saveActionBtn.text = "保存中"
+            updateSaveState()
             scope.launch {
                 val allOk = withContext(Dispatchers.IO) {
                     cloudUpdates.all { (type, value) ->
                         runCatching { updater(type, value) }.getOrDefault(false)
                     }
                 }
-                toast(if (allOk) "个人资料已同步至云端" else "已保存在本地，部分字段云端同步失败")
+                isSavingProfile = false
+                saveActionBtn.text = "保存"
+                if (allOk) {
+                    commitPendingAvatarIfAny()
+                    saveAccountProfile(updated)
+                    savedSnapshot = updated
+                    avatarDirty = false
+                    refreshAvatarSlot(updated.nickname.ifBlank { updated.username }, preferPending = false)
+                    updateSaveState()
+                    toast("个人资料已同步至云端")
+                } else {
+                    updateSaveState()
+                    toast("云端同步失败，请稍后重试")
+                }
             }
         }
 
@@ -1039,6 +1117,11 @@ class SettingsScreen(
             }
             isCheckingUpdate = false
             outcome.onSuccess { res ->
+                val versionChanged = latestCheckResult?.latestVersionCode != res.latestVersionCode ||
+                    latestCheckResult?.latestVersionName != res.latestVersionName
+                if (versionChanged) {
+                    downloadedApkFile = null
+                }
                 latestCheckResult = res
                 updateCheckError = null
                 refreshMainUpdateBadge()
@@ -1052,11 +1135,17 @@ class SettingsScreen(
                     }
                 }
             }.onFailure { err ->
-                updateCheckError = err.message ?: "网络请求失败"
+                val msg = err.message.orEmpty().trim()
+                val friendly = if (msg.isBlank() || msg.contains("Exception") || msg.contains("HTTP", ignoreCase = true) || msg.contains("Unable to resolve", ignoreCase = true) || msg.contains("timeout", ignoreCase = true)) {
+                    "网络异常，请稍后重试"
+                } else {
+                    msg.take(50)
+                }
+                updateCheckError = friendly
                 refreshMainUpdateBadge()
                 renderAboutUpdateState()
                 if (notifyUserOnResult) {
-                    toast("检查更新失败：${updateCheckError.orEmpty().take(50)}")
+                    toast("检查更新失败：$friendly")
                 }
             }
         }
@@ -1142,9 +1231,24 @@ class SettingsScreen(
             LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginStart = dp(10) }
         )
 
+        val notesMaxH = dp(220)
+        val notesScroll = object : ScrollView(activity) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val parentMode = MeasureSpec.getMode(heightMeasureSpec)
+                val parentSize = MeasureSpec.getSize(heightMeasureSpec)
+                val effectiveMax = if (parentMode == MeasureSpec.UNSPECIFIED) notesMaxH else minOf(parentSize, notesMaxH)
+                val mode = if (parentMode == MeasureSpec.EXACTLY) MeasureSpec.EXACTLY else MeasureSpec.AT_MOST
+                super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(effectiveMax, mode))
+            }
+        }.apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(notesView, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+
         sheet.addView(statusTitle, lp())
         sheet.addView(statusSub, lp(top = dp(5)))
-        sheet.addView(notesView, lp(top = dp(14)))
+        sheet.addView(notesScroll, lp(top = dp(14)))
         sheet.addView(progressBox, lp(top = dp(16)))
         sheet.addView(ctaRow, lp(top = dp(20)))
 
@@ -1158,7 +1262,7 @@ class SettingsScreen(
         sheetActionBtn = actionBtn
 
         AppSystemInsets.installBottomSheetContent(dialog, sheet, dimAmount = 0.55f)
-        MotionSpec.attachSheetSwipeToDismiss(sheet, null, dialog)
+        MotionSpec.attachSheetSwipeToDismiss(sheet, notesScroll, dialog)
         dialog.setOnDismissListener {
             if (updateSheetDialog === dialog) {
                 updateSheetDialog = null
@@ -1178,9 +1282,11 @@ class SettingsScreen(
         if (isDownloadingUpdate) return
         val existingApk = downloadedApkFile
         if (existingApk != null && existingApk.exists() && existingApk.length() > 0L) {
-            val started = runCatching { AppUpdater.installApk(activity, existingApk) }.getOrDefault(false)
-            if (!started) {
-                toast("请允许 CarPlus 安装未知应用，授权后再次点击安装")
+            when (val res = AppUpdater.installApkResult(activity, existingApk)) {
+                is InstallApkResult.Launched -> Unit
+                is InstallApkResult.NeedsPermission ->
+                    toast("请允许 CarPlus 安装未知应用，授权后再次点击安装")
+                is InstallApkResult.Failed -> toast(res.message)
             }
             return
         }
@@ -1198,11 +1304,17 @@ class SettingsScreen(
         renderAboutUpdateState()
         updateProgressBar(0L, result.assetSizeBytes)
 
+        val versionTag = "${result.latestVersionName}_${result.latestVersionCode}"
         updateDownloadJob?.cancel()
         updateDownloadJob = scope.launch {
             val downloadOutcome = withContext(Dispatchers.IO) {
                 runCatching {
-                    AppUpdater.downloadApk(activity, result.downloadUrl) { downloaded, total ->
+                    AppUpdater.downloadApk(
+                        context = activity,
+                        url = result.downloadUrl,
+                        versionTag = versionTag,
+                        isCancelled = { !isDownloadingUpdate }
+                    ) { downloaded, total ->
                         val effectiveTotal = if (total > 0L) total else result.assetSizeBytes
                         activity.runOnUiThread {
                             lastDownloadedBytes = downloaded
@@ -1219,13 +1331,22 @@ class SettingsScreen(
                 lastTotalBytes = apkFile.length()
                 updateProgressBar(apkFile.length(), apkFile.length())
                 renderAboutUpdateState()
-                val started = runCatching { AppUpdater.installApk(activity, apkFile) }.getOrDefault(false)
-                if (!started) {
-                    toast("请允许 CarPlus 安装未知应用，授权后再次点击安装")
+                when (val res = AppUpdater.installApkResult(activity, apkFile)) {
+                    is InstallApkResult.Launched -> Unit
+                    is InstallApkResult.NeedsPermission ->
+                        toast("请允许 CarPlus 安装未知应用，授权后再次点击安装")
+                    is InstallApkResult.Failed -> toast(res.message)
                 }
             }.onFailure { err ->
+                if (err is java.util.concurrent.CancellationException) return@onFailure
                 renderAboutUpdateState()
-                toast("下载失败：${err.message ?: "请检查网络连接"}")
+                val msg = err.message.orEmpty().trim()
+                val friendly = if (msg.isBlank() || msg.contains("Exception") || msg.contains("HTTP", ignoreCase = true) || msg.contains("Socket", ignoreCase = true) || msg.contains("SSL", ignoreCase = true)) {
+                    "网络连接异常，请稍后重试"
+                } else {
+                    msg.take(50)
+                }
+                toast("下载失败：$friendly")
             }
         }
     }
@@ -1443,9 +1564,25 @@ class SettingsScreen(
 
     private fun avatarFile(): File = File(activity.filesDir, AVATAR_FILENAME)
 
+    private fun pendingAvatarFile(): File = File(activity.filesDir, PENDING_AVATAR_FILENAME)
+
     private fun cloudAvatarFile(): File = File(activity.filesDir, CLOUD_AVATAR_FILENAME)
 
-    private fun saveScaledAvatar(uri: Uri): Boolean {
+    private fun readExifRotationDegrees(uri: Uri): Float {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return 0f
+        return runCatching {
+            activity.contentResolver.openInputStream(uri)?.use { stream ->
+                when (ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } ?: 0f
+        }.getOrDefault(0f)
+    }
+
+    private fun saveScaledAvatar(uri: Uri, targetFile: File = avatarFile()): Boolean {
         return runCatching {
             val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             activity.contentResolver.openInputStream(uri)?.use {
@@ -1459,9 +1596,19 @@ class SettingsScreen(
             }
 
             val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            val decoded = activity.contentResolver.openInputStream(uri)?.use {
+            val rawDecoded = activity.contentResolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, decodeOpts)
             } ?: return false
+
+            val rotation = readExifRotationDegrees(uri)
+            val decoded = if (rotation != 0f) {
+                val matrix = Matrix().apply { postRotate(rotation) }
+                Bitmap.createBitmap(rawDecoded, 0, 0, rawDecoded.width, rawDecoded.height, matrix, true).also {
+                    if (it !== rawDecoded) rawDecoded.recycle()
+                }
+            } else {
+                rawDecoded
+            }
 
             val side = min(decoded.width, decoded.height)
             val x = (decoded.width - side) / 2
@@ -1478,7 +1625,7 @@ class SettingsScreen(
                 cropped
             }
 
-            FileOutputStream(avatarFile()).use { out ->
+            FileOutputStream(targetFile).use { out ->
                 scaled.compress(Bitmap.CompressFormat.JPEG, 90, out)
                 out.flush()
             }
@@ -1487,10 +1634,12 @@ class SettingsScreen(
         }.getOrDefault(false)
     }
 
-    private fun buildAvatarView(sizeDp: Int, displayName: String): View {
+    private fun buildAvatarView(sizeDp: Int, displayName: String, preferPending: Boolean = false): View {
+        val stagedFile = pendingAvatarFile()
         val localFile = avatarFile()
         val cloudFile = cloudAvatarFile()
         val resolvedFile = when {
+            preferPending && stagedFile.exists() && stagedFile.length() > 0L -> stagedFile
             localFile.exists() && localFile.length() > 0L -> localFile
             cloudFile.exists() && cloudFile.length() > 0L -> cloudFile
             else -> null
@@ -1560,7 +1709,8 @@ class SettingsScreen(
             text(label, 14.5f, ThemeTokens.TEXT_SUB),
             LinearLayout.LayoutParams(dp(72), WRAP_CONTENT)
         )
-        row.addView(input, LinearLayout.LayoutParams(0, dp(42), 1f))
+        input.minHeight = dp(42)
+        row.addView(input, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         return row
     }
 
@@ -1646,6 +1796,7 @@ class SettingsScreen(
 
     private fun clearMainHooks() {
         dismissTransientOverlays()
+        mainVehicleTrailingTv = null
         mainAboutBadgeDot = null
         mainAboutValueText = null
     }
@@ -1685,6 +1836,7 @@ class SettingsScreen(
         private const val KEY_AVATAR_URL = "cloud_avatar_url"
         private const val KEY_SYNCED_USER_ID = "synced_user_id"
         private const val AVATAR_FILENAME = "user_avatar.jpg"
+        private const val PENDING_AVATAR_FILENAME = "user_avatar_pending.jpg"
         private const val CLOUD_AVATAR_FILENAME = "cloud_avatar.jpg"
 
         fun clearCachedAccountProfile(context: Context) {
@@ -1693,6 +1845,7 @@ class SettingsScreen(
                 .clear()
                 .apply()
             runCatching { File(context.filesDir, AVATAR_FILENAME).delete() }
+            runCatching { File(context.filesDir, PENDING_AVATAR_FILENAME).delete() }
             runCatching { File(context.filesDir, CLOUD_AVATAR_FILENAME).delete() }
         }
 
