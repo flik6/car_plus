@@ -1229,8 +1229,8 @@ object SixDigitPinSheet {
 
     fun showVerifyPinSheet(
         context: Context,
-        title: String = "输入车控安全密码",
-        subtitle: String = "请输入 6 位数字密码以继续",
+        title: String = "输入 PIN 码",
+        subtitle: String = "请输入 6 位数字 PIN 码以继续",
         onCompleted: (pin: String, showError: (String) -> Unit, dismiss: () -> Unit) -> Unit
     ): Dialog {
         return createPinSheetInternal(
@@ -1254,34 +1254,34 @@ object SixDigitPinSheet {
         var capturedOldPin: String? = null
         var capturedNewPin: String? = null
 
-        val initTitle = if (step == 0) "输入原车控密码" else "设置新车控密码"
-        val initSub = if (step == 0) "请输入当前 6 位车控安全密码" else "请输入新的 6 位数字密码"
+        val initTitle = if (step == 0) "输入原 PIN 码" else "设置新 PIN 码"
+        val initSub = if (step == 0) "请输入当前 6 位 PIN 码" else "请输入新的 6 位数字 PIN 码"
 
         return createPinSheetInternal(
             context = context,
             initialTitle = initTitle,
             initialSubtitle = initSub,
-            skipLinkText = if (requireOldPin) "首次设置？跳过原密码" else null,
+            skipLinkText = if (requireOldPin) "首次设置？跳过原 PIN 码" else null,
             onSkipClick = { ui ->
                 step = 1
                 capturedOldPin = null
-                ui.transitionStep("设置新车控密码", "请输入新的 6 位数字密码", false)
+                ui.transitionStep("设置新 PIN 码", "请输入新的 6 位数字 PIN 码", false)
             },
             onPinSixDigits = { pin, ui ->
                 when (step) {
                     0 -> {
                         capturedOldPin = pin
                         step = 1
-                        ui.transitionStep("设置新车控密码", "请输入新的 6 位数字密码", false)
+                        ui.transitionStep("设置新 PIN 码", "请输入新的 6 位数字 PIN 码", false)
                     }
                     1 -> {
                         capturedNewPin = pin
                         step = 2
-                        ui.transitionStep("确认新车控密码", "请再次输入以确认 6 位新密码", false)
+                        ui.transitionStep("确认新 PIN 码", "请再次输入以确认 6 位新 PIN 码", false)
                     }
                     else -> {
                         if (pin != capturedNewPin) {
-                            ui.showError("两次输入的密码不一致，请重新确认")
+                            ui.showError("两次输入的 PIN 码不一致，请重新确认")
                         } else {
                             onCompleted(
                                 capturedOldPin,
@@ -1291,7 +1291,7 @@ object SixDigitPinSheet {
                                         step = 0
                                         capturedOldPin = null
                                         capturedNewPin = null
-                                        ui.transitionStep("输入原车控密码", "请输入当前 6 位车控安全密码", true)
+                                        ui.transitionStep("输入原 PIN 码", "请输入当前 6 位 PIN 码", true)
                                     }
                                     ui.showError(err)
                                 },

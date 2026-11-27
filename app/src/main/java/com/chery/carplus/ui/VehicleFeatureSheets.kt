@@ -185,13 +185,13 @@ internal class VehicleFeatureSheets(
         )
         val (pinWrap, pinEt) = AppComponents.createUnderlineInput(
             context = context,
-            hint = "设置 6 位车控安全密码",
+            hint = "设置 6 位 PIN 码",
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD,
             maxLength = 6
         )
         val (confirmPinWrap, confirmPinEt) = AppComponents.createUnderlineInput(
             context = context,
-            hint = "确认 6 位车控安全密码",
+            hint = "确认 6 位 PIN 码",
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD,
             maxLength = 6
         )
@@ -277,8 +277,8 @@ internal class VehicleFeatureSheets(
                 vin.length != 17 -> "请输入完整的 17 位车架号 (VIN)"
                 sn.isBlank() -> "请输入车辆 TBox SN 码"
                 iccid.isBlank() -> "请输入车辆 SIM 卡 ICCID"
-                !Regex("^\\d{6}$").matches(pin) -> "车控安全密码必须为 6 位数字"
-                pin != confirmPin -> "两次输入的车控安全密码不一致"
+                !Regex("^\\d{6}$").matches(pin) -> "PIN 码必须为 6 位数字"
+                pin != confirmPin -> "两次输入的 PIN 码不一致"
                 else -> null
             }
             if (validationError != null) {
@@ -840,7 +840,7 @@ internal class VehicleFeatureSheets(
                             toast("车辆已解绑")
                             onUnbound()
                         } else {
-                            toast("解绑失败，请核对车控安全密码或稍后重试")
+                            toast("解绑失败，请核对 PIN 码或稍后重试")
                         }
                     }
                 }
@@ -976,7 +976,7 @@ internal class VehicleFeatureSheets(
                 AppComponents.createActionButton(context, "撤销授权", ButtonStyle.DANGER_TEXT) {
                     val pin = cachedPinProvider().ifBlank { profile.controlPin }
                     if (pin.isBlank()) {
-                        toast("请先在安全性中设置 6 位车控安全密码")
+                        toast("请先在安全性中设置 6 位 PIN 码")
                         showPinManagementModal(profile)
                         return@createActionButton
                     }
@@ -2675,7 +2675,7 @@ internal class VehicleFeatureSheets(
         row.addView(smallBtn("撤销授权", danger = true) {
             val pin = cachedPinProvider().ifBlank { profile.controlPin }
             if (pin.isBlank()) {
-                toast("请先在安全性中设置 6 位车控安全密码")
+                toast("请先在安全性中设置 6 位 PIN 码")
                 showPinManagementModal(profile)
                 return@smallBtn
             }
@@ -2741,7 +2741,7 @@ internal class VehicleFeatureSheets(
             )
             val authEt = modalInput("权限码（默认 1,2,3）").apply { setText("1,2,3") }
             val pinEt = modalInput(
-                "6 位车控安全密码 (PIN)",
+                "6 位 PIN 码",
                 InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
             ).apply {
                 val cached = cachedPinProvider().ifBlank { profile.controlPin }
@@ -3189,9 +3189,9 @@ internal class VehicleFeatureSheets(
                     if (ok) {
                         onPinUpdated(newPin)
                         dismiss()
-                        toast("车控密码已更新")
+                        toast("PIN 码已更新")
                     } else {
-                        showError("原密码校验失败，请重试")
+                        showError("原 PIN 码校验失败，请重试")
                     }
                 } else {
                     runCatching {
@@ -3201,7 +3201,7 @@ internal class VehicleFeatureSheets(
                     }
                     onPinUpdated(newPin)
                     dismiss()
-                    toast("车控密码已保存")
+                    toast("PIN 码已保存")
                 }
             }
         }

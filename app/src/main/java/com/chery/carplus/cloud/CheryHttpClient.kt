@@ -1058,7 +1058,7 @@ class CheryHttpClient(
                     globalId = authToken
                 )
                 if (!isSuccessCode(pinResp.resultCode)) {
-                    val msg = pinResp.message.ifBlank { "安全密码校验失败" }
+                    val msg = pinResp.message.ifBlank { "PIN 码校验失败" }
                     return RemoteCommandResult(
                         success = false,
                         command = command,

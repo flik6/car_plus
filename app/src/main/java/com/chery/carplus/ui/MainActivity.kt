@@ -398,7 +398,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
             onRequirePinEveryTimeChanged = { enabled ->
                 uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, enabled).apply()
-                showHomeStatus(if (enabled) "已开启每次控车验证密码" else "已关闭每次控车验证密码")
+                showHomeStatus(if (enabled) "已开启每次控车验证 PIN 码" else "已关闭每次控车验证 PIN 码")
             },
             onOpenOverlaySubpage = { view, onDestroy -> pushSubpageOverlay(view, onDestroy) },
             onPopOverlaySubpage = { popSubpageOverlay() },
@@ -487,6 +487,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private var pendingShortcutAction: String? = null
+    private var pendingShortcutRequiresPinCache: Boolean = false
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
@@ -494,17 +495,74 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val act = intent?.getStringExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION).orEmpty()
         if (act.isNotBlank()) {
             pendingShortcutAction = act
-            if (currentScreen == Screen.HOME) {
-                consumePendingShortcutActionIfReady()
-            }
+            pendingShortcutRequiresPinCache = intent?.getBooleanExtra(
+                CarWidgetManager.EXTRA_NEED_PIN_CACHE,
+                false
+            ) == true
+            routePendingShortcutActionNow()
         }
+    }
+
+    private fun routePendingShortcutActionNow() {
+        if (pendingShortcutAction.isNullOrBlank()) return
+        if (currentScreen == Screen.WELCOME ||
+            currentScreen == Screen.LOGIN_FORM ||
+            currentScreen == Screen.PRIVACY_CONSENT
+        ) {
+            return
+        }
+        appDialog?.dismiss()
+        appDialog = null
+        if (subpageOverlayStack.isNotEmpty()) {
+            clearSubpageOverlayStack()
+        }
+        when (currentScreen) {
+            Screen.SETTINGS -> returnFromSettingsToHome()
+            Screen.SECURITY -> returnFromSecurityToHome()
+            Screen.LOCATION -> returnFromLocationToHome()
+            Screen.MESSAGES -> returnFromMessagesToHome()
+            Screen.HOME -> Unit
+            else -> showHomeScreen()
+        }
+        consumePendingShortcutActionIfReady()
     }
 
     private fun consumePendingShortcutActionIfReady() {
         val act = pendingShortcutAction ?: return
         if (currentScreen != Screen.HOME) return
+        val forcePinCache = pendingShortcutRequiresPinCache
         pendingShortcutAction = null
+        pendingShortcutRequiresPinCache = false
         contentFrame.postDelayed({
+            if (forcePinCache && act != CarWidgetManager.CMD_REFRESH) {
+                val profile = profileStore.getActiveProfile().also { currentProfile = it }
+                if (profile.vin.isNotBlank()) {
+                    val (actionKey, label, temp) = when (act) {
+                        CarWidgetManager.CMD_TOGGLE_LOCK -> {
+                            val locked = activeTelemetry?.doorLocked ?: true
+                            if (locked) Triple("unlock", "解锁", null) else Triple("lock", "锁车", null)
+                        }
+                        CarWidgetManager.CMD_TOGGLE_AC -> {
+                            val acOn = activeTelemetry?.acOn == true
+                            if (acOn) Triple("ac_off", "关闭空调", null) else Triple("ac_on", "开启空调", climateTemperatureCelsius)
+                        }
+                        CarWidgetManager.CMD_FIND_CAR -> Triple("find_car", "闪灯鸣笛寻车", null)
+                        CarWidgetManager.CMD_TOGGLE_TRUNK -> {
+                            val open = activeTelemetry?.trunkOpen == true
+                            if (open) Triple("tailgate_close", "关闭后备箱", null) else Triple("trunk_open", "开启后备箱", null)
+                        }
+                        CarWidgetManager.CMD_TOGGLE_ENGINE -> {
+                            val running = activeTelemetry?.engineRunning == true
+                            if (running) Triple("engine_stop", "远程熄火", null) else Triple("engine_start", "远程启动", null)
+                        }
+                        else -> Triple("", "", null)
+                    }
+                    if (actionKey.isNotBlank()) {
+                        showVehiclePinSheet(profile, actionKey, label, temp)
+                        return@postDelayed
+                    }
+                }
+            }
             when (act) {
                 CarWidgetManager.CMD_TOGGLE_LOCK -> triggerQuickAction(QuickActionId.LOCK)
                 CarWidgetManager.CMD_TOGGLE_AC -> triggerQuickAction(QuickActionId.CLIMATE)
@@ -513,12 +571,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 CarWidgetManager.CMD_TOGGLE_ENGINE -> triggerQuickAction(QuickActionId.ENGINE)
                 CarWidgetManager.CMD_REFRESH -> refreshTelemetry(silent = false)
             }
-        }, 280L)
+        }, 220L)
     }
 
     private fun routeInitialScreen() {
         pendingShortcutAction = intent?.getStringExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION)
             ?.takeIf { it.isNotBlank() }
+        pendingShortcutRequiresPinCache = intent?.getBooleanExtra(
+            CarWidgetManager.EXTRA_NEED_PIN_CACHE,
+            false
+        ) == true
         val privacyAccepted = uiPrefs.getBoolean(KEY_PRIVACY_ACCEPTED, false)
         if (!privacyAccepted) {
             showPrivacyConsentScreen()
@@ -2117,7 +2179,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         // Group 1: 控车安全
         content.addView(AppComponents.createSectionHeader(this, "控车安全"), lp())
 
-        // Row 1: 车控安全密码 switch (default ON; controls both BLE & HTTP; toggling requires cloud PIN verification)
+        // Row 1: PIN 码 switch (default ON; controls both BLE & HTTP; toggling requires cloud PIN verification)
         val pinSwitch = ToggleSwitch(this).apply {
             checked = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true)
             onToggleAttempt = { targetChecked ->
@@ -2129,8 +2191,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     appDialog?.dismiss()
                     appDialog = SixDigitPinSheet.showVerifyPinSheet(
                         context = this@MainActivity,
-                        title = "验证车控安全密码",
-                        subtitle = "请输入 6 位云端车控安全密码以${actionDesc}每次控车验证"
+                        title = "验证 PIN 码",
+                        subtitle = "请输入 6 位云端 PIN 码以${actionDesc}每次控车验证"
                     ) { pin, showError, dismiss ->
                         lifecycleScope.launch {
                             val verified = runCatching {
@@ -2140,17 +2202,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             }.getOrDefault(false)
                             if (verified) {
                                 sessionVehiclePin = pin
-                                currentProfile = profileStore.saveProfile(
-                                    profile.copy(controlPin = pin),
-                                    activate = true
-                                )
-                                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, targetChecked).apply()
+                                currentProfile = withContext(Dispatchers.IO) {
+                                    profileStore.saveProfile(
+                                        profile.copy(controlPin = pin),
+                                        activate = true
+                                    )
+                                }
+                                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, targetChecked).commit()
                                 setChecked(targetChecked, animate = true)
                                 dismiss()
-                                val msg = if (targetChecked) "已开启每次控车验证密码" else "已关闭每次控车验证密码"
+                                val msg = if (targetChecked) "已开启每次控车验证 PIN 码" else "已关闭每次控车验证 PIN 码"
                                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
                             } else {
-                                showError("云端车控安全密码错误，请重试")
+                                showError("云端 PIN 码错误，请重试")
                             }
                         }
                     }
@@ -2161,8 +2225,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             AppComponents.createListRow(
                 context = this,
                 icon = AppIconType.LOCK_CLOSED,
-                title = "车控安全密码",
-                subtitle = "开启后蓝牙直连与远程控车均需验证 6 位密码",
+                title = "PIN 码",
+                subtitle = "开启后蓝牙直连与远程控车均需验证 6 位 PIN 码",
                 trailingView = pinSwitch,
                 showChevron = false,
                 onClick = null
@@ -2171,12 +2235,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
 
-        // Row 2: 修改车控安全密码 (6-digit stepped wizard)
+        // Row 2: 修改 PIN 码 (6-digit stepped wizard)
         content.addView(
             AppComponents.createListRow(
                 context = this,
                 icon = AppIconType.KEY_ROUND,
-                title = "修改车控安全密码",
+                title = "修改 PIN 码",
                 showChevron = true
             ) { featureSheets.showPinManagementModal(profileStore.getActiveProfile()) },
             lp()
@@ -2271,8 +2335,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         appDialog?.dismiss()
                         appDialog = SixDigitPinSheet.showVerifyPinSheet(
                             context = this@MainActivity,
-                            title = "输入车控安全密码",
-                            subtitle = "请输入 6 位云端车控安全密码以${if (targetEnabled) "开启" else "关闭"}防盗提醒"
+                            title = "输入 PIN 码",
+                            subtitle = "请输入 6 位云端 PIN 码以${if (targetEnabled) "开启" else "关闭"}防盗提醒"
                         ) { pin, showError, dismiss ->
                             lifecycleScope.launch {
                                 val verified = runCatching {
@@ -2289,7 +2353,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                     dismiss()
                                     submitAntiTheftToggle(targetEnabled, pin)
                                 } else {
-                                    showError("云端车控安全密码错误，请重试")
+                                    showError("云端 PIN 码错误，请重试")
                                 }
                             }
                         }
@@ -4599,19 +4663,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun showPinConfigSheet(profile: VehicleProfile) {
         showInputSheet(
-            title = "远程控车安全密码",
-            message = "请输入 6 位数字车控安全密码，仅保存在本机用于远程网络控车校验。",
-            hint = "6 位安全密码",
+            title = "远程控车 PIN 码",
+            message = "请输入 6 位数字 PIN 码，仅保存在本机用于远程网络控车校验。",
+            hint = "6 位 PIN 码",
             numeric = true,
             confirmText = "保存"
         ) { pin ->
             if (!PIN_REGEX.matches(pin)) {
-                Toast.makeText(this, "请输入 6 位数字密码", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "请输入 6 位数字 PIN 码", Toast.LENGTH_SHORT).show()
                 return@showInputSheet
             }
             sessionVehiclePin = pin
             currentProfile = profileStore.saveProfile(profile.copy(controlPin = pin), activate = true)
-            showHomeStatus("安全密码已保存")
+            showHomeStatus("PIN 码已保存")
         }
     }
 
@@ -4680,8 +4744,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 appDialog?.dismiss()
                 appDialog = SixDigitPinSheet.showVerifyPinSheet(
                     context = this,
-                    title = "输入车控安全密码",
-                    subtitle = "请输入 6 位云端车控安全密码以执行「$label」"
+                    title = "输入 PIN 码",
+                    subtitle = "请输入 6 位云端 PIN 码以执行「$label」"
                 ) { pin, showError, dismiss ->
                     lifecycleScope.launch {
                         val verified = runCatching {
@@ -4700,7 +4764,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 sendHttpVehicleCommand(profile, actionKey, label, temperatureCelsius, pin)
                             }
                         } else {
-                            showError("云端车控安全密码错误，请重试")
+                            showError("云端 PIN 码错误，请重试")
                         }
                     }
                 }
@@ -4726,8 +4790,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         appDialog?.dismiss()
         val dialog = SixDigitPinSheet.showVerifyPinSheet(
             context = this,
-            title = "输入车控安全密码",
-            subtitle = "请输入 6 位数字密码以执行「$label」"
+            title = "输入 PIN 码",
+            subtitle = "请输入 6 位数字 PIN 码以执行「$label」"
         ) { pin, showError, dismiss ->
             val command = remoteCommandFor(actionKey)
             if (command == null) {
@@ -4769,10 +4833,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     currentProfile = cleared
                     if (profile.vin.isNotBlank()) {
                         withContext(Dispatchers.IO) {
-                            profileStore.saveProfile(cleared, activate = true)
+                            profileStore.saveProfile(
+                                cleared,
+                                activate = true,
+                                preserveExistingPinIfBlank = false
+                            )
                         }
                     }
-                    showError("车控安全密码错误，请重新输入")
+                    showError("PIN 码错误，请重新输入")
                 } else {
                     dismiss()
                     handleRemoteResult(result, profile, actionKey, label, temperatureCelsius, pin)
@@ -4854,11 +4922,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             if (profile.vin.isNotBlank()) {
                 lifecycleScope.launch {
                     withContext(Dispatchers.IO) {
-                        profileStore.saveProfile(cleared, activate = true)
+                        profileStore.saveProfile(
+                            cleared,
+                            activate = true,
+                            preserveExistingPinIfBlank = false
+                        )
                     }
                 }
             }
-            showHomeStatus("车控安全密码错误，请重新输入")
+            showHomeStatus("PIN 码错误，请重新输入")
             showVehiclePinSheet(cleared, actionKey, label, temperatureCelsius)
         } else {
             AppHaptics.perform(contentFrame, HapticLevel.ERROR_REJECT)
@@ -5008,6 +5080,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 if (!isActive) return@launch
                 if (result?.success == true) {
                     val provisioned = result.profile ?: profile
+                    val latestPin = firstNonBlank(
+                        profileStore.getActiveProfile().controlPin,
+                        sessionVehiclePin,
+                        profile.controlPin
+                    )
                     val merged = withContext(Dispatchers.IO) {
                         profileStore.saveProfile(
                             provisioned.copy(
@@ -5017,7 +5094,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 accountType = profile.accountType,
                                 accessToken = profile.accessToken,
                                 sdkToken = profile.sdkToken,
-                                controlPin = profile.controlPin
+                                controlPin = latestPin
                             ),
                             activate = true
                         )

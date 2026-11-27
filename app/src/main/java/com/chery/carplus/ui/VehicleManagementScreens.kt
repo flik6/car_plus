@@ -700,12 +700,12 @@ internal class VehicleManagementScreens(
         ) { endValue = it }
         formCard.addView(endRow, lp(top = dp(2)))
 
-        formCard.addView(formFieldHeader("车控密码", required = true), lp(top = dp(18)))
-        val (pinRow, pinInput) = createPasswordToggleUnderlineInput("请输入 6 位车控密码", maxLength = 6)
+        formCard.addView(formFieldHeader("PIN 码", required = true), lp(top = dp(18)))
+        val (pinRow, pinInput) = createPasswordToggleUnderlineInput("请输入 6 位 PIN 码", maxLength = 6)
         formCard.addView(pinRow, lp(top = dp(2)))
 
-        formCard.addView(formFieldHeader("确认密码", required = true), lp(top = dp(18)))
-        val (confirmRow, confirmPinInput) = createPasswordToggleUnderlineInput("请再次输入车控密码", maxLength = 6)
+        formCard.addView(formFieldHeader("确认 PIN 码", required = true), lp(top = dp(18)))
+        val (confirmRow, confirmPinInput) = createPasswordToggleUnderlineInput("请再次输入 PIN 码", maxLength = 6)
         formCard.addView(confirmRow, lp(top = dp(2)))
 
         formCard.addView(formFieldHeader("授权权限", required = true), lp(top = dp(20)))
@@ -763,11 +763,11 @@ internal class VehicleManagementScreens(
                     return@buildPinnedBottomCta
                 }
                 if (pin.length != 6 || !pin.all { it.isDigit() }) {
-                    toast("请输入 6 位数字车控密码")
+                    toast("请输入 6 位数字 PIN 码")
                     return@buildPinnedBottomCta
                 }
                 if (pin != confirm) {
-                    toast("两次输入的车控密码不一致")
+                    toast("两次输入的 PIN 码不一致")
                     return@buildPinnedBottomCta
                 }
 
@@ -1337,15 +1337,15 @@ internal class VehicleManagementScreens(
                 activeDialog = AppComponents.showConfirmDialog(
                     context = context,
                     title = "取消车辆实名认证",
-                    message = "取消认证后将影响车联网通信及远程控车功能，需验证 6 位车控安全密码。确定要取消认证吗？",
+                    message = "取消认证后将影响车联网通信及远程控车功能，需验证 6 位 PIN 码。确定要取消认证吗？",
                     confirmText = "继续验证",
                     cancelText = "取消",
                     dangerConfirm = true
                 ) {
                     activeDialog = SixDigitPinSheet.showVerifyPinSheet(
                         context = context,
-                        title = "验证车控安全密码",
-                        subtitle = "请输入 6 位车控安全密码以取消车辆认证"
+                        title = "验证 PIN 码",
+                        subtitle = "请输入 6 位 PIN 码以取消车辆认证"
                     ) { pin, showError, dismiss ->
                         val active = profileProvider()
                         scope.launch {
@@ -1367,7 +1367,7 @@ internal class VehicleManagementScreens(
                                     renderDetail(vehicle.copy(simStatus = "0"))
                                     onUpdated()
                                 } else {
-                                    showError("车控密码验证失败，请重试")
+                                    showError("PIN 码验证失败，请重试")
                                 }
                             }.onFailure { err ->
                                 if (err is CherySessionExpiredException) {
@@ -1386,15 +1386,15 @@ internal class VehicleManagementScreens(
                 activeDialog = AppComponents.showConfirmDialog(
                     context = context,
                     title = "解除车辆绑定",
-                    message = "解除绑定后，当前账号将移除该车辆的所有远程控车与数字钥匙权限，需验证 6 位车控安全密码。确定继续吗？",
+                    message = "解除绑定后，当前账号将移除该车辆的所有远程控车与数字钥匙权限，需验证 6 位 PIN 码。确定继续吗？",
                     confirmText = "继续解绑",
                     cancelText = "取消",
                     dangerConfirm = true
                 ) {
                     activeDialog = SixDigitPinSheet.showVerifyPinSheet(
                         context = context,
-                        title = "验证车控安全密码",
-                        subtitle = "请输入 6 位车控安全密码以解除车辆绑定"
+                        title = "验证 PIN 码",
+                        subtitle = "请输入 6 位 PIN 码以解除车辆绑定"
                     ) { pin, showError, dismiss ->
                         val active = profileProvider()
                         scope.launch {
@@ -1415,7 +1415,7 @@ internal class VehicleManagementScreens(
                                     onVehicleUnbound(vehicle.vin)
                                     onUpdated()
                                 } else {
-                                    showError("车控密码验证失败，请重试")
+                                    showError("PIN 码验证失败，请重试")
                                 }
                             }.onFailure { err ->
                                 if (err is CherySessionExpiredException) {
@@ -2036,8 +2036,8 @@ internal class VehicleManagementScreens(
         )
         formCard.addView(dateBox, lp(top = dp(2)))
 
-        formCard.addView(formFieldHeader("车控安全密码", required = true), lp(top = dp(16)))
-        val (pinBox, pinInput) = createPasswordToggleUnderlineInput("请设置 6 位数字车控密码", maxLength = 6)
+        formCard.addView(formFieldHeader("PIN 码", required = true), lp(top = dp(16)))
+        val (pinBox, pinInput) = createPasswordToggleUnderlineInput("请设置 6 位数字 PIN 码", maxLength = 6)
         formCard.addView(pinBox, lp(top = dp(2)))
 
         var setAsDefault = true
@@ -2082,7 +2082,7 @@ internal class VehicleManagementScreens(
                     return@buildPinnedBottomCta
                 }
                 if (pin.length != 6 || !pin.all { it.isDigit() }) {
-                    toast("请输入 6 位数字车控密码")
+                    toast("请输入 6 位数字 PIN 码")
                     return@buildPinnedBottomCta
                 }
 

@@ -355,7 +355,7 @@ class DebugDiagnosticsScreen(
                 listOf(
                     "车型 / 车牌" to "$modelName · $plateNo",
                     "VIN" to maskMiddle(profile.vin, head = 6, tail = 4),
-                    "车控密码门禁" to if (requirePinEveryTimeProvider()) "开启 (BLE+HTTP 每次验密)" else "关闭 (记住密码)",
+                    "PIN 码门禁" to "${if (requirePinEveryTimeProvider()) "开启 (BLE+HTTP 每次验证)" else "关闭 (免密控车)"} · 本机缓存:${if (profile.controlPin.trim().length == 6) "已缓存(6位)" else "未缓存"}",
                     "防盗提醒开关" to when (antiTheftEnabledProvider()) {
                         true -> "已开启"
                         false -> "已关闭"

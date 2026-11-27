@@ -208,7 +208,16 @@ class VehicleProfileStore(context: Context) {
         }
     }
 
-    fun saveProfile(profile: VehicleProfile, activate: Boolean = true): VehicleProfile = synchronized(lock) {
+    fun saveProfile(
+        profile: VehicleProfile,
+        activate: Boolean = true,
+        preserveExistingPinIfBlank: Boolean = true
+    ): VehicleProfile = synchronized(lock) {
+        val existingList = readProfilesLocked()
+        val existingForVin = existingList.firstOrNull { it.vin.equals(profile.vin.trim(), ignoreCase = true) }
+        val resolvedPin = profile.controlPin.trim().ifBlank {
+            if (preserveExistingPinIfBlank) existingForVin?.controlPin?.trim().orEmpty() else ""
+        }
         val normalized = profile.copy(
             vin = profile.vin.trim().uppercase(Locale.US),
             userId = profile.userId.trim(),
@@ -221,6 +230,7 @@ class VehicleProfileStore(context: Context) {
             edfHex = compactHex(profile.edfHex),
             secAHex = compactHex(profile.secAHex),
             secBHex = compactHex(profile.secBHex),
+            controlPin = resolvedPin,
             updatedAt = System.currentTimeMillis()
         )
 
@@ -229,7 +239,7 @@ class VehicleProfileStore(context: Context) {
             return@synchronized normalized
         }
 
-        val profiles = readProfilesLocked()
+        val profiles = existingList
             .filterNot { it.vin.equals(normalized.vin, ignoreCase = true) }
             .toMutableList()
         profiles.add(0, normalized)

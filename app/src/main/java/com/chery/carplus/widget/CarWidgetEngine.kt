@@ -133,6 +133,7 @@ object CarWidgetManager {
     const val ACTION_WIDGET_CMD = "com.chery.carplus.widget.ACTION_WIDGET_CMD"
     const val EXTRA_CMD = "widget_cmd"
     const val EXTRA_SHORTCUT_ACTION = "shortcut_action"
+    const val EXTRA_NEED_PIN_CACHE = "need_pin_cache"
 
     const val CMD_REFRESH = "refresh"
     const val CMD_TOGGLE_LOCK = "toggle_lock"
@@ -465,10 +466,20 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
 
         val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
         val requirePinEveryTime = uiPrefs.getBoolean("require_pin_every_time", true)
+        val savedPin = profile.controlPin.trim()
         val needsPin = cmd != CarWidgetManager.CMD_REFRESH
-        if (needsPin && (requirePinEveryTime || profile.controlPin.length != 6)) {
-            // Respect user's security policy: open App for 6-digit PIN sheet
-            launchAppForAction(appCtx, cmd)
+        if (needsPin && (requirePinEveryTime || savedPin.length != 6)) {
+            val needPinCache = !requirePinEveryTime && savedPin.length != 6
+            if (needPinCache) {
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(
+                        appCtx,
+                        "本机尚未缓存 PIN 码，验证一次后小组件即可免密控车",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            launchAppForAction(appCtx, cmd, needPinCache = needPinCache)
             return
         }
 
@@ -545,10 +556,25 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                         accessToken = profile.accessToken,
                         sdkToken = profile.sdkToken,
                         command = remoteCmd,
-                        pin = profile.controlPin,
+                        pin = savedPin,
                         params = params
                     )
                 }.getOrNull()
+
+                if (result?.isPinError == true) {
+                    store.saveProfile(
+                        profile.copy(controlPin = ""),
+                        activate = true,
+                        preserveExistingPinIfBlank = false
+                    )
+                    CarWidgetStateStore.setTransientHint(appCtx, "")
+                    CarWidgetManager.updateAllWidgets(appCtx)
+                    mainHandler.post {
+                        Toast.makeText(appCtx, "本机缓存的 PIN 码已失效，请重新验证", Toast.LENGTH_SHORT).show()
+                        launchAppForAction(appCtx, cmd, needPinCache = true)
+                    }
+                    return@launch
+                }
 
                 if (result?.success == true) {
                     // Optimistic update immediately for crisp desktop responsiveness
@@ -596,10 +622,11 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun launchAppForAction(context: Context, cmd: String) {
+    private fun launchAppForAction(context: Context, cmd: String, needPinCache: Boolean = false) {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION, cmd)
+            putExtra(CarWidgetManager.EXTRA_NEED_PIN_CACHE, needPinCache)
         }
         runCatching { context.startActivity(intent) }
     }
