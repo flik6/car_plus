@@ -6270,7 +6270,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         runOnUiThread {
             lastPairingPin = pin
             refreshSecuritySheetIfOpen()
-            showTopPairingPinDrawer(pin = pin, deviceName = deviceName, address = address)
+            showTopPairingPinDrawer(pin = pin)
         }
     }
 
@@ -6473,8 +6473,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
             antiTheftEnabledProvider = { lastKnownAntiTheftEnabled },
             onRequestBlePermissions = { ensureBlePermissions() },
-            onPreviewPairingDrawer = { pin, devName, addr ->
-                showTopPairingPinDrawer(pin = pin, deviceName = devName, address = addr)
+            onPreviewPairingDrawer = { pin, _, _ ->
+                showTopPairingPinDrawer(pin = pin)
             },
             onBack = { popSubpageOverlay() }
         )
@@ -6483,16 +6483,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     /**
-     * Slides a non-blocking pairing PIN drawer smoothly down from the TOP of the screen
+     * Slides a compact non-blocking pairing PIN drawer smoothly down from the TOP of the screen
      * so it remains clearly visible above centered or bottom-anchored Android system
      * Bluetooth pairing dialogs while the user manually types the 6-digit PIN.
      */
-    private fun showTopPairingPinDrawer(pin: String, deviceName: String, address: String) {
+    private fun showTopPairingPinDrawer(pin: String) {
         val decor = window.decorView as? FrameLayout ?: return
         dismissTopPairingPinDrawer(immediate = true)
 
         val topSafePx = latestTopStatusBarInsetPx.coerceAtLeast(dp(28))
-        val spacedPin = pin.trim().toCharArray().joinToString(" ")
+        val cleanPin = pin.trim()
 
         val drawer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -6505,47 +6505,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     dpF(22f), dpF(22f),
                     dpF(22f), dpF(22f)
                 )
-                setStroke(dp(1), Color.parseColor("#2F3542"))
+                setStroke(dp(1), Color.parseColor("#2E333E"))
             }
-            setPadding(dp(20), topSafePx + dp(12), dp(20), dp(16))
+            setPadding(dp(20), topSafePx + dp(10), dp(20), dp(16))
             isClickable = true
             isFocusable = false
         }
 
-        // Top Row: Bluetooth icon + title + device tag + Close button
+        // Top Row: Bluetooth icon + concise title + Close button
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val btBadge = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#1D334D"))
-            }
-            addView(
-                AppIconView(this@MainActivity, AppIconType.BLUETOOTH_ICON, Color.parseColor("#60A5FA")),
-                FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER)
-            )
-        }
-        headerRow.addView(btBadge, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(10) })
-
-        val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        titleCol.addView(text("首次蓝牙配对", 15f, TEXT_PRIMARY, Typeface.BOLD))
-        val targetSub = listOf(deviceName.trim(), address.trim())
-            .filter { it.isNotBlank() }
-            .distinct()
-            .joinToString(" · ")
-        if (targetSub.isNotBlank()) {
-            titleCol.addView(
-                text(targetSub, 11.5f, TEXT_SECONDARY).apply {
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                },
-                lp(top = dp(1))
-            )
-        }
-        headerRow.addView(titleCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-
+        headerRow.addView(
+            AppIconView(this@MainActivity, AppIconType.BLUETOOTH_ICON, Color.parseColor("#60A5FA")),
+            LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) }
+        )
+        headerRow.addView(
+            text("蓝牙配对码", 15f, TEXT_PRIMARY, Typeface.BOLD),
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        )
         val closeBtn = text("收起", 13f, TEXT_SECONDARY, Typeface.BOLD).apply {
             setPadding(dp(10), dp(6), dp(4), dp(6))
             isClickable = true
@@ -6557,65 +6536,56 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         headerRow.addView(closeBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         drawer.addView(headerRow, lp())
 
-        // Middle Hero: Large spaced 6-digit PIN + One-tap Copy pill
-        val pinBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = GradientDrawable().apply {
-                cornerRadius = dpF(14f)
-                setColor(Color.parseColor("#141519"))
-                setStroke(dp(1), Color.parseColor("#2A2E38"))
+        // Middle Hero: 6 equal-spaced digit cells for instant glanceability
+        if (cleanPin.length == 6) {
+            val cellsRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
             }
-            setPadding(dp(16), dp(12), dp(12), dp(12))
+            cleanPin.forEachIndexed { idx, ch ->
+                val cell = TextView(this).apply {
+                    text = ch.toString()
+                    setTextColor(TEXT_PRIMARY)
+                    textSize = 24f
+                    typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                    gravity = Gravity.CENTER
+                    includeFontPadding = false
+                    background = GradientDrawable().apply {
+                        cornerRadius = dpF(12f)
+                        setColor(Color.parseColor("#121317"))
+                        setStroke(dp(1), Color.parseColor("#2D323E"))
+                    }
+                }
+                val cellLp = LinearLayout.LayoutParams(0, dp(52), 1f).apply {
+                    if (idx < 5) {
+                        marginEnd = dp(8)
+                    }
+                }
+                cellsRow.addView(cell, cellLp)
+            }
+            drawer.addView(cellsRow, lp(top = dp(14)))
+        } else {
+            val fallbackTv = text(cleanPin.toCharArray().joinToString(" "), 26f, TEXT_PRIMARY, Typeface.BOLD).apply {
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                letterSpacing = 0.1f
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply {
+                    cornerRadius = dpF(12f)
+                    setColor(Color.parseColor("#121317"))
+                    setStroke(dp(1), Color.parseColor("#2D323E"))
+                }
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+            }
+            drawer.addView(fallbackTv, lp(top = dp(14)))
         }
-        val pinTv = text(spacedPin, 26f, TEXT_PRIMARY, Typeface.BOLD).apply {
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            letterSpacing = 0.08f
-        }
-        pinBox.addView(pinTv, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
-        val copyBtn = text("复制", 12.5f, Color.parseColor("#FFFFFF"), Typeface.BOLD).apply {
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                cornerRadius = dpF(9f)
-                setColor(ACCENT_BLUE)
-            }
-            setPadding(dp(14), dp(7), dp(14), dp(7))
-            isClickable = true
-            setOnClickListener {
-                AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
-                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
-                cm?.setPrimaryClip(android.content.ClipData.newPlainText("BLE Pairing PIN", pin))
-                Toast.makeText(this@MainActivity, "已复制配对码 $pin", Toast.LENGTH_SHORT).show()
-            }
-        }
-        MotionSpec.attachPressPhysics(copyBtn, pressedScale = 0.94f, haptic = false)
-        pinBox.addView(copyBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        drawer.addView(pinBox, lp(top = dp(12)))
-
-        // Bottom Manual Input Hint
+        // Concise manual input hint
         drawer.addView(
-            text(
-                "系统不支持自动填入配对码，请在下方或中部的蓝牙配对框中手动输入以上 6 位数字。",
-                12f,
-                Color.parseColor("#9DA3AE")
-            ).apply {
-                setLineSpacing(dpF(2.5f), 1f)
+            text("请在系统配对框中手动输入上方配对码", 12.5f, TEXT_SECONDARY).apply {
+                gravity = Gravity.CENTER
             },
-            lp(top = dp(10))
+            lp(top = dp(12))
         )
-
-        // Subtle bottom drag-handle cue
-        val grabber = View(this).apply {
-            background = GradientDrawable().apply {
-                cornerRadius = dpF(2f)
-                setColor(Color.parseColor("#3A3F4B"))
-            }
-        }
-        val grabberWrap = FrameLayout(this).apply {
-            addView(grabber, FrameLayout.LayoutParams(dp(34), dp(3), Gravity.CENTER))
-        }
-        drawer.addView(grabberWrap, lp(top = dp(10)))
 
         topPairingDrawerView = drawer
         decor.addView(
@@ -6626,7 +6596,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         // Slide smoothly down from above the top edge
         drawer.alpha = 0.92f
         drawer.post {
-            val h = drawer.height.takeIf { it > 0 }?.toFloat() ?: dpF(210f)
+            val h = drawer.height.takeIf { it > 0 }?.toFloat() ?: dpF(168f)
             drawer.translationY = -h
             drawer.animate()
                 .translationY(0f)
