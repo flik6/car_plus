@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <dimen name="widget_outer_radius">22dp</dimen>
-    <dimen name="widget_inner_radius">13dp</dimen>
+    <!-- Strict concentric corner geometry: R_inner = R_outer - widget_outer_padding (24dp - 8dp = 16dp) -->
+    <!-- Top-right 24dp pills (R_pill = 12dp) sit at widget_outer_padding + widget_header_inset = 12dp: 24dp - 12dp = 12dp -->
+    <dimen name="widget_outer_radius">24dp</dimen>
+    <dimen name="widget_inner_radius">16dp</dimen>
+    <dimen name="widget_outer_padding">8dp</dimen>
+    <dimen name="widget_header_inset">4dp</dimen>
+    <dimen name="widget_grid_gap">8dp</dimen>
+    <dimen name="widget_pill_height">24dp</dimen>
+    <dimen name="widget_pill_padding_h">8dp</dimen>
+    <dimen name="widget_pill_gap">8dp</dimen>
 </resources>

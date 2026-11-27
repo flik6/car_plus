@@ -15,8 +15,11 @@ import kotlin.math.min
 
 /**
  * Unified CarPlus Automotive & UI Vector Icon System:
- * - Vehicle control icons use a bespoke Tesla-inspired minimalist automotive icon suite
- *   drawn with uniform optical stroke geometry on a 24x24 grid (Cap.ROUND / Join.ROUND).
+ * - Vehicle control icons are unified from `base.apk.1` (`com.xiaote`) automotive vector geometry
+ *   onto a single strict drawing spec: 24x24 viewport, uniform 1.65u monochrome stroke,
+ *   `Cap.ROUND` / `Join.ROUND`, and centered ~18u optical live area.
+ * - Home-screen widget drawables (`res/drawable/ic_widget_*.xml`) share the exact same pathData
+ *   and stroke specification so in-app controls and desktop widgets are pixel-identical.
  * - Utility & navigation icons use crisp 24x24 Material Design Icon (MDI) paths.
  */
 enum class AppIconType(val svgPath: String, val customControlGlyph: Boolean = false) {
@@ -28,23 +31,72 @@ enum class AppIconType(val svgPath: String, val customControlGlyph: Boolean = fa
     MORE_HORIZ("M6,10A2,2 0 0,0 4,12A2,2 0 0,0 6,14A2,2 0 0,0 8,12A2,2 0 0,0 6,10M18,10A2,2 0 0,0 16,12A2,2 0 0,0 18,14A2,2 0 0,0 20,12A2,2 0 0,0 18,10M12,10A2,2 0 0,0 10,12A2,2 0 0,0 12,14A2,2 0 0,0 14,12A2,2 0 0,0 12,10Z"),
     MORE_VERT("M12,16A2,2 0 0,1 14,18A2,2 0 0,1 12,20A2,2 0 0,1 10,18A2,2 0 0,1 12,16M12,10A2,2 0 0,1 14,12A2,2 0 0,1 12,14A2,2 0 0,1 10,12A2,2 0 0,1 12,10M12,4A2,2 0 0,1 14,6A2,2 0 0,1 12,8A2,2 0 0,1 10,6A2,2 0 0,1 12,4Z"),
 
-    // Bespoke Tesla-inspired minimalist automotive control icons
-    LOCK_CLOSED("", customControlGlyph = true),
-    LOCK_OPEN("", customControlGlyph = true),
-    FAN_BLADE("", customControlGlyph = true),
-    BOLT_FLASH("", customControlGlyph = true),
-    TRUNK_OPEN("", customControlGlyph = true),
-    TAILGATE_CLOSE("", customControlGlyph = true),
-    ENGINE_POWER("", customControlGlyph = true),
-    ENGINE_STOP("", customControlGlyph = true),
-    WINDOW_OPEN("", customControlGlyph = true),
-    WINDOW_VENT("", customControlGlyph = true),
-    WINDOW_CLOSE("", customControlGlyph = true),
-    SUNROOF_OPEN("", customControlGlyph = true),
-    SUNROOF_TILT("", customControlGlyph = true),
-    SUNROOF_CLOSE("", customControlGlyph = true),
-    CAR_CONTROLS("", customControlGlyph = true),
-    HORN_SOUND("", customControlGlyph = true),
+    // Unified automotive control icons (24x24 viewport, 1.65u stroke, ROUND cap/join)
+    // Shared 1:1 with res/drawable/ic_widget_*.xml
+    LOCK_CLOSED(
+        "M7.75,10.5V7.5A4.25,4.25 0 0,1 16.25,7.5V10.5 M7.0,10.5H17.0A2.25,2.25 0 0,1 19.25,12.75V18.25A2.25,2.25 0 0,1 17.0,20.5H7.0A2.25,2.25 0 0,1 4.75,18.25V12.75A2.25,2.25 0 0,1 7.0,10.5Z M12,14.2V16.8",
+        customControlGlyph = true
+    ),
+    LOCK_OPEN(
+        "M16.25,10.5V7.0A4.25,4.25 0 0,0 7.75,6.6 M7.0,10.5H17.0A2.25,2.25 0 0,1 19.25,12.75V18.25A2.25,2.25 0 0,1 17.0,20.5H7.0A2.25,2.25 0 0,1 4.75,18.25V12.75A2.25,2.25 0 0,1 7.0,10.5Z M12,14.2V16.8",
+        customControlGlyph = true
+    ),
+    FAN_BLADE(
+        "M14.15,8.2C14.84,7.78 15.64,7.55 16.5,7.55C18.64,7.55 20.43,9.03 20.89,11.01C21.01,11.55 20.55,12 20,12H4C3.45,12 2.99,12.45 3.11,12.99C3.57,14.97 5.36,16.45 7.5,16.45C8.35,16.45 9.14,16.22 9.82,15.82 M12,12C9.54,12 7.55,9.98 7.55,7.5C7.55,5.36 9.03,3.57 11.01,3.11C11.55,2.99 12,3.45 12,4V20C12,20.55 12.45,21.01 12.99,20.89C14.97,20.43 16.45,18.64 16.45,16.5C16.45,14.02 14.46,12 12,12Z",
+        customControlGlyph = true
+    ),
+    BOLT_FLASH(
+        "M12.75,6.13C12.75,5.37 13.37,4.75 14.13,4.75H15.72C16.95,4.75 18.12,5.28 18.94,6.21C19.78,7.18 20.25,8.42 20.25,9.71V14.29C20.25,15.58 19.78,16.82 18.94,17.79C18.12,18.72 16.95,19.25 15.72,19.25H14.13C13.37,19.25 12.75,18.63 12.75,17.87V6.13Z M9,10H4 M8.91,6.65L4.09,5.35 M9,14H4 M8.91,17.35L4.09,18.65",
+        customControlGlyph = true
+    ),
+    TRUNK_OPEN(
+        "M4,7H12.82C13.26,7 13.69,7.15 14.04,7.41L19.05,11.27C19.63,11.72 19.92,12.45 19.8,13.18L19.28,16.33C19.12,17.29 18.28,18 17.31,18H15 M4,18H10 M13,7L16.66,4.8C17.45,4.33 18.46,4.46 19.1,5.1L20,6 M12.5,15A2.5,2.5 0 1,0 12.5,20A2.5,2.5 0 1,0 12.5,15Z",
+        customControlGlyph = true
+    ),
+    TAILGATE_CLOSE(
+        "M4,7H12.82C13.26,7 13.69,7.15 14.04,7.41L19.05,11.27C19.63,11.72 19.92,12.45 19.8,13.18L19.28,16.33C19.12,17.29 18.28,18 17.31,18H15 M4,18H10 M12.5,15A2.5,2.5 0 1,0 12.5,20A2.5,2.5 0 1,0 12.5,15Z M17.8,3.6V7.0 M15.9,5.3L17.8,7.2L19.7,5.3",
+        customControlGlyph = true
+    ),
+    ENGINE_POWER(
+        "M16.99,6.22A8.1,8.1 0 1,1 7.01,6.22 M12,3.2V11.5",
+        customControlGlyph = true
+    ),
+    ENGINE_STOP(
+        "M12,3.8A8.2,8.2 0 1,0 12,20.2A8.2,8.2 0 1,0 12,3.8Z M10.1,8.8H13.9A1.3,1.3 0 0,1 15.2,10.1V13.9A1.3,1.3 0 0,1 13.9,15.2H10.1A1.3,1.3 0 0,1 8.8,13.9V10.1A1.3,1.3 0 0,1 10.1,8.8Z",
+        customControlGlyph = true
+    ),
+    WINDOW_OPEN(
+        "M7.66,5.5C7.86,5.04 8.31,4.75 8.81,4.75H18A1.25,1.25 0 0,1 19.25,6V18A1.25,1.25 0 0,1 18,19.25H6A1.25,1.25 0 0,1 4.75,18V12.42C4.75,12.25 4.79,12.08 4.85,11.92L7.66,5.5Z M4.75,13.5H19.25 M12.8,7.2V11.1 M10.8,9.3L12.8,11.3L14.8,9.3 M14.2,16.4H16.6",
+        customControlGlyph = true
+    ),
+    WINDOW_VENT(
+        "M7.66,5.5C7.86,5.04 8.31,4.75 8.81,4.75H18A1.25,1.25 0 0,1 19.25,6V18A1.25,1.25 0 0,1 18,19.25H6A1.25,1.25 0 0,1 4.75,18V12.42C4.75,12.25 4.79,12.08 4.85,11.92L7.66,5.5Z M4.75,13.5H19.25 M6.4,10.0H19.25 M10.8,7.4C12.0,6.3 13.4,8.5 14.8,7.3 M14.2,16.4H16.6",
+        customControlGlyph = true
+    ),
+    WINDOW_CLOSE(
+        "M7.66,5.5C7.86,5.04 8.31,4.75 8.81,4.75H18A1.25,1.25 0 0,1 19.25,6V18A1.25,1.25 0 0,1 18,19.25H6A1.25,1.25 0 0,1 4.75,18V12.42C4.75,12.25 4.79,12.08 4.85,11.92L7.66,5.5Z M4.75,13.5H19.25 M12.8,11.3V7.4 M10.8,9.2L12.8,7.2L14.8,9.2 M14.2,16.4H16.6",
+        customControlGlyph = true
+    ),
+    SUNROOF_OPEN(
+        "M3.5,18.0L5.2,14.1C5.75,12.85 6.95,12.2 8.3,12.2H9.0 M15.6,12.2H16.0C16.7,12.2 17.35,12.55 17.75,13.15L19.8,16.0C20.25,16.65 20.5,17.2 20.5,18.0 M3.5,18.0H20.5 M6.2,9.8H12.0 M17.2,6.2H12.4 M14.4,4.5L12.4,6.2L14.4,7.9",
+        customControlGlyph = true
+    ),
+    SUNROOF_TILT(
+        "M3.5,18.0L5.2,14.1C5.75,12.85 6.95,12.2 8.3,12.2H9.0 M15.6,12.2H16.0C16.7,12.2 17.35,12.55 17.75,13.15L19.8,16.0C20.25,16.65 20.5,17.2 20.5,18.0 M3.5,18.0H20.5 M15.6,12.2L9.6,9.0 M7.8,6.8L9.6,5.0L11.4,6.8",
+        customControlGlyph = true
+    ),
+    SUNROOF_CLOSE(
+        "M3.5,18.0L5.2,14.1C5.75,12.85 6.95,12.2 8.3,12.2H16.0C16.7,12.2 17.35,12.55 17.75,13.15L19.8,16.0C20.25,16.65 20.5,17.2 20.5,18.0 M3.5,18.0H20.5 M12.2,5.0V9.0 M10.2,7.2L12.2,9.2L14.2,7.2",
+        customControlGlyph = true
+    ),
+    CAR_CONTROLS(
+        "M5.52,8.55L4.57,9.5C4.0,10.08 3.7,10.87 3.73,11.68L4.04,18.92C4.08,19.68 4.71,20.25 5.47,20.25C5.89,20.25 6.29,20.07 6.56,19.75L7.64,18.5H16.36L17.44,19.75C17.71,20.07 18.11,20.25 18.53,20.25C19.29,20.25 19.92,19.68 19.96,18.92L20.27,11.68C20.3,10.87 20.0,10.08 19.43,9.5L18.48,8.55C18.36,8.43 18.25,8.29 18.17,8.14L16.56,5.17C16.15,4.41 15.35,3.94 14.49,3.94H9.51C8.65,3.94 7.85,4.41 7.44,5.17L5.83,8.14C5.75,8.29 5.64,8.43 5.52,8.55Z M6.8,13.6H8.8 M15.2,13.6H17.2",
+        customControlGlyph = true
+    ),
+    HORN_SOUND(
+        "M3.75,10.5H13.15C13.15,10.5 15.5,10.48 16.82,10.0C18.82,9.27 20.25,6.25 20.25,6.25V17.75C20.25,17.75 18.82,14.73 16.82,14.0C15.5,13.52 13.15,13.5 13.15,13.5H3.75 M3.75,8.5V15.5 M7.85,15.8C7.85,16.18 8.11,16.65 8.8,17.07C9.48,17.47 10.47,17.75 11.6,17.75C12.73,17.75 13.72,17.47 14.4,17.07C15.09,16.65 15.35,16.18 15.35,15.8C15.35,15.42 15.09,14.95 14.4,14.53C13.72,14.13 12.73,13.85 11.6,13.85C10.47,13.85 9.48,14.13 8.8,14.53C8.11,14.95 7.85,15.42 7.85,15.8Z",
+        customControlGlyph = true
+    ),
 
     // Standard UI & Utility icons
     LOCATION_ARROW("M12,6.5A2.5,2.5 0 0,1 14.5,9A2.5,2.5 0 0,1 12,11.5A2.5,2.5 0 0,1 9.5,9A2.5,2.5 0 0,1 12,6.5M12,2A7,7 0 0,1 19,9C19,14.25 12,22 12,22C12,22 5,14.25 5,9A7,7 0 0,1 12,2M12,4A5,5 0 0,0 7,9C7,10 7,12 12,18.71C17,12 17,10 17,9A5,5 0 0,0 12,4Z"),
@@ -114,8 +166,6 @@ class AppIconView(
     }
     private val scaleMatrix = Matrix()
     private val drawPath = Path()
-    private val tempPath = Path()
-    private val tempRect = RectF()
     private var cachedPath: Path? = null
 
     override fun onDraw(canvas: Canvas) {
@@ -140,368 +190,28 @@ class AppIconView(
             canvas.rotate(spinAngle, size / 2f, size / 2f)
         }
 
+        val basePath = cachedPath ?: run {
+            val parsed = PathParser.createPathFromPathData(iconType.svgPath) ?: Path()
+            cachedPath = parsed
+            parsed
+        }
+        scaleMatrix.reset()
+        scaleMatrix.setScale(scale, scale)
+        drawPath.reset()
+        basePath.transform(scaleMatrix, drawPath)
+
         if (iconType.customControlGlyph) {
-            canvas.scale(scale, scale)
-            drawBespokeControlGlyph(canvas, iconType)
+            strokePaint.strokeWidth = CONTROL_STROKE_WIDTH * scale
+            canvas.drawPath(drawPath, strokePaint)
         } else {
-            val basePath = cachedPath ?: run {
-                val parsed = PathParser.createPathFromPathData(iconType.svgPath) ?: Path()
-                cachedPath = parsed
-                parsed
-            }
-            scaleMatrix.reset()
-            scaleMatrix.setScale(scale, scale)
-            drawPath.reset()
-            basePath.transform(scaleMatrix, drawPath)
             canvas.drawPath(drawPath, fillPaint)
         }
         canvas.restore()
     }
 
-    /**
-     * Bespoke Tesla-inspired automotive control icon suite on a normalized 24x24 canvas.
-     * Unified architectural stroke (1.65u), aerodynamic fastback sedan proportions,
-     * and crisp optical contrast at both 22dp (collapsed bar) and 28dp (expanded deck).
-     */
-    private fun drawBespokeControlGlyph(canvas: Canvas, type: AppIconType) {
-        strokePaint.strokeWidth = 1.65f
-        when (type) {
-            AppIconType.LOCK_CLOSED -> drawLockClosed(canvas)
-            AppIconType.LOCK_OPEN -> drawLockOpen(canvas)
-            AppIconType.FAN_BLADE -> drawClimateFan(canvas)
-            AppIconType.BOLT_FLASH -> drawHeadlampFlash(canvas)
-            AppIconType.TRUNK_OPEN -> drawTrunkProfile(canvas, open = true)
-            AppIconType.TAILGATE_CLOSE -> drawTrunkProfile(canvas, open = false)
-            AppIconType.ENGINE_POWER -> drawEnginePower(canvas)
-            AppIconType.ENGINE_STOP -> drawEngineStop(canvas)
-            AppIconType.WINDOW_OPEN -> drawDoorWindow(canvas, mode = 1)
-            AppIconType.WINDOW_VENT -> drawDoorWindow(canvas, mode = 0)
-            AppIconType.WINDOW_CLOSE -> drawDoorWindow(canvas, mode = 2)
-            AppIconType.SUNROOF_OPEN -> drawSunroofProfile(canvas, mode = 1)
-            AppIconType.SUNROOF_TILT -> drawSunroofProfile(canvas, mode = 0)
-            AppIconType.SUNROOF_CLOSE -> drawSunroofProfile(canvas, mode = 2)
-            AppIconType.CAR_CONTROLS -> drawCarFrontSilhouette(canvas)
-            AppIconType.HORN_SOUND -> drawHornSound(canvas)
-            else -> Unit
-        }
-    }
-
-    private fun drawLockClosed(canvas: Canvas) {
-        // Tall architectural U-shackle
-        tempPath.reset()
-        tempPath.moveTo(8.3f, 10.2f)
-        tempPath.lineTo(8.3f, 7.2f)
-        tempRect.set(8.3f, 3.5f, 15.7f, 10.9f)
-        tempPath.arcTo(tempRect, 180f, 180f, false)
-        tempPath.lineTo(15.7f, 10.2f)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Refined rounded lock body
-        tempRect.set(5.4f, 10.2f, 18.6f, 20.4f)
-        canvas.drawRoundRect(tempRect, 2.5f, 2.5f, strokePaint)
-
-        // Crisp keyhole dot & slim vertical stem
-        canvas.drawCircle(12f, 14.5f, 1.35f, fillPaint)
-        strokePaint.strokeWidth = 1.55f
-        canvas.drawLine(12f, 15.4f, 12f, 17.5f, strokePaint)
-    }
-
-    private fun drawLockOpen(canvas: Canvas) {
-        // Raised & pivoted open U-shackle (clearly distinct silhouette)
-        tempPath.reset()
-        tempPath.moveTo(8.3f, 10.2f)
-        tempPath.lineTo(8.3f, 6.7f)
-        tempRect.set(8.3f, 3.0f, 15.7f, 10.4f)
-        tempPath.arcTo(tempRect, 180f, 152f, false)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Matching refined rounded lock body
-        tempRect.set(5.4f, 10.2f, 18.6f, 20.4f)
-        canvas.drawRoundRect(tempRect, 2.5f, 2.5f, strokePaint)
-
-        // Crisp keyhole dot & slim stem
-        canvas.drawCircle(12f, 14.5f, 1.35f, fillPaint)
-        strokePaint.strokeWidth = 1.55f
-        canvas.drawLine(12f, 15.4f, 12f, 17.5f, strokePaint)
-    }
-
-    private fun drawClimateFan(canvas: Canvas) {
-        // Iconic Tesla 4-blade sculpted turbine fan around hollow center hub
-        tempPath.reset()
-        tempPath.moveTo(11.6f, 9.7f)
-        tempPath.cubicTo(9.8f, 6.8f, 10.1f, 3.0f, 13.4f, 2.7f)
-        tempPath.cubicTo(16.6f, 2.4f, 17.4f, 5.8f, 15.1f, 7.6f)
-        tempPath.cubicTo(14.0f, 8.5f, 13.4f, 9.1f, 13.1f, 10.0f)
-        tempPath.close()
-
-        for (i in 0 until 4) {
-            canvas.save()
-            canvas.rotate(i * 90f, 12f, 12f)
-            canvas.drawPath(tempPath, fillPaint)
-            canvas.restore()
-        }
-
-        // Precision hub ring
-        strokePaint.strokeWidth = 1.45f
-        canvas.drawCircle(12f, 12f, 2.05f, strokePaint)
-    }
-
-    private fun drawHeadlampFlash(canvas: Canvas) {
-        // Sleek Tesla D-profile LED headlamp housing (facing left)
-        tempPath.reset()
-        tempPath.moveTo(12.2f, 6.0f)
-        tempPath.cubicTo(17.8f, 6.0f, 21.0f, 8.4f, 21.0f, 12.0f)
-        tempPath.cubicTo(21.0f, 15.6f, 17.8f, 18.0f, 12.2f, 18.0f)
-        tempPath.cubicTo(11.1f, 15.8f, 11.1f, 8.2f, 12.2f, 6.0f)
-        tempPath.close()
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Subtle inner lens reflector arc
-        strokePaint.strokeWidth = 1.25f
-        tempPath.reset()
-        tempPath.moveTo(14.4f, 8.8f)
-        tempPath.cubicTo(16.9f, 9.2f, 18.2f, 10.4f, 18.2f, 12.0f)
-        tempPath.cubicTo(18.2f, 13.6f, 16.9f, 14.8f, 14.4f, 15.2f)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // 3 crisp splayed high-beam rays on the left
-        strokePaint.strokeWidth = 1.65f
-        canvas.drawLine(3.2f, 7.6f, 8.3f, 8.4f, strokePaint)
-        canvas.drawLine(2.6f, 12.0f, 8.1f, 12.0f, strokePaint)
-        canvas.drawLine(3.2f, 16.4f, 8.3f, 15.6f, strokePaint)
-    }
-
-    private fun drawTrunkProfile(canvas: Canvas, open: Boolean) {
-        // Signature Tesla side-profile fastback sedan with hinged open rear trunk
-        strokePaint.strokeWidth = 1.55f
-
-        // Fastback roofline + hood + front bumper + rocker + rear bumper (trunk gap open at rear)
-        tempPath.reset()
-        tempPath.moveTo(7.4f, 10.6f)
-        tempPath.cubicTo(9.4f, 8.8f, 12.0f, 8.5f, 14.4f, 9.3f)
-        tempPath.lineTo(16.5f, 11.4f) // windshield to hood
-        tempPath.cubicTo(18.6f, 11.6f, 20.8f, 12.4f, 21.4f, 14.2f) // sleek front hood
-        tempPath.lineTo(21.4f, 16.2f)
-        tempPath.lineTo(19.6f, 16.2f)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Lower sill between wheels & rear overhang
-        canvas.drawLine(9.2f, 16.2f, 15.4f, 16.2f, strokePaint)
-        tempPath.reset()
-        tempPath.moveTo(5.0f, 16.2f)
-        tempPath.lineTo(3.2f, 16.2f)
-        tempPath.lineTo(3.0f, 13.5f)
-        tempPath.lineTo(4.0f, 12.2f)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Front & rear wheels
-        canvas.drawCircle(7.1f, 16.3f, 2.0f, strokePaint)
-        canvas.drawCircle(17.5f, 16.3f, 2.0f, strokePaint)
-
-        // Raised hinged rear trunk lid (hinged at rear roofline x=7.4, y=10.6)
-        strokePaint.strokeWidth = 1.75f
-        canvas.drawLine(7.4f, 10.6f, 3.8f, 6.2f, strokePaint)
-
-        // Subtle directional cue (open up-chevron vs close down-arrow)
-        strokePaint.strokeWidth = 1.45f
-        if (open) {
-            tempPath.reset()
-            tempPath.moveTo(7.8f, 6.2f)
-            tempPath.lineTo(9.4f, 4.4f)
-            tempPath.lineTo(11.0f, 6.2f)
-            canvas.drawPath(tempPath, strokePaint)
-        } else {
-            canvas.drawLine(9.6f, 4.0f, 9.6f, 7.6f, strokePaint)
-            tempPath.reset()
-            tempPath.moveTo(8.1f, 6.2f)
-            tempPath.lineTo(9.6f, 7.8f)
-            tempPath.lineTo(11.1f, 6.2f)
-            canvas.drawPath(tempPath, strokePaint)
-        }
-    }
-
-    private fun drawEnginePower(canvas: Canvas) {
-        // Pure automotive ignition power symbol
-        strokePaint.strokeWidth = 1.75f
-        tempRect.set(4.5f, 5.2f, 19.5f, 20.2f)
-        canvas.drawArc(tempRect, -56f, 292f, false, strokePaint)
-        canvas.drawLine(12f, 3.2f, 12f, 11.4f, strokePaint)
-    }
-
-    private fun drawEngineStop(canvas: Canvas) {
-        // Precision ring + clean rounded square engine stop core
-        strokePaint.strokeWidth = 1.65f
-        canvas.drawCircle(12f, 12f, 8.2f, strokePaint)
-        tempRect.set(8.6f, 8.6f, 15.4f, 15.4f)
-        canvas.drawRoundRect(tempRect, 1.4f, 1.4f, fillPaint)
-    }
-
-    /**
-     * mode: 0 = VENT (slight top gap + breeze), 1 = OPEN (down arrow), 2 = CLOSE (up arrow)
-     */
-    private fun drawDoorWindow(canvas: Canvas, mode: Int) {
-        strokePaint.strokeWidth = 1.6f
-        // Automotive door & A-pillar window frame
-        tempPath.reset()
-        tempPath.moveTo(4.6f, 19.4f)
-        tempPath.lineTo(4.6f, 11.5f)
-        tempPath.lineTo(11.2f, 4.8f)
-        tempPath.lineTo(19.4f, 4.8f)
-        tempPath.lineTo(19.4f, 19.4f)
-        tempPath.close()
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Door beltline divider
-        canvas.drawLine(4.6f, 13.6f, 19.4f, 13.6f, strokePaint)
-
-        when (mode) {
-            0 -> {
-                // Vent mode: glass slightly cracked open near top + 2 sleek breeze lines
-                strokePaint.strokeWidth = 1.35f
-                canvas.drawLine(8.2f, 8.4f, 19.2f, 8.4f, strokePaint)
-                tempPath.reset()
-                tempPath.moveTo(11.8f, 6.6f)
-                tempPath.cubicTo(13.2f, 5.6f, 14.4f, 7.6f, 16.0f, 6.6f)
-                canvas.drawPath(tempPath, strokePaint)
-                // Tiny door handle bar
-                canvas.drawLine(14.8f, 16.2f, 17.2f, 16.2f, strokePaint)
-            }
-            1 -> {
-                // Open: crisp downward arrow inside window
-                strokePaint.strokeWidth = 1.55f
-                canvas.drawLine(13.2f, 7.2f, 13.2f, 11.4f, strokePaint)
-                tempPath.reset()
-                tempPath.moveTo(11.2f, 9.7f)
-                tempPath.lineTo(13.2f, 11.6f)
-                tempPath.lineTo(15.2f, 9.7f)
-                canvas.drawPath(tempPath, strokePaint)
-                canvas.drawLine(14.8f, 16.2f, 17.2f, 16.2f, strokePaint)
-            }
-            else -> {
-                // Close: crisp upward arrow inside window
-                strokePaint.strokeWidth = 1.55f
-                canvas.drawLine(13.2f, 11.6f, 13.2f, 7.4f, strokePaint)
-                tempPath.reset()
-                tempPath.moveTo(11.2f, 9.2f)
-                tempPath.lineTo(13.2f, 7.2f)
-                tempPath.lineTo(15.2f, 9.2f)
-                canvas.drawPath(tempPath, strokePaint)
-                canvas.drawLine(14.8f, 16.2f, 17.2f, 16.2f, strokePaint)
-            }
-        }
-    }
-
-    /**
-     * mode: 0 = TILT (rear edge hinged upward), 1 = OPEN (sliding panel + back arrow), 2 = CLOSE
-     */
-    private fun drawSunroofProfile(canvas: Canvas, mode: Int) {
-        strokePaint.strokeWidth = 1.6f
-        // Sleek sedan cabin roofline silhouette (front facing right)
-        tempPath.reset()
-        tempPath.moveTo(2.8f, 17.6f)
-        tempPath.cubicTo(4.2f, 13.8f, 6.2f, 11.4f, 9.2f, 11.2f)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Windshield & front cowl
-        tempPath.reset()
-        tempPath.moveTo(15.6f, 11.2f)
-        tempPath.lineTo(19.0f, 14.8f)
-        tempPath.lineTo(21.4f, 16.0f)
-        tempPath.lineTo(21.4f, 17.6f)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Beltline
-        strokePaint.strokeWidth = 1.4f
-        canvas.drawLine(2.8f, 17.6f, 21.4f, 17.6f, strokePaint)
-
-        when (mode) {
-            0 -> {
-                // Tilt: sunroof glass hinged at front (15.4, 11.0), rear edge angled cleanly up
-                strokePaint.strokeWidth = 1.8f
-                canvas.drawLine(15.4f, 11.0f, 9.4f, 8.1f, strokePaint)
-                // Tiny upward vent arrow above rear gap
-                strokePaint.strokeWidth = 1.4f
-                tempPath.reset()
-                tempPath.moveTo(8.0f, 6.3f)
-                tempPath.lineTo(9.5f, 4.7f)
-                tempPath.lineTo(11.0f, 6.3f)
-                canvas.drawPath(tempPath, strokePaint)
-            }
-            1 -> {
-                // Open: sunroof panel lifted and slid back along roof
-                strokePaint.strokeWidth = 1.8f
-                canvas.drawLine(6.8f, 9.1f, 12.6f, 9.1f, strokePaint)
-                // Subtle rearward slide arrow
-                strokePaint.strokeWidth = 1.4f
-                canvas.drawLine(16.0f, 6.5f, 11.2f, 6.5f, strokePaint)
-                tempPath.reset()
-                tempPath.moveTo(12.8f, 5.0f)
-                tempPath.lineTo(11.0f, 6.5f)
-                tempPath.lineTo(12.8f, 8.0f)
-                canvas.drawPath(tempPath, strokePaint)
-            }
-            else -> {
-                // Close: flush roof line + clean downward close arrow
-                strokePaint.strokeWidth = 1.7f
-                canvas.drawLine(9.2f, 11.2f, 15.6f, 11.2f, strokePaint)
-                strokePaint.strokeWidth = 1.45f
-                canvas.drawLine(12.4f, 4.6f, 12.4f, 8.6f, strokePaint)
-                tempPath.reset()
-                tempPath.moveTo(10.6f, 7.0f)
-                tempPath.lineTo(12.4f, 8.8f)
-                tempPath.lineTo(14.2f, 7.0f)
-                canvas.drawPath(tempPath, strokePaint)
-            }
-        }
-    }
-
-    private fun drawCarFrontSilhouette(canvas: Canvas) {
-        // Minimalist Tesla-style front sedan silhouette
-        strokePaint.strokeWidth = 1.6f
-        // Greenhouse / cabin arch
-        tempPath.reset()
-        tempPath.moveTo(5.6f, 11.0f)
-        tempPath.lineTo(7.4f, 6.6f)
-        tempPath.cubicTo(8.0f, 5.4f, 9.4f, 5.0f, 12.0f, 5.0f)
-        tempPath.cubicTo(14.6f, 5.0f, 16.0f, 5.4f, 16.6f, 6.6f)
-        tempPath.lineTo(18.4f, 11.0f)
-        canvas.drawPath(tempPath, strokePaint)
-
-        // Subtle wing mirrors
-        canvas.drawLine(3.6f, 10.1f, 5.5f, 10.6f, strokePaint)
-        canvas.drawLine(20.4f, 10.1f, 18.5f, 10.6f, strokePaint)
-
-        // Wide planted lower body & fender stance
-        tempRect.set(3.8f, 11.0f, 20.2f, 17.4f)
-        canvas.drawRoundRect(tempRect, 2.4f, 2.4f, strokePaint)
-
-        // Left & right tires
-        canvas.drawLine(6.2f, 17.5f, 6.2f, 19.6f, strokePaint)
-        canvas.drawLine(17.8f, 17.5f, 17.8f, 19.6f, strokePaint)
-
-        // Crisp LED DRL headlamp bars
-        strokePaint.strokeWidth = 1.55f
-        canvas.drawLine(6.3f, 14.0f, 8.7f, 14.3f, strokePaint)
-        canvas.drawLine(17.7f, 14.0f, 15.3f, 14.3f, strokePaint)
-    }
-
-    private fun drawHornSound(canvas: Canvas) {
-        // Minimalist sculpted automotive horn + acoustic sound waves
-        strokePaint.strokeWidth = 1.6f
-        tempPath.reset()
-        tempPath.moveTo(3.2f, 10.2f)
-        tempPath.lineTo(7.0f, 10.2f)
-        tempPath.lineTo(13.2f, 6.4f)
-        tempPath.lineTo(13.2f, 17.6f)
-        tempPath.lineTo(7.0f, 13.8f)
-        tempPath.lineTo(3.2f, 13.8f)
-        tempPath.close()
-        canvas.drawPath(tempPath, strokePaint)
-
-        tempRect.set(13.6f, 8.6f, 17.8f, 15.4f)
-        canvas.drawArc(tempRect, -54f, 108f, false, strokePaint)
-        tempRect.set(15.2f, 6.2f, 21.0f, 17.8f)
-        canvas.drawArc(tempRect, -56f, 112f, false, strokePaint)
+    companion object {
+        /** Uniform stroke width (in 24x24 viewport units) shared with ic_widget_*.xml. */
+        const val CONTROL_STROKE_WIDTH = 1.65f
     }
 
     private fun startSpin() {

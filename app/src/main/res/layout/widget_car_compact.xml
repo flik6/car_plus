@@ -5,25 +5,26 @@
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg_dark"
     android:orientation="vertical"
-    android:paddingStart="12dp"
-    android:paddingTop="11dp"
-    android:paddingEnd="12dp"
-    android:paddingBottom="11dp">
+    android:padding="@dimen/widget_outer_padding">
 
-    <!-- Top Header: Model + Status + Compact Refresh Pill -->
+    <!-- Top Header: Model + Status | Concentric 24dp Circular Refresh Pill -->
     <LinearLayout
         android:id="@+id/widget_header_area"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:baselineAligned="false"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/widget_header_inset"
+        android:paddingTop="@dimen/widget_header_inset"
+        android:paddingEnd="@dimen/widget_header_inset">
 
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:orientation="vertical"
-            android:paddingEnd="6dp">
+            android:paddingEnd="8dp">
 
             <TextView
                 android:id="@+id/widget_model_name"
@@ -34,35 +35,36 @@
                 android:singleLine="true"
                 android:text="Qiri+"
                 android:textColor="#FFFFFF"
-                android:textSize="13.5sp"
+                android:textSize="14sp"
                 android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/widget_status_line"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="4dp"
                 android:ellipsize="end"
+                android:fontFeatureSettings="tnum"
                 android:includeFontPadding="false"
                 android:singleLine="true"
                 android:text="状态待同步"
-                android:textColor="#9CA3B2"
+                android:textColor="#8E9299"
                 android:textSize="10.5sp" />
         </LinearLayout>
 
         <FrameLayout
             android:id="@+id/widget_btn_refresh"
-            android:layout_width="28dp"
-            android:layout_height="28dp"
+            android:layout_width="@dimen/widget_pill_height"
+            android:layout_height="@dimen/widget_pill_height"
             android:background="@drawable/widget_pill_bg">
 
             <ImageView
-                android:layout_width="14dp"
-                android:layout_height="14dp"
+                android:layout_width="12dp"
+                android:layout_height="12dp"
                 android:layout_gravity="center"
                 android:contentDescription="刷新车况"
                 android:src="@drawable/ic_widget_refresh"
-                android:tint="#9CA3B2" />
+                android:tint="#8E9299" />
         </FrameLayout>
     </LinearLayout>
 
@@ -72,43 +74,46 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="4dp"
-        android:layout_marginBottom="6dp"
+        android:layout_marginBottom="4dp"
         android:layout_weight="1"
         android:contentDescription="车辆视图"
-        android:paddingStart="2dp"
-        android:paddingEnd="2dp"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
         android:scaleType="fitCenter"
         android:src="@drawable/widget_car_arrizo8" />
 
-    <!-- Fuel / Energy Hairline Bar -->
+    <!-- Fuel / Energy Hairline Bar (aligned with header inset) -->
     <ProgressBar
         android:id="@+id/widget_fuel_bar"
         style="?android:attr/progressBarStyleHorizontal"
         android:layout_width="match_parent"
         android:layout_height="4dp"
-        android:layout_marginBottom="8dp"
+        android:layout_marginStart="@dimen/widget_header_inset"
+        android:layout_marginEnd="@dimen/widget_header_inset"
+        android:layout_marginBottom="@dimen/widget_grid_gap"
         android:max="100"
         android:progress="0"
         android:progressDrawable="@drawable/widget_fuel_progress" />
 
-    <!-- Bottom 2 Quick Actions -->
+    <!-- Bottom 2 Quick Actions (concentric inner radius = R_outer - 8dp) -->
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="38dp"
+        android:layout_height="40dp"
+        android:baselineAligned="false"
         android:orientation="horizontal">
 
         <FrameLayout
             android:id="@+id/widget_btn_lock"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="7dp"
+            android:layout_marginEnd="@dimen/widget_grid_gap"
             android:layout_weight="1"
             android:background="@drawable/widget_btn_bg">
 
             <ImageView
                 android:id="@+id/widget_icon_lock"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
                 android:layout_gravity="center"
                 android:contentDescription="锁车或解锁"
                 android:src="@drawable/ic_widget_lock_closed" />
@@ -123,8 +128,8 @@
 
             <ImageView
                 android:id="@+id/widget_icon_ac"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
                 android:layout_gravity="center"
                 android:contentDescription="开关空调"
                 android:src="@drawable/ic_widget_fan" />

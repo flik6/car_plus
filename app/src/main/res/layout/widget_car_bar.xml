@@ -4,22 +4,21 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg_dark"
+    android:baselineAligned="false"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingStart="14dp"
-    android:paddingTop="6dp"
-    android:paddingEnd="10dp"
-    android:paddingBottom="6dp">
+    android:padding="@dimen/widget_outer_padding">
 
     <!-- Left: Vehicle Identity + Compact Status & Energy -->
     <LinearLayout
         android:id="@+id/widget_header_area"
         android:layout_width="0dp"
         android:layout_height="match_parent"
-        android:layout_weight="1.08"
+        android:layout_weight="1"
         android:gravity="center_vertical"
         android:orientation="vertical"
-        android:paddingEnd="10dp">
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp">
 
         <TextView
             android:id="@+id/widget_model_name"
@@ -30,27 +29,29 @@
             android:singleLine="true"
             android:text="Qiri+"
             android:textColor="#FFFFFF"
-            android:textSize="13.5sp"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/widget_status_line"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="3dp"
+            android:layout_marginTop="4dp"
             android:ellipsize="end"
+            android:fontFeatureSettings="tnum"
             android:includeFontPadding="false"
             android:singleLine="true"
             android:text="状态待同步"
-            android:textColor="#9CA3B2"
-            android:textSize="10.5sp" />
+            android:textColor="#8E9299"
+            android:textSize="11sp" />
     </LinearLayout>
 
-    <!-- Right: 4 Equal-Width Rounded Control Pills -->
+    <!-- Right: 4 Equal-Width Concentric Control Tiles -->
     <LinearLayout
         android:layout_width="0dp"
-        android:layout_height="40dp"
-        android:layout_weight="1.42"
+        android:layout_height="match_parent"
+        android:layout_weight="1.7"
+        android:baselineAligned="false"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
@@ -58,14 +59,14 @@
             android:id="@+id/widget_btn_lock"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="6dp"
+            android:layout_marginEnd="@dimen/widget_grid_gap"
             android:layout_weight="1"
             android:background="@drawable/widget_btn_bg">
 
             <ImageView
                 android:id="@+id/widget_icon_lock"
-                android:layout_width="19dp"
-                android:layout_height="19dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
                 android:layout_gravity="center"
                 android:contentDescription="锁车或解锁"
                 android:src="@drawable/ic_widget_lock_closed" />
@@ -75,14 +76,14 @@
             android:id="@+id/widget_btn_ac"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="6dp"
+            android:layout_marginEnd="@dimen/widget_grid_gap"
             android:layout_weight="1"
             android:background="@drawable/widget_btn_bg">
 
             <ImageView
                 android:id="@+id/widget_icon_ac"
-                android:layout_width="19dp"
-                android:layout_height="19dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
                 android:layout_gravity="center"
                 android:contentDescription="开关空调"
                 android:src="@drawable/ic_widget_fan" />
@@ -92,14 +93,14 @@
             android:id="@+id/widget_btn_flash"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="6dp"
+            android:layout_marginEnd="@dimen/widget_grid_gap"
             android:layout_weight="1"
             android:background="@drawable/widget_btn_bg">
 
             <ImageView
                 android:id="@+id/widget_icon_flash"
-                android:layout_width="19dp"
-                android:layout_height="19dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
                 android:layout_gravity="center"
                 android:contentDescription="闪灯寻车"
                 android:src="@drawable/ic_widget_flash" />
@@ -114,8 +115,8 @@
 
             <ImageView
                 android:id="@+id/widget_icon_trunk"
-                android:layout_width="19dp"
-                android:layout_height="19dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
                 android:layout_gravity="center"
                 android:contentDescription="开关后备箱"
                 android:src="@drawable/ic_widget_trunk" />

@@ -173,8 +173,8 @@ object CarWidgetManager {
     const val CMD_TOGGLE_ENGINE = "toggle_engine"
 
     private val COLOR_WHITE = Color.parseColor("#FFFFFF")
-    private val COLOR_LABEL_IDLE = Color.parseColor("#A9B1C0")
-    private val COLOR_ACTIVE = Color.parseColor("#60A5FA")
+    private val COLOR_LABEL_IDLE = Color.parseColor("#8E9299")
+    private val COLOR_ACTIVE = Color.parseColor("#3D9BFF")
     private val lastAutoSyncAttemptMs = AtomicLong(0L)
     private val bgSyncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
