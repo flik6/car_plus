@@ -16,6 +16,8 @@
   var activeLoadedUrl = null;
   var currentEffects = null;
   var currentRig = null;
+  var currentModelSize = null;
+  var parkingBay = null;
   var renderActive = true;
   var rafId = null;
   var lastTime = 0;
@@ -28,6 +30,116 @@
   var lastViewOffsetY = -1;
   var lastViewOffsetW = 0;
   var lastViewOffsetH = 0;
+
+  var ENTRANCE_STYLES = ['right_drive', 'left_drive', 'reverse_park', 'bay_exit'];
+  var preferredEntranceStyle = 'auto';
+  var lastPlayedEntranceStyle = '';
+
+  function normalizeEntranceStyle(raw) {
+    if (typeof raw !== 'string') return 'auto';
+    var trimmed = raw.trim();
+    if (trimmed === 'auto') return 'auto';
+    for (var i = 0; i < ENTRANCE_STYLES.length; i++) {
+      if (ENTRANCE_STYLES[i] === trimmed) return trimmed;
+    }
+    return 'auto';
+  }
+
+  function resolveEntranceStyle(styleOverride) {
+    var hasOverride = typeof styleOverride === 'string' && styleOverride.trim().length > 0;
+    var requested = hasOverride ? normalizeEntranceStyle(styleOverride) : preferredEntranceStyle;
+    if (requested !== 'auto') {
+      lastPlayedEntranceStyle = requested;
+      return requested;
+    }
+    var pool = [];
+    for (var i = 0; i < ENTRANCE_STYLES.length; i++) {
+      if (ENTRANCE_STYLES[i] !== lastPlayedEntranceStyle) {
+        pool.push(ENTRANCE_STYLES[i]);
+      }
+    }
+    if (pool.length === 0) pool = ENTRANCE_STYLES;
+    var chosen = pool[Math.floor(Math.random() * pool.length)];
+    lastPlayedEntranceStyle = chosen;
+    return chosen;
+  }
+
+  /**
+   * Minimalist dark-studio architectural parking bay (Y = 0.004) with subtle cool-white
+   * border hairlines, 4 corner L-brackets, and rear wheel stop bar.
+   */
+  function createParkingBay(modelSize) {
+    var sx = (modelSize && modelSize.x > 0.5) ? modelSize.x : 1.92;
+    var sz = (modelSize && modelSize.z > 0.5) ? modelSize.z : 4.78;
+    var halfW = clamp(sx * 0.66, 1.24, 1.48);
+    var halfL = clamp(sz * 0.56, 2.58, 2.86);
+
+    var group = new THREE.Group();
+    group.name = 'studio_parking_bay';
+    group.position.set(0, 0.004, 0);
+    group.visible = false;
+
+    var lineMat = new THREE.MeshBasicMaterial({
+      color: 0xcbd5e1,
+      transparent: true,
+      opacity: 0.0,
+      depthWrite: false
+    });
+    var cornerMat = new THREE.MeshBasicMaterial({
+      color: 0xe2e8f0,
+      transparent: true,
+      opacity: 0.0,
+      depthWrite: false
+    });
+    var stopMat = new THREE.MeshBasicMaterial({
+      color: 0x94a3b8,
+      transparent: true,
+      opacity: 0.0,
+      depthWrite: false
+    });
+
+    function addStrip(w, l, x, z, mat) {
+      var mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, l), mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(x, 0, z);
+      group.add(mesh);
+    }
+
+    var tLine = 0.036;
+    var tCorner = 0.048;
+    var cLen = 0.44;
+
+    // Left, right, and rear architectural border hairlines
+    addStrip(tLine, halfL * 2, -halfW, 0, lineMat);
+    addStrip(tLine, halfL * 2, halfW, 0, lineMat);
+    addStrip(halfW * 2 + tLine, tLine, 0, -halfL, lineMat);
+
+    // 4 subtle L-bracket corner accents
+    for (var sxSign = -1; sxSign <= 1; sxSign += 2) {
+      for (var szSign = -1; szSign <= 1; szSign += 2) {
+        addStrip(cLen, tCorner, sxSign * (halfW - cLen * 0.5), szSign * halfL, cornerMat);
+        addStrip(tCorner, cLen, sxSign * halfW, szSign * (halfL - cLen * 0.5), cornerMat);
+      }
+    }
+
+    // Minimalist rear wheel-stop bar
+    addStrip(halfW * 1.18, 0.095, 0, -halfL + 0.52, stopMat);
+
+    return {
+      group: group,
+      setPose: function (x, z, yaw) {
+        group.position.set(x, 0.004, z);
+        group.rotation.set(0, yaw, 0);
+      },
+      setAlpha: function (a) {
+        var c = clamp(a, 0, 1);
+        group.visible = c > 0.003;
+        lineMat.opacity = c * 0.26;
+        cornerMat.opacity = c * 0.48;
+        stopMat.opacity = c * 0.30;
+      }
+    };
+  }
 
   // Damped spring-mass chassis suspension state (body moves independently over grounded wheels)
   var suspension = {
@@ -60,28 +172,27 @@
     suspension.heave += suspension.heaveVel * dt;
   }
 
-  // Physically grounded curved drive-in parking animation:
-  // Vehicle rolls in from screen-right along a smooth sweeping arc, wheels spin by real arc length,
-  // front wheels steer into the curve then straighten, brake lights glow while decelerating,
-  // and damped spring suspension settles smoothly on stop.
+  // Multi-style physically grounded entrance choreographer:
+  // Supports 'right_drive', 'left_drive', 'reverse_park', and 'bay_exit' with multi-segment
+  // Bezier paths, brake-hold pauses, forward/reverse wheel rolling, Ackermann front steering,
+  // DRL/brake/reverse lighting, damped spring suspension, and minimalist ground parking bay.
   var entrance = {
     active: false,
+    style: 'right_drive',
     elapsed: 0,
-    duration: 1.72,
-    settleHold: 0.28,
-    p0: null,
-    p1: null,
-    p2: null,
-    p3: null,
+    totalDuration: 2.0,
+    segments: [],
+    bayPose: null, // { x, z, yaw, fadeOutStart, fadeOutEnd } or null
     prevX: 0,
     prevZ: 0,
     prevSpeed: 0,
-    prevYaw: 0,
+    prevSegIdx: -1,
     wheelSpin: 0,
     steerAngle: 0,
     headGlow: 0,
     brakeGlow: 0,
-    stopPulseFired: false
+    reverseGlow: 0,
+    bayAlpha: 0
   };
 
   function evalCubicBezier(p0, p1, p2, p3, u) {
@@ -110,8 +221,256 @@
     };
   }
 
-  function startEntranceAnimation() {
+  function evalEaseProfile(profile, t) {
+    var x = clamp(t, 0, 1);
+    if (profile === 'decel') {
+      // Brisk entry -> progressive automotive braking stop
+      return 1.0 - Math.pow(1.0 - x, 2.75);
+    }
+    if (profile === 'start_stop') {
+      // Smooth accelerate from standstill -> cruise -> progressive brake stop
+      var s = x * x * (3.0 - 2.0 * x);
+      return 1.0 - Math.pow(1.0 - s, 1.35);
+    }
+    return x * x * (3.0 - 2.0 * x);
+  }
+
+  function buildEntranceChoreography(styleKey) {
+    // Screen-right unit vector in world XZ plane for DEFAULT_THETA camera
+    var rx = Math.cos(DEFAULT_THETA);
+    var rz = -Math.sin(DEFAULT_THETA);
+
+    if (styleKey === 'left_drive') {
+      return {
+        bayPose: null,
+        segments: [
+          {
+            type: 'drive',
+            dir: 1,
+            duration: 1.74,
+            ease: 'decel',
+            p0: { x: -8.8, z: -2.4 },
+            p1: { x: -3.9, z: -2.8 },
+            p2: { x: 0.0, z: -2.55 },
+            p3: { x: 0.0, z: 0.0 },
+            straightFadeStart: 0.76,
+            headStart: 0.65,
+            headEnd: 0.36,
+            brakeStartT: 0.18,
+            brakePeakT: 0.45,
+            stopImpulse: [-0.085, 0.0, 0.012],
+            stopFired: false
+          },
+          {
+            type: 'hold',
+            duration: 0.28,
+            x: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            steerTarget: 0.0,
+            brakeStart: 0.82,
+            brakeEnd: 0.0,
+            headStart: 0.36,
+            headEnd: 0.0,
+            reverseStart: 0.0,
+            reverseEnd: 0.0
+          }
+        ]
+      };
+    }
+
+    if (styleKey === 'reverse_park') {
+      // Pull past the showcase bay from screen-right, brake to standstill, shift into R,
+      // and reverse along a strictly convex C1-continuous J-curve into the ground bay at (0, 0, 0) facing +Z.
+      var stopX = -1.45;
+      var stopZ = 2.45;
+      var stopYaw = -0.78;
+      var sinY = Math.sin(stopYaw);
+      var cosY = Math.cos(stopYaw);
+      var revAlpha = -stopX / (-sinY); // intersection with x = 0 at Q = (0, +0.985)
+      var fwdP2 = { x: stopX - sinY * 1.10, z: stopZ - cosY * 1.10 };
+      var revP1 = { x: stopX - sinY * (0.62 * revAlpha), z: stopZ - cosY * (0.62 * revAlpha) };
+      return {
+        bayPose: { x: 0.0, z: 0.0, yaw: 0.0, fadeInEnd: 0.45, fadeOutStart: 2.86, fadeOutEnd: 3.30 },
+        segments: [
+          {
+            type: 'drive',
+            dir: 1,
+            duration: 0.96,
+            ease: 'decel',
+            p0: { x: 4.8, z: -2.0 },
+            p1: { x: 1.4, z: 0.40 },
+            p2: fwdP2,
+            p3: { x: stopX, z: stopZ },
+            straightFadeStart: 0.96,
+            headStart: 0.62,
+            headEnd: 0.48,
+            brakeStartT: 0.48,
+            brakePeakT: 0.85,
+            stopImpulse: [-0.055, 0.0, 0.008],
+            stopFired: false
+          },
+          {
+            type: 'hold',
+            duration: 0.30,
+            x: stopX,
+            z: stopZ,
+            yaw: stopYaw,
+            steerTarget: -0.24,
+            brakeStart: 0.88,
+            brakeEnd: 0.25,
+            headStart: 0.48,
+            headEnd: 0.44,
+            reverseStart: 0.0,
+            reverseEnd: 1.0,
+            reverseSwitchT: 0.42
+          },
+          {
+            type: 'drive',
+            dir: -1,
+            duration: 1.56,
+            ease: 'start_stop',
+            p0: { x: stopX, z: stopZ },
+            p1: revP1,
+            p2: { x: 0.0, z: 0.68 },
+            p3: { x: 0.0, z: 0.0 },
+            straightFadeStart: 0.78,
+            headStart: 0.44,
+            headEnd: 0.34,
+            brakeStartT: 0.68,
+            brakePeakT: 0.92,
+            reverseActive: true,
+            stopImpulse: [0.068, 0.0, 0.010],
+            stopFired: false
+          },
+          {
+            type: 'hold',
+            duration: 0.48,
+            x: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            steerTarget: 0.0,
+            brakeStart: 0.80,
+            brakeEnd: 0.0,
+            headStart: 0.34,
+            headEnd: 0.0,
+            reverseStart: 0.65,
+            reverseEnd: 0.0,
+            reverseReleaseT: 0.35
+          }
+        ]
+      };
+    }
+
+    if (styleKey === 'bay_exit') {
+      // Start parked inside an offset studio bay behind center, wake up DRLs with ignition ripple,
+      // pull smoothly out along a strictly convex C1-continuous forward arc into showcase pose (0, 0, 0) facing +Z.
+      var bayX = -1.35;
+      var bayZ = -2.60;
+      var bayYaw = 0.68;
+      var exitAlpha = -bayX / Math.sin(bayYaw); // intersection with x = 0 at Q = (0, -0.93)
+      var exitP1 = {
+        x: bayX + Math.sin(bayYaw) * (0.62 * exitAlpha),
+        z: bayZ + Math.cos(bayYaw) * (0.62 * exitAlpha)
+      };
+      return {
+        bayPose: { x: bayX, z: bayZ, yaw: bayYaw, fadeInEnd: 0.24, fadeOutStart: 1.60, fadeOutEnd: 2.18 },
+        segments: [
+          {
+            type: 'hold',
+            duration: 0.34,
+            x: bayX,
+            z: bayZ,
+            yaw: bayYaw,
+            steerTarget: 0.0,
+            brakeStart: 0.35,
+            brakeEnd: 0.0,
+            headStart: 0.0,
+            headEnd: 0.92,
+            reverseStart: 0.0,
+            reverseEnd: 0.0,
+            wakeImpulse: [-0.025, 0.032, 0.014],
+            wakeImpulseFired: false
+          },
+          {
+            type: 'drive',
+            dir: 1,
+            duration: 1.52,
+            ease: 'start_stop',
+            p0: { x: bayX, z: bayZ },
+            p1: exitP1,
+            p2: { x: 0.0, z: -0.64 },
+            p3: { x: 0.0, z: 0.0 },
+            straightFadeStart: 0.76,
+            headStart: 0.92,
+            headEnd: 0.42,
+            brakeStartT: 0.64,
+            brakePeakT: 0.90,
+            stopImpulse: [-0.080, 0.0, 0.011],
+            stopFired: false
+          },
+          {
+            type: 'hold',
+            duration: 0.32,
+            x: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            steerTarget: 0.0,
+            brakeStart: 0.80,
+            brakeEnd: 0.0,
+            headStart: 0.42,
+            headEnd: 0.0,
+            reverseStart: 0.0,
+            reverseEnd: 0.0
+          }
+        ]
+      };
+    }
+
+    // Default: 'right_drive' — classic right curved showroom drive-in
+    return {
+      bayPose: null,
+      segments: [
+        {
+          type: 'drive',
+          dir: 1,
+          duration: 1.72,
+          ease: 'decel',
+          p0: { x: rx * 7.8, z: rz * 7.8 - 1.2 },
+          p1: { x: rx * 3.8, z: rz * 3.8 - 1.8 },
+          p2: { x: 0.0, z: -2.45 },
+          p3: { x: 0.0, z: 0.0 },
+          straightFadeStart: 0.76,
+          headStart: 0.65,
+          headEnd: 0.36,
+          brakeStartT: 0.18,
+          brakePeakT: 0.45,
+          stopImpulse: [-0.085, 0.0, 0.012],
+          stopFired: false
+        },
+        {
+          type: 'hold',
+          duration: 0.28,
+          x: 0.0,
+          z: 0.0,
+          yaw: 0.0,
+          steerTarget: 0.0,
+          brakeStart: 0.82,
+          brakeEnd: 0.0,
+          headStart: 0.36,
+          headEnd: 0.0,
+          reverseStart: 0.0,
+          reverseEnd: 0.0
+        }
+      ]
+    };
+  }
+
+  function startEntranceAnimation(styleOverride) {
     if (!currentContainer || hasCustomDemoAngle) return;
+    var chosenStyle = resolveEntranceStyle(styleOverride);
+    var choreo = buildEntranceChoreography(chosenStyle);
+
     orbit.deckProgress = 0;
     orbit.topDownLocked = false;
     orbit.dragging = false;
@@ -123,47 +482,77 @@
     orbit.targetPhi = DEFAULT_PHI;
     updateCameraPosition();
 
-    // Screen-right unit vector in world XZ plane for DEFAULT_THETA camera
-    var rx = Math.cos(DEFAULT_THETA);
-    var rz = -Math.sin(DEFAULT_THETA);
-
-    // Curved showroom drive-in path:
-    // Starts off-screen right-rear, enters heading left-forward, then smoothly sweeps into
-    // final parked heading (0, 0, +Z) at origin (0, 0) with exact tangent alignment!
-    entrance.p0 = { x: rx * 7.8, z: rz * 7.8 - 1.2 };
-    entrance.p1 = { x: rx * 3.8, z: rz * 3.8 - 1.8 };
-    entrance.p2 = { x: 0.0, z: -2.45 };
-    entrance.p3 = { x: 0.0, z: 0.0 };
+    var totalDur = 0;
+    for (var s = 0; s < choreo.segments.length; s++) {
+      totalDur += choreo.segments[s].duration;
+    }
 
     entrance.active = true;
+    entrance.style = chosenStyle;
     entrance.elapsed = 0;
+    entrance.totalDuration = totalDur;
+    entrance.segments = choreo.segments;
+    entrance.bayPose = choreo.bayPose;
+    entrance.prevSegIdx = -1;
     entrance.wheelSpin = 0;
     entrance.steerAngle = 0;
-    entrance.headGlow = 0.65;
-    entrance.brakeGlow = 0.0;
-    entrance.stopPulseFired = false;
+    entrance.headGlow = 0;
+    entrance.brakeGlow = 0;
+    entrance.reverseGlow = 0;
+    entrance.bayAlpha = 0;
 
-    var d0 = evalCubicBezierDeriv(entrance.p0, entrance.p1, entrance.p2, entrance.p3, 0.0);
-    var initYaw = Math.atan2(d0.x, d0.z);
-    entrance.prevX = entrance.p0.x;
-    entrance.prevZ = entrance.p0.z;
+    if (parkingBay) {
+      if (choreo.bayPose) {
+        parkingBay.setPose(choreo.bayPose.x, choreo.bayPose.z, choreo.bayPose.yaw);
+        parkingBay.setAlpha(0);
+      } else {
+        parkingBay.setAlpha(0);
+      }
+    }
+
+    var firstSeg = choreo.segments[0];
+    var initX = 0, initZ = 0, initYaw = 0;
+    if (firstSeg.type === 'hold') {
+      initX = firstSeg.x;
+      initZ = firstSeg.z;
+      initYaw = firstSeg.yaw;
+      entrance.headGlow = firstSeg.headStart || 0;
+      entrance.brakeGlow = firstSeg.brakeStart || 0;
+    } else {
+      initX = firstSeg.p0.x;
+      initZ = firstSeg.p0.z;
+      var d0 = evalCubicBezierDeriv(firstSeg.p0, firstSeg.p1, firstSeg.p2, firstSeg.p3, 0.0);
+      initYaw = firstSeg.dir < 0 ? Math.atan2(-d0.x, -d0.z) : Math.atan2(d0.x, d0.z);
+      entrance.headGlow = firstSeg.headStart || 0.65;
+    }
+
+    entrance.prevX = initX;
+    entrance.prevZ = initZ;
     entrance.prevSpeed = 0;
-    entrance.prevYaw = initYaw;
 
     suspension.pitch = 0; suspension.pitchVel = 0;
     suspension.roll = 0; suspension.rollVel = 0;
     suspension.heave = 0; suspension.heaveVel = 0;
 
-    currentContainer.position.set(entrance.p0.x, 0, entrance.p0.z);
+    currentContainer.position.set(initX, 0, initZ);
     currentContainer.rotation.set(0, initYaw, 0);
+    if (currentRig) {
+      currentRig.setSteering(0);
+    }
   }
 
   function finishEntranceImmediately() {
-    if (!entrance.active) return;
+    if (!entrance.active && entrance.bayAlpha <= 0.001 && entrance.reverseGlow <= 0.001) return;
     entrance.active = false;
     entrance.headGlow = 0;
     entrance.brakeGlow = 0;
+    entrance.reverseGlow = 0;
+    entrance.bayAlpha = 0;
     entrance.steerAngle = 0;
+    entrance.bayPose = null;
+    if (parkingBay) {
+      parkingBay.setAlpha(0);
+    }
     if (currentContainer) {
       currentContainer.position.set(0, 0, 0);
       currentContainer.rotation.set(0, 0, 0);
@@ -725,6 +1114,7 @@
 
     var headBarSprites = [];
     var tailBarSprites = [];
+    var reverseBarSprites = [];
 
     for (var side = -1; side <= 1; side += 2) {
       var hb = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -752,6 +1142,20 @@
       tb.scale.set(0.34, 0.075, 1);
       chassisRoot.add(tb);
       tailBarSprites.push(tb);
+
+      // Subtle cool-white rear reverse-light lens glow (illuminates during reverse_park)
+      var rb = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: headBarTex,
+        color: 0xf5faff,
+        transparent: true,
+        opacity: 0.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      }));
+      rb.position.set(side * tailPos[0] * 0.66, tailPos[1] - 0.045, tailPos[2] - 0.015);
+      rb.scale.set(0.24, 0.062, 1);
+      chassisRoot.add(rb);
+      reverseBarSprites.push(rb);
     }
 
     // 3D climate airflow ribbons (dynamically tinted by target cabin temperature)
@@ -1023,6 +1427,10 @@
         for (var tbIdx = 0; tbIdx < tailBarSprites.length; tbIdx++) {
           tailBarSprites[tbIdx].material.opacity = clamp(tailBarOp, 0, 0.85);
         }
+        var revBarOp = clamp(entrance.reverseGlow * 0.88, 0, 0.92);
+        for (var rbIdx = 0; rbIdx < reverseBarSprites.length; rbIdx++) {
+          reverseBarSprites[rbIdx].material.opacity = revBarOp;
+        }
 
         // Expanding 3D acoustic horn wave rings
         if (anim.hornActive) {
@@ -1143,6 +1551,12 @@
       currentChassis = null;
       currentEffects = null;
       currentRig = null;
+      currentModelSize = null;
+    }
+    if (parkingBay) {
+      scene.remove(parkingBay.group);
+      disposeObject3D(parkingBay.group);
+      parkingBay = null;
     }
 
     var container = new THREE.Group();
@@ -1253,6 +1667,14 @@
         );
 
         chassisGroup.add(model);
+        currentModelSize = size.clone();
+        if (parkingBay) {
+          scene.remove(parkingBay.group);
+          disposeObject3D(parkingBay.group);
+        }
+        parkingBay = createParkingBay(currentModelSize);
+        scene.add(parkingBay.group);
+
         currentRig = setupVehicleRig(container, chassisGroup, model, cfg);
         currentEffects = createInteractiveOverlays(chassisGroup, model, currentRig, cfg, size);
         resize();
@@ -1624,87 +2046,152 @@
     var targetRoll = 0.0;
     var targetHeave = 0.0;
 
-    // Physically realistic curved drive-in parking motion
-    if (entrance.active && currentContainer) {
+    // Physically grounded multi-segment entrance choreography
+    if (entrance.active && currentContainer && entrance.segments.length > 0) {
       entrance.elapsed += dt;
-      var rawT = clamp(entrance.elapsed / entrance.duration, 0, 1);
-      // Smooth automotive braking velocity profile: brisk entry -> progressive brake stop
-      var u = 1.0 - Math.pow(1.0 - rawT, 2.75);
 
-      var pos = evalCubicBezier(entrance.p0, entrance.p1, entrance.p2, entrance.p3, u);
-      var d1 = evalCubicBezierDeriv(entrance.p0, entrance.p1, entrance.p2, entrance.p3, u);
-      var d2 = evalCubicBezierSecondDeriv(entrance.p0, entrance.p1, entrance.p2, entrance.p3, u);
-
-      var dx = pos.x - entrance.prevX;
-      var dz = pos.z - entrance.prevZ;
-      var ds = Math.sqrt(dx * dx + dz * dz);
-      var speed = dt > 0.0001 ? ds / dt : 0;
-      var accel = dt > 0.0001 ? (speed - entrance.prevSpeed) / dt : 0;
-      entrance.prevX = pos.x;
-      entrance.prevZ = pos.z;
-      entrance.prevSpeed = speed;
-
-      var yaw = Math.atan2(d1.x, d1.z);
-      currentContainer.position.set(pos.x, 0, pos.z);
-      currentContainer.rotation.set(0, yaw, 0);
-
-      // True wheel rolling rotation from exact ground arc distance (positive X rolls forward toward +Z)
-      var wheelR = currentRig ? currentRig.wheelRadius : DEFAULT_WHEEL_R;
-      entrance.wheelSpin += ds / Math.max(0.18, wheelR);
-      if (currentRig) {
-        currentRig.setWheelRoll(entrance.wheelSpin);
+      // Update minimalist ground parking bay fade envelope if active for this style
+      if (parkingBay) {
+        if (entrance.bayPose) {
+          var bp = entrance.bayPose;
+          var inAlpha = bp.fadeInEnd > 0 ? smoothstep(0, bp.fadeInEnd, entrance.elapsed) : 1.0;
+          var outAlpha = 1.0 - smoothstep(bp.fadeOutStart, bp.fadeOutEnd, entrance.elapsed);
+          entrance.bayAlpha = inAlpha * outAlpha;
+          parkingBay.setAlpha(entrance.bayAlpha);
+        } else {
+          entrance.bayAlpha = 0;
+          parkingBay.setAlpha(0);
+        }
       }
 
-      // Signed path curvature kappa = (d1.z * d2.x - d1.x * d2.z) / |d1|^3
-      var speedParamSq = d1.x * d1.x + d1.z * d1.z;
-      var kappa = speedParamSq > 0.0001
-        ? (d1.z * d2.x - d1.x * d2.z) / Math.pow(speedParamSq, 1.5)
-        : 0;
-
-      // Bicycle-model front-wheel steering angle, gently straightening to 0° as car parks
-      var straightFade = 1.0 - smoothstep(0.76, 0.99, rawT);
-      var desiredSteer = Math.atan(WHEELBASE_M * kappa) * straightFade;
-      entrance.steerAngle = lerp(entrance.steerAngle, desiredSteer, 1.0 - Math.exp(-dt * 12.0));
-      if (currentRig) {
-        currentRig.setSteering(entrance.steerAngle);
-      }
-
-      // Suspension brake dive (positive pitch tilts nose down toward +Z) & lateral body roll
-      if (rawT < 1.0) {
-        var brakeFactor = clamp(-accel * 0.0036, 0.0, 0.024);
-        var lateralAccel = speed * speed * kappa;
-        targetPitch = brakeFactor;
-        targetRoll = clamp(-lateralAccel * 0.0042, -0.022, 0.022);
-        targetHeave = -brakeFactor * 0.45;
-      } else if (!entrance.stopPulseFired) {
-        // Luxurious damped spring rebound the instant wheels lock to a halt
-        entrance.stopPulseFired = true;
-        impulseSuspension(-0.085, 0.0, 0.012);
-      }
-
-      // Brake lights glow red while actively decelerating, then release ~220ms after stop
-      if (rawT < 0.96) {
-        var brakingStrength = smoothstep(0.18, 0.45, rawT) * (1.0 - smoothstep(0.92, 1.0, rawT) * 0.15);
-        entrance.brakeGlow = lerp(entrance.brakeGlow, brakingStrength, 1.0 - Math.exp(-dt * 14.0));
+      if (entrance.elapsed >= entrance.totalDuration) {
+        finishEntranceImmediately();
       } else {
-        var releaseT = clamp((entrance.elapsed - entrance.duration) / entrance.settleHold, 0, 1);
-        entrance.brakeGlow = (1.0 - releaseT) * 0.82;
-      }
+        // Locate active segment and local normalized time
+        var accTime = 0;
+        var segIdx = entrance.segments.length - 1;
+        var segLocalT = 1.0;
+        for (var si = 0; si < entrance.segments.length; si++) {
+          var sDur = entrance.segments[si].duration;
+          if (entrance.elapsed < accTime + sDur || si === entrance.segments.length - 1) {
+            segIdx = si;
+            segLocalT = clamp((entrance.elapsed - accTime) / Math.max(0.001, sDur), 0, 1);
+            break;
+          }
+          accTime += sDur;
+        }
 
-      // Crisp DRLs softly fade back to idle after parking
-      entrance.headGlow = rawT < 0.85
-        ? 0.65 * (1.0 - rawT * 0.45)
-        : 0.36 * (1.0 - clamp((entrance.elapsed - entrance.duration * 0.85) / (entrance.duration * 0.15 + entrance.settleHold), 0, 1));
+        // Fire stop impulse for any drive segment that just finished on a segment boundary
+        if (entrance.prevSegIdx >= 0 && entrance.prevSegIdx < segIdx) {
+          for (var doneIdx = entrance.prevSegIdx; doneIdx < segIdx; doneIdx++) {
+            var doneSeg = entrance.segments[doneIdx];
+            if (doneSeg && doneSeg.type === 'drive' && doneSeg.stopImpulse && !doneSeg.stopFired) {
+              doneSeg.stopFired = true;
+              impulseSuspension(doneSeg.stopImpulse[0], doneSeg.stopImpulse[1], doneSeg.stopImpulse[2]);
+            }
+          }
+        }
+        var segChanged = segIdx !== entrance.prevSegIdx;
+        entrance.prevSegIdx = segIdx;
 
-      if (entrance.elapsed >= entrance.duration + entrance.settleHold) {
-        entrance.active = false;
-        entrance.headGlow = 0;
-        entrance.brakeGlow = 0;
-        entrance.steerAngle = 0;
-        currentContainer.position.set(0, 0, 0);
-        currentContainer.rotation.set(0, 0, 0);
-        if (currentRig) {
-          currentRig.setSteering(0);
+        var seg = entrance.segments[segIdx];
+        if (seg.type === 'hold') {
+          currentContainer.position.set(seg.x, 0, seg.z);
+          currentContainer.rotation.set(0, seg.yaw, 0);
+          entrance.prevX = seg.x;
+          entrance.prevZ = seg.z;
+          entrance.prevSpeed = 0;
+
+          if (seg.wakeImpulse && !seg.wakeImpulseFired && segLocalT >= 0.20) {
+            seg.wakeImpulseFired = true;
+            impulseSuspension(seg.wakeImpulse[0], seg.wakeImpulse[1], seg.wakeImpulse[2]);
+          }
+
+          var targetSteerHold = typeof seg.steerTarget === 'number' ? seg.steerTarget : 0;
+          entrance.steerAngle = lerp(entrance.steerAngle, targetSteerHold, 1.0 - Math.exp(-dt * 11.0));
+          if (currentRig) {
+            currentRig.setSteering(entrance.steerAngle);
+          }
+
+          entrance.headGlow = lerp(seg.headStart || 0, seg.headEnd || 0, smoothstep(0, 1, segLocalT));
+          entrance.brakeGlow = lerp(seg.brakeStart || 0, seg.brakeEnd || 0, smoothstep(0, 1, segLocalT));
+
+          if (typeof seg.reverseSwitchT === 'number') {
+            var revP = smoothstep(seg.reverseSwitchT, 1.0, segLocalT);
+            entrance.reverseGlow = lerp(seg.reverseStart || 0, seg.reverseEnd || 0, revP);
+          } else if (typeof seg.reverseReleaseT === 'number') {
+            var relP = smoothstep(0.0, seg.reverseReleaseT, segLocalT);
+            entrance.reverseGlow = lerp(seg.reverseStart || 0, seg.reverseEnd || 0, relP);
+          } else {
+            entrance.reverseGlow = lerp(seg.reverseStart || 0, seg.reverseEnd || 0, segLocalT);
+          }
+        } else {
+          var u = evalEaseProfile(seg.ease, segLocalT);
+          var pos = evalCubicBezier(seg.p0, seg.p1, seg.p2, seg.p3, u);
+          var d1 = evalCubicBezierDeriv(seg.p0, seg.p1, seg.p2, seg.p3, u);
+          var d2 = evalCubicBezierSecondDeriv(seg.p0, seg.p1, seg.p2, seg.p3, u);
+
+          if (segChanged) {
+            entrance.prevX = seg.p0.x;
+            entrance.prevZ = seg.p0.z;
+            entrance.prevSpeed = 0;
+          }
+
+          var dx = pos.x - entrance.prevX;
+          var dz = pos.z - entrance.prevZ;
+          var ds = Math.sqrt(dx * dx + dz * dz);
+          var speed = dt > 0.0001 ? ds / dt : 0;
+          var accel = dt > 0.0001 ? (speed - entrance.prevSpeed) / dt : 0;
+          entrance.prevX = pos.x;
+          entrance.prevZ = pos.z;
+          entrance.prevSpeed = speed;
+
+          var dir = seg.dir < 0 ? -1 : 1;
+          var yaw = dir < 0 ? Math.atan2(-d1.x, -d1.z) : Math.atan2(d1.x, d1.z);
+          currentContainer.position.set(pos.x, 0, pos.z);
+          currentContainer.rotation.set(0, yaw, 0);
+
+          // Exact ground-arc wheel rolling (+dir rolls forward, -dir rolls cleanly backward)
+          var wheelR = currentRig ? currentRig.wheelRadius : DEFAULT_WHEEL_R;
+          entrance.wheelSpin += dir * (ds / Math.max(0.18, wheelR));
+          if (currentRig) {
+            currentRig.setWheelRoll(entrance.wheelSpin);
+          }
+
+          // Signed path curvature kappa = d(yaw)/ds; Ackermann front steering = atan(dir * L * kappa)
+          var speedParamSq = d1.x * d1.x + d1.z * d1.z;
+          var kappa = speedParamSq > 0.0001
+            ? (d1.z * d2.x - d1.x * d2.z) / Math.pow(speedParamSq, 1.5)
+            : 0;
+
+          var fadeStart = typeof seg.straightFadeStart === 'number' ? seg.straightFadeStart : 0.76;
+          var straightFade = fadeStart < 0.95 ? (1.0 - smoothstep(fadeStart, 0.99, segLocalT)) : 1.0;
+          var desiredSteer = Math.atan(dir * WHEELBASE_M * kappa) * straightFade;
+          entrance.steerAngle = lerp(entrance.steerAngle, desiredSteer, 1.0 - Math.exp(-dt * 12.0));
+          if (currentRig) {
+            currentRig.setSteering(entrance.steerAngle);
+          }
+
+          // Physically accurate longitudinal pitch (dive/squat) & lateral roll for both forward & reverse
+          var longAccel = dir * accel;
+          var latAccel = dir * speed * speed * kappa;
+          targetPitch = clamp(-longAccel * 0.0034, -0.022, 0.024);
+          targetRoll = clamp(-latAccel * 0.0042, -0.022, 0.022);
+          targetHeave = -Math.abs(targetPitch) * 0.40;
+
+          if (segLocalT >= 0.97 && seg.stopImpulse && !seg.stopFired) {
+            seg.stopFired = true;
+            impulseSuspension(seg.stopImpulse[0], seg.stopImpulse[1], seg.stopImpulse[2]);
+          }
+
+          // Smooth DRL, brake, and reverse light envelopes
+          entrance.headGlow = lerp(seg.headStart || 0.6, seg.headEnd || 0.35, segLocalT);
+          var brStart = typeof seg.brakeStartT === 'number' ? seg.brakeStartT : 0.45;
+          var brPeak = typeof seg.brakePeakT === 'number' ? seg.brakePeakT : 0.85;
+          var targetBrake = smoothstep(brStart, brPeak, segLocalT) * 0.88;
+          entrance.brakeGlow = lerp(entrance.brakeGlow, targetBrake, 1.0 - Math.exp(-dt * 14.0));
+          var targetRev = seg.reverseActive ? 1.0 : 0.0;
+          entrance.reverseGlow = lerp(entrance.reverseGlow, targetRev, 1.0 - Math.exp(-dt * 16.0));
         }
       }
     }
@@ -1974,10 +2461,16 @@
         animate(lastTime);
       }
     },
-    playEntranceAnimation: function () {
+    setEntranceStyle: function (style) {
+      preferredEntranceStyle = normalizeEntranceStyle(style);
+    },
+    playEntrance: function (styleOverride) {
       if (!hasCustomDemoAngle) {
-        startEntranceAnimation();
+        startEntranceAnimation(styleOverride);
       }
+    },
+    playEntranceAnimation: function (styleOverride) {
+      global.Car3D.playEntrance(styleOverride);
     },
     resize: resize
   };

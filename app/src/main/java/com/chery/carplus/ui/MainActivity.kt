@@ -336,6 +336,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var geocodeJob: Job? = null
     private var pendingResumeBleRunnable: Runnable? = null
     private var pendingShortcutRunnable: Runnable? = null
+    private var pendingEntrancePreviewStyle: String? = null
+    private var pendingEntrancePreviewRunnable: Runnable? = null
     private var liveLocationListener: android.location.LocationListener? = null
     private var liveLocationCancelSignal: android.os.CancellationSignal? = null
     @Volatile
@@ -1091,9 +1093,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
     }
 
+    private fun cancelPendingEntrancePreview() {
+        pendingEntrancePreviewRunnable?.let(mainHandler::removeCallbacks)
+        pendingEntrancePreviewRunnable = null
+    }
+
     override fun onPause() {
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
+        cancelPendingEntrancePreview()
         stopPeriodicHomeRefresh()
         stopForegroundBleRssiPolling()
         stopLiveDeviceLocationUpdates()
@@ -1122,6 +1130,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     override fun onDestroy() {
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
+        cancelPendingEntrancePreview()
+        pendingEntrancePreviewStyle = null
         pendingShortcutRunnable?.let(contentFrame::removeCallbacks)
         pendingShortcutRunnable = null
         smsCountdownJob?.cancel()
@@ -2246,6 +2256,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         settingsScreen?.cancelBackgroundJobs()
         settingsScreen = null
         settingsRootView = null
+        cancelPendingEntrancePreview()
+        pendingEntrancePreviewStyle = null
         deckExpandAnimator?.cancel()
         deckHeightAnimator?.cancel()
         quickDeckTargetHeightPx = 0
@@ -2338,6 +2350,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         carHeroContainerView = carHeroContainer
         carVisual = VehicleVisualView(this).apply {
             modelKey = uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty().ifBlank { "arrizo8" }
+            entranceStyle = uiPrefs.getString(KEY_ENTRANCE_STYLE, DEFAULT_ENTRANCE_STYLE)
+                .orEmpty()
+                .ifBlank { DEFAULT_ENTRANCE_STYLE }
             vehicleLocked = true
             setCollapsedVisibleRatio(collapsedHeroH.toFloat() / expandedStageH.toFloat())
             isClickable = true
@@ -2386,6 +2401,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             isTouchInsideScrollArea = { rx, ry -> isPointInsideView(lowerScroll, rx, ry) },
             canScrollAreaPullDown = { lowerScroll.scrollY == 0 },
             onDragStart = { dir ->
+                cancelPendingEntrancePreview()
                 deckExpandAnimator?.cancel()
                 deckHeightAnimator?.cancel()
                 deckDragStartProgress = deckExpandProgress
@@ -2782,6 +2798,27 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         carVisual?.onHostResume()
         refreshHomeHeaderAndRows()
         resumeHomeForegroundLoops()
+
+        val previewStyle = pendingEntrancePreviewStyle
+        pendingEntrancePreviewStyle = null
+        cancelPendingEntrancePreview()
+        if (previewStyle != null && !quickDeckExpanded && deckExpandProgress <= 0.05f && subpageOverlayStack.isEmpty()) {
+            val task = Runnable {
+                pendingEntrancePreviewRunnable = null
+                if (currentScreen == Screen.HOME &&
+                    !wasBackgrounded &&
+                    !isFinishing &&
+                    !isDestroyed &&
+                    !quickDeckExpanded &&
+                    deckExpandProgress <= 0.05f &&
+                    subpageOverlayStack.isEmpty()
+                ) {
+                    carVisual?.playEntranceAnimation(previewStyle)
+                }
+            }
+            pendingEntrancePreviewRunnable = task
+            mainHandler.postDelayed(task, if (overlay != null) 180L else 0L)
+        }
     }
 
     private fun buildHomeHeader(page: LinearLayout) {
@@ -2931,6 +2968,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun showSettingsScreen() {
         stopStatusAutoHide()
+        cancelPendingEntrancePreview()
+        pendingEntrancePreviewStyle = null
         configureSystemBars(BG_HOME)
         contentFrame.setBackgroundColor(BG_HOME)
         carVisual?.onHostPause()
@@ -2963,7 +3002,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     httpClient.updateUserProfileField(updateType, content, active.accessToken)
                 }.getOrDefault(false)
             },
-            onOpenDebugDiagnostics = { openDebugDiagnosticsScreen() }
+            onOpenDebugDiagnostics = { openDebugDiagnosticsScreen() },
+            onEntranceStyleChanged = { newStyle ->
+                carVisual?.entranceStyle = newStyle
+                pendingEntrancePreviewStyle = newStyle
+            }
         )
         settingsScreen = screen
         currentScreen = Screen.SETTINGS
@@ -3828,6 +3871,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun showMessagesSubpageScreen() {
         stopStatusAutoHide()
+        cancelPendingEntrancePreview()
         stopLiveDeviceLocationUpdates()
         configureSystemBars(BG_HOME)
         contentFrame.setBackgroundColor(BG_HOME)
@@ -3879,6 +3923,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun pushSubpageOverlay(view: View, onDestroy: (() -> Unit)? = null) {
         stopStatusAutoHide()
+        cancelPendingEntrancePreview()
         configureSystemBars(BG_HOME)
         contentFrame.setBackgroundColor(BG_HOME)
         if (currentScreen == Screen.HOME) {
@@ -7138,6 +7183,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun clearActiveSessionAndUiState(preserveOfflineKeys: Boolean = false) {
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
+        cancelPendingEntrancePreview()
+        pendingEntrancePreviewStyle = null
         pendingShortcutRunnable?.let(contentFrame::removeCallbacks)
         pendingShortcutRunnable = null
         pendingShortcutAction = null
@@ -8376,6 +8423,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private const val DEFAULT_QUICK_ACTIONS = "LOCK,CLIMATE,FLASH,TRUNK"
         private const val KEY_REQUIRE_PIN_EVERY_TIME = "require_pin_every_time"
         private const val KEY_LOCATION_PERM_PROMPTED = "location_perm_prompted"
+        private const val KEY_ENTRANCE_STYLE = "car3d_entrance_style"
+        private const val DEFAULT_ENTRANCE_STYLE = "auto"
         private const val MAX_DEVICE_LOCATION_AGE_MS = 15L * 60L * 1000L
 
         private val MOBILE_REGEX = Regex("^1\\d{10}$")

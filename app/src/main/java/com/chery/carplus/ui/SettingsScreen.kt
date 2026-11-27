@@ -78,7 +78,8 @@ class SettingsScreen(
     private val onLogout: () -> Unit,
     private val fetchCloudUserInfo: (suspend () -> CheryUserInfo?)? = null,
     private val updateCloudProfileField: (suspend (updateType: String, content: String) -> Boolean)? = null,
-    private val onOpenDebugDiagnostics: (() -> Unit)? = null
+    private val onOpenDebugDiagnostics: (() -> Unit)? = null,
+    private val onEntranceStyleChanged: ((String) -> Unit)? = null
 ) {
 
     private enum class SubPage {
@@ -96,8 +97,16 @@ class SettingsScreen(
         val region: String
     )
 
+    private data class EntranceStyleOption(
+        val id: String,
+        val title: String,
+        val subtitle: String
+    )
+
     private val accountPrefs: SharedPreferences =
         activity.getSharedPreferences(PREFS_ACCOUNT_PROFILE, Context.MODE_PRIVATE)
+    private val uiPrefs: SharedPreferences =
+        activity.getSharedPreferences(PREFS_CONSUMER_UI, Context.MODE_PRIVATE)
 
     private var currentSubPage: SubPage = SubPage.MAIN
     private var pageHost: FrameLayout? = null
@@ -116,9 +125,11 @@ class SettingsScreen(
 
     // Live UI hooks on MAIN page
     private var mainVehicleTrailingTv: TextView? = null
+    private var mainEntranceStyleValueText: TextView? = null
     private var mainAboutBadgeDot: View? = null
     private var mainAboutValueText: TextView? = null
     private var activeConfirmDialog: Dialog? = null
+    private var entranceStyleSheetDialog: Dialog? = null
     private var activeDropdown: PopupWindow? = null
 
     // Live UI hooks on ABOUT page & Update Bottom Sheet
@@ -495,6 +506,19 @@ class SettingsScreen(
         // 3. Group 2: 通用 (vehicle-scoped trip track toggle lives in 安全性)
         body.addView(AppComponents.createSectionHeader(activity, "通用"))
 
+        // 3D vehicle entrance choreography selector
+        val entranceRow = AppComponents.createListRow(
+            context = activity,
+            icon = AppIconType.SWAP_CAR,
+            title = "出场动画",
+            trailingText = entranceStyleLabel(loadEntranceStyle()),
+            showChevron = true,
+            onClick = { showEntranceStyleSheet() }
+        )
+        mainEntranceStyleValueText = entranceRow.findViewWithTag("row_trailing_text")
+        body.addView(entranceRow, lp())
+        body.addView(AppComponents.createHairline(activity, startInsetDp = 58))
+
         // About Qiri+ unified row with live version + update dot
         val (curName, _) = AppUpdater.getCurrentVersion(activity)
         val dotSize = dp(7)
@@ -540,6 +564,156 @@ class SettingsScreen(
 
         refreshMainUpdateBadge()
         return root
+    }
+
+    // =========================================================================
+    // 3D Entrance Animation Preference Sheet
+    // =========================================================================
+
+    private fun loadEntranceStyle(): String {
+        val raw = uiPrefs.getString(KEY_ENTRANCE_STYLE, DEFAULT_ENTRANCE_STYLE).orEmpty().trim()
+        return if (ENTRANCE_STYLE_OPTIONS.any { it.id == raw }) raw else DEFAULT_ENTRANCE_STYLE
+    }
+
+    private fun saveEntranceStyle(styleId: String) {
+        val normalized = if (ENTRANCE_STYLE_OPTIONS.any { it.id == styleId }) styleId else DEFAULT_ENTRANCE_STYLE
+        uiPrefs.edit().putString(KEY_ENTRANCE_STYLE, normalized).apply()
+    }
+
+    private fun entranceStyleLabel(styleId: String): String =
+        ENTRANCE_STYLE_OPTIONS.firstOrNull { it.id == styleId }?.title ?: "随机轮换"
+
+    private fun showEntranceStyleSheet() {
+        entranceStyleSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
+        entranceStyleSheetDialog = null
+
+        val currentStyle = loadEntranceStyle()
+        var sheetRef: View? = null
+        val dialog = object : Dialog(activity, R.style.Theme_CarPlus_BottomSheetDialog) {
+            override fun dismiss() {
+                val target = sheetRef
+                if (target == null || !isShowing) {
+                    runCatching { super.dismiss() }
+                    return
+                }
+                MotionSpec.dismissSheetAnimated(target, this)
+            }
+        }
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val sheet = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(ThemeTokens.BG_SURFACE)
+                cornerRadii = floatArrayOf(dpF(20f), dpF(20f), dpF(20f), dpF(20f), 0f, 0f, 0f, 0f)
+            }
+            setPadding(dp(20), dp(12), dp(20), dp(22))
+        }
+        sheetRef = sheet
+
+        val handle = View(activity).apply {
+            background = rounded(Color.parseColor("#383C46"), 2.5f)
+        }
+        sheet.addView(
+            handle,
+            LinearLayout.LayoutParams(dp(36), dp(4)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = dp(16)
+            }
+        )
+
+        sheet.addView(text("出场动画", 18f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD), lp())
+        sheet.addView(
+            text("选择进入首页时 3D 车辆的入场方式", 13f, ThemeTokens.TEXT_SUB),
+            lp(top = dp(4), bottom = dp(14))
+        )
+
+        val listCol = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        ENTRANCE_STYLE_OPTIONS.forEachIndexed { idx, opt ->
+            val selected = opt.id == currentStyle
+            val row = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(58)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                background = if (selected) {
+                    rounded(
+                        fillColor = Color.parseColor("#242832"),
+                        radiusDp = 12f,
+                        strokeColor = Color.argb(96, 61, 155, 255),
+                        strokeWidthDp = 0.8f
+                    )
+                } else {
+                    null
+                }
+                isClickable = true
+                isFocusable = true
+            }
+            MotionSpec.attachPressPhysics(row, pressedScale = 0.985f, haptic = false)
+
+            val textCol = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            textCol.addView(
+                text(
+                    opt.title,
+                    15.5f,
+                    if (selected) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_PRIMARY,
+                    if (selected) Typeface.BOLD else Typeface.NORMAL
+                ),
+                lp()
+            )
+            textCol.addView(
+                text(opt.subtitle, 12.5f, ThemeTokens.TEXT_SUB).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                },
+                lp(top = dp(3))
+            )
+            row.addView(textCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+
+            if (selected) {
+                row.addView(
+                    AppIconView(activity, AppIconType.CHECK, ThemeTokens.ACCENT_LIGHT),
+                    LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginStart = dp(12) }
+                )
+            }
+
+            row.setOnClickListener {
+                AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
+                saveEntranceStyle(opt.id)
+                mainEntranceStyleValueText?.text = opt.title
+                onEntranceStyleChanged?.invoke(opt.id)
+                dialog.dismiss()
+            }
+
+            listCol.addView(row, lp(bottom = if (idx < ENTRANCE_STYLE_OPTIONS.lastIndex) dp(4) else 0))
+            if (!selected && idx < ENTRANCE_STYLE_OPTIONS.lastIndex && ENTRANCE_STYLE_OPTIONS[idx + 1].id != currentStyle) {
+                listCol.addView(AppComponents.createHairline(activity, startInsetDp = 14), lp(bottom = dp(4)))
+            }
+        }
+
+        val listScroll = ScrollView(activity).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(listCol, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        sheet.addView(listScroll, lp())
+
+        AppSystemInsets.installBottomSheetContent(dialog, sheet, dimAmount = 0.55f)
+        MotionSpec.attachSheetSwipeToDismiss(sheet, listScroll, dialog)
+        dialog.setOnDismissListener {
+            if (entranceStyleSheetDialog === dialog) {
+                entranceStyleSheetDialog = null
+            }
+        }
+        entranceStyleSheetDialog = dialog
+        dialog.show()
+        MotionSpec.animateSheetEnter(sheet)
     }
 
     // =========================================================================
@@ -1776,6 +1950,8 @@ class SettingsScreen(
     internal fun dismissTransientOverlays() {
         activeConfirmDialog?.dismiss()
         activeConfirmDialog = null
+        entranceStyleSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
+        entranceStyleSheetDialog = null
         updateSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         updateSheetDialog = null
         activeDropdown?.dismiss()
@@ -1785,6 +1961,7 @@ class SettingsScreen(
     private fun clearMainHooks() {
         dismissTransientOverlays()
         mainVehicleTrailingTv = null
+        mainEntranceStyleValueText = null
         mainAboutBadgeDot = null
         mainAboutValueText = null
     }
@@ -1815,6 +1992,16 @@ class SettingsScreen(
         private const val WRAP_CONTENT = ViewGroup.LayoutParams.WRAP_CONTENT
 
         private const val PREFS_ACCOUNT_PROFILE = "carplus_account_profile"
+        private const val PREFS_CONSUMER_UI = "car_plus_consumer_ui"
+        private const val KEY_ENTRANCE_STYLE = "car3d_entrance_style"
+        private const val DEFAULT_ENTRANCE_STYLE = "auto"
+        private val ENTRANCE_STYLE_OPTIONS = listOf(
+            EntranceStyleOption("auto", "随机轮换", "每次进入自动切换，不连续重复"),
+            EntranceStyleOption("right_drive", "右侧驶入", "从右侧弧线驶入展台并平缓停稳"),
+            EntranceStyleOption("left_drive", "左侧驶入", "从左侧弧线驶入展台并平缓停稳"),
+            EntranceStyleOption("reverse_park", "倒车入库", "前方减速挂倒挡，优雅倒车入位"),
+            EntranceStyleOption("bay_exit", "车位驶出", "点亮前灯从车位转向驶出居中展示")
+        )
         private const val KEY_NICKNAME = "nickname"
         private const val KEY_USERNAME = "username"
         private const val KEY_MOBILE = "mobile"

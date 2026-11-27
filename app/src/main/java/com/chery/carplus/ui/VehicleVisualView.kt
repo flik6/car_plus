@@ -145,6 +145,15 @@ class VehicleVisualView @JvmOverloads constructor(
             }
         }
 
+    var entranceStyle: String = "auto"
+        set(value) {
+            val normalized = normalizeEntranceStyle(value)
+            if (field != normalized) {
+                field = normalized
+                pushEntranceStyleToScene()
+            }
+        }
+
     var onDoubleTapListener: (() -> Unit)? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -493,6 +502,7 @@ class VehicleVisualView @JvmOverloads constructor(
                 val safeUrl = JSONObject.quote(ready.cacheUrl)
                 evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
                 evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
+                pushEntranceStyleToScene()
                 evalJs("window.Car3D && window.Car3D.loadModel($safeKey, $safeUrl);")
 
                 // Only check manifest in background when loaded from cache; never re-downloads unless updated
@@ -540,10 +550,22 @@ class VehicleVisualView @JvmOverloads constructor(
         evalJs("window.Car3D && window.Car3D.resetCamera();")
     }
 
-    fun playEntranceAnimation() {
+    fun playEntranceAnimation(styleOverride: String? = null) {
         deckProgress = 0f
         if (isDestroyed || !sceneReady) return
-        evalJs("window.Car3D && window.Car3D.playEntranceAnimation && window.Car3D.playEntranceAnimation();")
+        val normalizedOverride = styleOverride?.trim()?.takeIf { it.isNotEmpty() }?.let { normalizeEntranceStyle(it) }
+        if (normalizedOverride != null) {
+            val safeStyle = JSONObject.quote(normalizedOverride)
+            evalJs(
+                "window.Car3D && (window.Car3D.playEntrance ? window.Car3D.playEntrance($safeStyle) " +
+                    ": (window.Car3D.playEntranceAnimation && window.Car3D.playEntranceAnimation()));"
+            )
+        } else {
+            evalJs(
+                "window.Car3D && (window.Car3D.playEntrance ? window.Car3D.playEntrance() " +
+                    ": (window.Car3D.playEntranceAnimation && window.Car3D.playEntranceAnimation()));"
+            )
+        }
     }
 
     fun setCollapsedVisibleRatio(ratio: Float) {
@@ -605,8 +627,20 @@ class VehicleVisualView @JvmOverloads constructor(
         webView.onPause()
     }
 
+    private fun normalizeEntranceStyle(raw: String): String = when (raw.trim()) {
+        "right_drive", "left_drive", "reverse_park", "bay_exit", "auto" -> raw.trim()
+        else -> "auto"
+    }
+
+    private fun pushEntranceStyleToScene() {
+        if (isDestroyed || !engineReady) return
+        val safeStyle = JSONObject.quote(entranceStyle)
+        evalJs("window.Car3D && window.Car3D.setEntranceStyle && window.Car3D.setEntranceStyle($safeStyle);")
+    }
+
     private fun pushStateToScene() {
         if (isDestroyed || !sceneReady) return
+        pushEntranceStyleToScene()
         val payload = JSONObject().apply {
             put("vehicleLocked", vehicleLocked)
             put("doorsOpen", doorsOpen)
@@ -700,6 +734,7 @@ class VehicleVisualView @JvmOverloads constructor(
                 engineReady = true
                 evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
                 evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
+                pushEntranceStyleToScene()
                 evalJs("window.Car3D && window.Car3D.resize();")
                 requestModelLoad(modelKey, isVehicleSwitch = false)
             }
