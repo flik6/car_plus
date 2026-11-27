@@ -61,6 +61,8 @@ import com.chery.carplus.cloud.VehicleSummary
 import com.chery.carplus.cloud.VehicleTelemetry
 import com.chery.carplus.profile.VehicleProfile
 import com.chery.carplus.profile.VehicleProfileStore
+import com.chery.carplus.widget.CarWidgetManager
+import com.chery.carplus.widget.CarWidgetStateStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -420,11 +422,23 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
         }
 
+        AppSystemInsets.applyEdgeToEdge(window, BG_HOME)
         contentFrame = FrameLayout(this).apply {
-            setBackgroundColor(BG_DARK)
+            setBackgroundColor(BG_HOME)
             clipToPadding = false
         }
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(contentFrame) { v, insets ->
+            val sysBars = insets.getInsets(
+                androidx.core.view.WindowInsetsCompat.Type.systemBars() or
+                    androidx.core.view.WindowInsetsCompat.Type.displayCutout()
+            )
+            val ime = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.ime())
+            val bottomInset = maxOf(sysBars.bottom, ime.bottom)
+            v.setPadding(sysBars.left, sysBars.top, sysBars.right, bottomInset)
+            insets
+        }
         setContentView(contentFrame)
+        androidx.core.view.ViewCompat.requestApplyInsets(contentFrame)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -467,7 +481,39 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         routeInitialScreen()
     }
 
+    private var pendingShortcutAction: String? = null
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val act = intent?.getStringExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION).orEmpty()
+        if (act.isNotBlank()) {
+            pendingShortcutAction = act
+            if (currentScreen == Screen.HOME) {
+                consumePendingShortcutActionIfReady()
+            }
+        }
+    }
+
+    private fun consumePendingShortcutActionIfReady() {
+        val act = pendingShortcutAction ?: return
+        if (currentScreen != Screen.HOME) return
+        pendingShortcutAction = null
+        contentFrame.postDelayed({
+            when (act) {
+                CarWidgetManager.CMD_TOGGLE_LOCK -> triggerQuickAction(QuickActionId.LOCK)
+                CarWidgetManager.CMD_TOGGLE_AC -> triggerQuickAction(QuickActionId.CLIMATE)
+                CarWidgetManager.CMD_FIND_CAR -> triggerQuickAction(QuickActionId.FLASH)
+                CarWidgetManager.CMD_TOGGLE_TRUNK -> triggerQuickAction(QuickActionId.TRUNK)
+                CarWidgetManager.CMD_TOGGLE_ENGINE -> triggerQuickAction(QuickActionId.ENGINE)
+                CarWidgetManager.CMD_REFRESH -> refreshTelemetry(silent = false)
+            }
+        }, 280L)
+    }
+
     private fun routeInitialScreen() {
+        pendingShortcutAction = intent?.getStringExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION)
+            ?.takeIf { it.isNotBlank() }
         val privacyAccepted = uiPrefs.getBoolean(KEY_PRIVACY_ACCEPTED, false)
         if (!privacyAccepted) {
             showPrivacyConsentScreen()
@@ -564,16 +610,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun configureSystemBars(color: Int) {
-        window.statusBarColor = color
-        window.navigationBarColor = color
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = window.decorView.systemUiVisibility and
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = window.decorView.systemUiVisibility and
-                View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
-        }
+        AppSystemInsets.applyEdgeToEdge(window, color)
     }
 
     private fun applySheetDepthRecede(receded: Boolean) {
@@ -3568,6 +3605,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         updateHomeFooter(telemetry)
         updateSecurityRow()
+        CarWidgetManager.syncFromTelemetry(
+            context = this,
+            modelName = modelName,
+            plateNo = plateNo,
+            telemetry = telemetry,
+            cabinTempC = cabinTemp,
+            primaryStatus = primaryMotionState
+        )
+        consumePendingShortcutActionIfReady()
     }
 
     private fun updateHomeFooter(telemetry: VehicleTelemetry?) {
@@ -4763,6 +4809,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun logoutToWelcome() {
         clearActiveSessionAndUiState()
+        CarWidgetStateStore.clear(this)
+        CarWidgetManager.updateAllWidgets(this)
         showWelcomeScreen()
     }
 
@@ -5192,6 +5240,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             setLayout(MATCH_PARENT, WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
         }
+        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog) {
             if (appDialog === dialog) {
                 applySheetDepthRecede(false)

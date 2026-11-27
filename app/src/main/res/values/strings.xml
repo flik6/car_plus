@@ -1,4 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">CarPlus</string>
+
+    <!-- Desktop Widget Labels & Descriptions -->
+    <string name="widget_bar_label">CarPlus · 极简控车条 (4×1)</string>
+    <string name="widget_bar_desc">极简单行暗色控车条，一键锁车、空调、寻车、后备箱</string>
+    <string name="widget_compact_label">CarPlus · 紧凑车况 (2×2)</string>
+    <string name="widget_compact_desc">紧凑方格车况卡片，含车模实景、油量续航与核心控车</string>
+    <string name="widget_medium_label">CarPlus · 经典车控卡 (4×2)</string>
+    <string name="widget_medium_desc">标准宽幅车控卡片，车况一目了然并支持四项一键远控</string>
+    <string name="widget_large_label">CarPlus · 旗舰仪表盘 (4×3)</string>
+    <string name="widget_large_desc">大尺寸展台仪表盘，全景展示油量、温度、里程与五项远控</string>
+
+    <!-- App Icon Long-Press Shortcuts -->
+    <string name="shortcut_lock_short">解/锁车</string>
+    <string name="shortcut_lock_long">车门解锁 / 锁止</string>
+    <string name="shortcut_climate_short">开关空调</string>
+    <string name="shortcut_climate_long">远程开关空调</string>
+    <string name="shortcut_flash_short">闪灯寻车</string>
+    <string name="shortcut_flash_long">闪灯鸣笛寻车</string>
+    <string name="shortcut_trunk_short">后备箱</string>
+    <string name="shortcut_trunk_long">远程开关后备箱</string>
 </resources>

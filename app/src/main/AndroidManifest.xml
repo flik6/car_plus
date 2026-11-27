@@ -33,6 +33,7 @@
 
     <application
         android:allowBackup="false"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -53,12 +54,77 @@
 
         <activity
             android:name="com.chery.carplus.ui.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- Home Screen Widget Action Dispatcher -->
+        <receiver
+            android:name="com.chery.carplus.widget.CarWidgetActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.chery.carplus.widget.ACTION_WIDGET_CMD" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Widget 1: 4×1 Minimalist Control Bar -->
+        <receiver
+            android:name="com.chery.carplus.widget.CarWidgetBarProvider"
+            android:exported="true"
+            android:label="@string/widget_bar_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info_bar" />
+        </receiver>
+
+        <!-- Widget 2: 2×2 Compact Vehicle Card -->
+        <receiver
+            android:name="com.chery.carplus.widget.CarWidgetCompactProvider"
+            android:exported="true"
+            android:label="@string/widget_compact_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info_compact" />
+        </receiver>
+
+        <!-- Widget 3: 4×2 Classic Wide Vehicle Card -->
+        <receiver
+            android:name="com.chery.carplus.widget.CarWidgetMediumProvider"
+            android:exported="true"
+            android:label="@string/widget_medium_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info_medium" />
+        </receiver>
+
+        <!-- Widget 4: 4×3 Flagship Showroom Dashboard -->
+        <receiver
+            android:name="com.chery.carplus.widget.CarWidgetLargeProvider"
+            android:exported="true"
+            android:label="@string/widget_large_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info_large" />
+        </receiver>
     </application>
 
 </manifest>

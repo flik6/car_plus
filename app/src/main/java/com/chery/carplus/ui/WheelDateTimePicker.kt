@@ -811,6 +811,7 @@ object WheelDateTimePicker {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
         }
+        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
         dialog.show()
         MotionSpec.animateSheetEnter(outer)
         return dialog

@@ -2177,6 +2177,7 @@ internal class VehicleFeatureSheets(
             setLayout(MATCH_PARENT, sheetHeight)
             setGravity(Gravity.BOTTOM)
         }
+        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
         MotionSpec.attachSheetSwipeToDismiss(outer, lowerScroll, dialog) {
             dialog.restoreDepthIfNeeded()
         }
@@ -3289,6 +3290,7 @@ internal class VehicleFeatureSheets(
             setLayout(MATCH_PARENT, WRAP_CONTENT)
             setGravity(Gravity.BOTTOM)
         }
+        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog) {
             dialog.restoreDepthIfNeeded()
         }

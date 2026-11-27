@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="shortcut_lock"
+        android:enabled="true"
+        android:icon="@drawable/ic_widget_lock_closed"
+        android:shortcutShortLabel="@string/shortcut_lock_short"
+        android:shortcutLongLabel="@string/shortcut_lock_long">
+        <intent
+            android:action="com.chery.carplus.SHORTCUT_ACTION"
+            android:targetPackage="com.chery.carplus"
+            android:targetClass="com.chery.carplus.ui.MainActivity">
+            <extra android:name="shortcut_action" android:value="toggle_lock" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="shortcut_climate"
+        android:enabled="true"
+        android:icon="@drawable/ic_widget_fan"
+        android:shortcutShortLabel="@string/shortcut_climate_short"
+        android:shortcutLongLabel="@string/shortcut_climate_long">
+        <intent
+            android:action="com.chery.carplus.SHORTCUT_ACTION"
+            android:targetPackage="com.chery.carplus"
+            android:targetClass="com.chery.carplus.ui.MainActivity">
+            <extra android:name="shortcut_action" android:value="toggle_ac" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="shortcut_flash"
+        android:enabled="true"
+        android:icon="@drawable/ic_widget_flash"
+        android:shortcutShortLabel="@string/shortcut_flash_short"
+        android:shortcutLongLabel="@string/shortcut_flash_long">
+        <intent
+            android:action="com.chery.carplus.SHORTCUT_ACTION"
+            android:targetPackage="com.chery.carplus"
+            android:targetClass="com.chery.carplus.ui.MainActivity">
+            <extra android:name="shortcut_action" android:value="find_car" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="shortcut_trunk"
+        android:enabled="true"
+        android:icon="@drawable/ic_widget_trunk"
+        android:shortcutShortLabel="@string/shortcut_trunk_short"
+        android:shortcutLongLabel="@string/shortcut_trunk_long">
+        <intent
+            android:action="com.chery.carplus.SHORTCUT_ACTION"
+            android:targetPackage="com.chery.carplus"
+            android:targetClass="com.chery.carplus.ui.MainActivity">
+            <extra android:name="shortcut_action" android:value="toggle_trunk" />
+        </intent>
+    </shortcut>
+</shortcuts>

@@ -98,7 +98,8 @@
 
 - **结构**：`Home（持久常驻，3D 场景永不销毁重建） -> Level 2 Overlay -> Level 3 Overlay`（如 `首页 -> 安全性和驾驶员 -> 电子围栏地图编辑页`、`首页 -> 设置 -> 个人资料 / 关于 CarPlus`）。
 - **栈管理**：`MainActivity` 维护 `subpageOverlayStack`（有序覆盖层栈），入栈统一执行右滑入场（`+28dp -> 0`，`240ms EASE_OUT_EXPO`），系统返回/点击 `AppTopBar` 返回按钮逐级右滑出栈并执行对应的销毁回调（如释放地图 WebView）。
-- **状态栏一致性**：`themes.xml` 与 `configureSystemBars` 全程锁定 `#161719`，进出任意层级均无顶部色条闪烁或色差接缝。
+- **状态栏与安卓小白条（Edge-to-Edge）一致性**：`themes.xml`（含 `values-v28`/`values-v29`）与 `AppSystemInsets.applyEdgeToEdge()` 全程启用透明状态栏与透明导航栏、挖孔/刘海屏 `shortEdges` 延伸与禁用系统导航栏对比度遮罩，配合 `WindowInsetsCompat` 动态分配顶部状态栏/挖孔安全区与底部手势小白条/输入法安全区；全部底部抽屉同步接入 `AppSystemInsets.applyBottomSheetEdgeToEdge()` 使 `#1C1D21` 面板无缝延伸至小白条后方；启用 Android 13+ 预测性返回（`enableOnBackInvokedCallback="true"`）与桌面长按图标快捷方式（`res/xml/shortcuts.xml`）。
+- **桌面小组件体系（4 种尺寸与样式）**：提供 `4×1 极简控车条`、`2×2 紧凑车况`、`4×2 经典车控卡` 与 `4×3 旗舰仪表盘` 4 款暗色原生桌面小组件（Android 12+ 自动贴合系统桌面圆角），复用实景车模与极简车控矢量图标，支持实时同步车况、一键远控（尊重 6 位安全密码策略）与下拉/点击刷新。
 
 ---
 

@@ -297,13 +297,14 @@ class SettingsScreen(
 
         // About CarPlus unified row with live version + update dot
         val (curName, _) = AppUpdater.getCurrentVersion(activity)
+        val dotSize = dp(7)
         val badgeDot = View(activity).apply {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(ThemeTokens.DANGER)
+                setSize(dotSize, dotSize)
             }
-            minimumWidth = dp(7)
-            minimumHeight = dp(7)
+            layoutParams = LinearLayout.LayoutParams(dotSize, dotSize)
             visibility = View.GONE
         }
         mainAboutBadgeDot = badgeDot
@@ -913,6 +914,7 @@ class SettingsScreen(
             setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
             setDimAmount(0.55f)
         }
+        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, sheet)
         MotionSpec.attachSheetSwipeToDismiss(sheet, null, dialog)
         dialog.setOnDismissListener {
             if (updateSheetDialog === dialog) {

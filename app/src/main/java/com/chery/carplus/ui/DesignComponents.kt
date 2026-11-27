@@ -11,6 +11,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.text.InputFilter
 import android.text.InputType
 import android.text.TextUtils
@@ -26,9 +27,81 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.util.Calendar
 import java.util.Locale
+import kotlin.math.max
 import kotlin.math.roundToInt
+
+/**
+ * Modern Android Edge-to-Edge & System Insets utility (gesture navigation pill "小白条",
+ * display cutouts, IME keyboard lift, and immersive dark bottom sheets).
+ */
+object AppSystemInsets {
+
+    fun applyEdgeToEdge(window: Window, backgroundColor: Int = ThemeTokens.BG_CANVAS) {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        window.decorView.setBackgroundColor(backgroundColor)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val attrs = window.attributes
+            attrs.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = attrs
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
+        }
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+    }
+
+    fun applyBottomSheetEdgeToEdge(dialog: Dialog, sheetView: View) {
+        val window = dialog.window ?: return
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val attrs = window.attributes
+            attrs.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = attrs
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
+        val baseLeft = sheetView.paddingLeft
+        val baseTop = sheetView.paddingTop
+        val baseRight = sheetView.paddingRight
+        val baseBottom = sheetView.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(sheetView) { v, insets ->
+            val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val extraBottom = max(sysBars.bottom, ime.bottom)
+            v.setPadding(
+                baseLeft + sysBars.left,
+                baseTop,
+                baseRight + sysBars.right,
+                baseBottom + extraBottom
+            )
+            insets
+        }
+        sheetView.post { ViewCompat.requestApplyInsets(sheetView) }
+    }
+}
 
 /**
  * Unified CarPlus minimalist dark-mode design tokens (per DESIGN_SYSTEM.md v2.2).
@@ -623,12 +696,12 @@ object AppComponents {
         }
 
         if (trailingView != null) {
+            val existingLp = trailingView.layoutParams
+            val targetW = existingLp?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
+            val targetH = existingLp?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT
             row.addView(
                 trailingView,
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
+                LinearLayout.LayoutParams(targetW, targetH).apply {
                     marginStart = dp(context, 8f)
                 }
             )
@@ -1494,6 +1567,7 @@ object SixDigitPinSheet {
             setDimAmount(0.58f)
             setWindowAnimations(0)
         }
+        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
         MotionSpec.attachSheetSwipeToDismiss(outer, null, dialog)
         dialog.show()
         MotionSpec.animateSheetEnter(outer)

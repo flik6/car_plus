@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg_dark"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="14dp"
+    android:paddingEnd="10dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp">
+
+    <!-- Left: Vehicle Identity + Compact Fuel/Status -->
+    <LinearLayout
+        android:id="@+id/widget_header_area"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:gravity="center_vertical"
+        android:orientation="vertical"
+        android:paddingEnd="6dp">
+
+        <TextView
+            android:id="@+id/widget_model_name"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="艾瑞泽8"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_status_line"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:text="已驻车 · 24%"
+            android:textColor="#8E9299"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <!-- Right: 4 One-Tap Control Icons -->
+    <FrameLayout
+        android:id="@+id/widget_btn_lock"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:layout_marginEnd="6dp"
+        android:background="@drawable/widget_btn_bg">
+
+        <ImageView
+            android:id="@+id/widget_icon_lock"
+            android:layout_width="21dp"
+            android:layout_height="21dp"
+            android:layout_gravity="center"
+            android:contentDescription="锁车或解锁"
+            android:src="@drawable/ic_widget_lock_closed" />
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/widget_btn_ac"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:layout_marginEnd="6dp"
+        android:background="@drawable/widget_btn_bg">
+
+        <ImageView
+            android:id="@+id/widget_icon_ac"
+            android:layout_width="21dp"
+            android:layout_height="21dp"
+            android:layout_gravity="center"
+            android:contentDescription="开关空调"
+            android:src="@drawable/ic_widget_fan" />
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/widget_btn_flash"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:layout_marginEnd="6dp"
+        android:background="@drawable/widget_btn_bg">
+
+        <ImageView
+            android:id="@+id/widget_icon_flash"
+            android:layout_width="21dp"
+            android:layout_height="21dp"
+            android:layout_gravity="center"
+            android:contentDescription="闪灯寻车"
+            android:src="@drawable/ic_widget_flash" />
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/widget_btn_trunk"
+        android:layout_width="42dp"
+        android:layout_height="42dp"
+        android:background="@drawable/widget_btn_bg">
+
+        <ImageView
+            android:id="@+id/widget_icon_trunk"
+            android:layout_width="21dp"
+            android:layout_height="21dp"
+            android:layout_gravity="center"
+            android:contentDescription="开关后备箱"
+            android:src="@drawable/ic_widget_trunk" />
+    </FrameLayout>
+
+</LinearLayout>
