@@ -81,7 +81,7 @@ internal class VehicleFeatureSheets(
     private val profileProvider: () -> VehicleProfile,
     private val telemetryProvider: () -> VehicleTelemetry?,
     private val cachedPinProvider: () -> String,
-    private val onPinUpdated: (String) -> Unit,
+    private val onPinUpdated: (vin: String, newPin: String) -> Unit,
     private val onRefreshTelemetry: () -> Unit,
     private val onTriggerCloudKeyProvision: () -> Unit,
     private val onScanNearbyBle: () -> Unit,
@@ -132,7 +132,7 @@ internal class VehicleFeatureSheets(
      */
     fun buildAddVehicleSubpageView(
         onBack: () -> Unit,
-        onVehicleBound: () -> Unit
+        onVehicleBound: (vin: String, controlPin: String) -> Unit
     ): View {
         val profile = profileProvider()
         val root = LinearLayout(context).apply {
@@ -321,10 +321,9 @@ internal class VehicleFeatureSheets(
 
                 res.onSuccess { result ->
                     if (result.success) {
-                        onPinUpdated(pin)
                         AppHaptics.perform(submitBtn, HapticLevel.MEDIUM_CONFIRM)
                         toast("车辆绑定成功")
-                        onVehicleBound()
+                        onVehicleBound(vin, pin)
                     } else {
                         errorTv.text = result.message.ifBlank { "绑定失败，请核对车架号、SN 与 ICCID" }
                         errorTv.visibility = View.VISIBLE
@@ -458,7 +457,10 @@ internal class VehicleFeatureSheets(
             if (pushOverlay != null) {
                 val addView = buildAddVehicleSubpageView(
                     onBack = { onPopOverlaySubpage?.invoke() },
-                    onVehicleBound = {
+                    onVehicleBound = { boundVin, boundPin ->
+                        if (boundVin.isNotBlank() && boundPin.isNotBlank()) {
+                            onPinUpdated(boundVin, boundPin)
+                        }
                         onPopOverlaySubpage?.invoke()
                         onVehiclesUpdated()
                         reloadVehicles()
@@ -2029,6 +2031,11 @@ internal class VehicleFeatureSheets(
             val lon = current?.longitude
             val hasLoc = lat != null && lon != null && (lat != 0.0 || lon != 0.0)
             applyLocationSummary(hasLoc, resolved.trim(), liveDistanceLabelProvider().trim())
+            if (!mapDestroyed) {
+                deviceLocationProvider()?.let { (uLat, uLon) ->
+                    runMapJs("window.CarMap && window.CarMap.setUserLocation($uLat, $uLon);")
+                }
+            }
         }
 
         root.addView(AppComponents.createHairline(context, startInsetDp = 20))
@@ -3467,10 +3474,11 @@ internal class VehicleFeatureSheets(
 
     fun showPinManagementModal(profile: VehicleProfile) {
         secondaryDialog?.dismiss()
-        val hasSavedPin = cachedPinProvider().isNotBlank() || profile.controlPin.isNotBlank()
+        // Always start on Old-PIN step (with "首次设置？跳过原 PIN 码" escape hatch) so a fresh device
+        // with an existing cloud PIN is never deadlocked on initial-set service 126.
         val sheet = SixDigitPinSheet.showChangePinWizardSheet(
             context = context,
-            requireOldPin = hasSavedPin
+            requireOldPin = true
         ) { oldPin, newPin, showError, dismiss ->
             scope.launch {
                 if (!oldPin.isNullOrBlank()) {
@@ -3480,7 +3488,7 @@ internal class VehicleFeatureSheets(
                         }
                     }.getOrDefault(false)
                     if (ok) {
-                        onPinUpdated(newPin)
+                        onPinUpdated(profile.vin, newPin)
                         dismiss()
                         toast("PIN 码已更新")
                     } else {
@@ -3493,7 +3501,7 @@ internal class VehicleFeatureSheets(
                         }
                     }.getOrDefault(false)
                     if (ok) {
-                        onPinUpdated(newPin)
+                        onPinUpdated(profile.vin, newPin)
                         dismiss()
                         toast("PIN 码已保存")
                     } else {
@@ -3642,7 +3650,7 @@ internal class VehicleFeatureSheets(
                     if (!dialog.isShowing) return@launch
                     if (stepResult.isEmpty()) {
                         smsJob?.cancel()
-                        onPinUpdated(np)
+                        onPinUpdated(v, np)
                         dialog.dismiss()
                         toast("PIN 码已重置")
                     } else {

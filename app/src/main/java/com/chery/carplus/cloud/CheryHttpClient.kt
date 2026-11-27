@@ -307,7 +307,8 @@ data class RemoteCommandResult(
     val responseSign: String,
     val rawResponse: String,
     val error: String? = null,
-    val isPinError: Boolean = false
+    val isPinError: Boolean = false,
+    val pinVerified: Boolean = false
 )
 
 data class DeviceBindingSmsResult(
@@ -981,7 +982,7 @@ class CheryHttpClient(
             },
             globalId = authToken
         )
-        return isSuccessCode(response.resultCode)
+        return response.resultCode == RESULT_SUCCESS
     }
 
     /** Queries vehicle SIM certification status through zyhl service 935. */
@@ -1149,13 +1150,27 @@ class CheryHttpClient(
         val code = resultCode.trim()
         if (code == RESULT_SESSION_EXPIRED || code == "0406") return false
         val msg = resultMessage.trim()
-        return msg.contains("密码") ||
+        if (msg.isEmpty()) return false
+        val hasPinTerm = msg.contains("密码") ||
             msg.contains("安全码") ||
-            msg.contains("安防") ||
             msg.contains("PIN", ignoreCase = true)
+        if (!hasPinTerm) return false
+        // Reject broad non-PIN vehicle security/anti-theft messages; match explicit PIN validation failures.
+        return msg.contains("错") ||
+            msg.contains("误") ||
+            msg.contains("不正确") ||
+            msg.contains("无效") ||
+            msg.contains("失败") ||
+            msg.contains("不匹配") ||
+            msg.contains("为空") ||
+            msg.contains("未设置") ||
+            msg.contains("锁定") ||
+            msg.contains("超限") ||
+            msg.contains("校验") ||
+            msg.contains("验证")
     }
 
-    /** zyhl 970 command path, validating safePasswd directly in 970 (or optionally via 125). */
+    /** zyhl 970 command path, validating safePasswd via 125 when requested or when confirming a rejection. */
     private fun sendRemoteCommandZyhl(
         vin: String,
         globalId: String,
@@ -1168,6 +1183,7 @@ class CheryHttpClient(
         return try {
             val authToken = resolveAuthToken(globalId)
             require(authToken.isNotBlank()) { "accessToken/globalId is required" }
+            var pinVerifiedBy125 = false
             if (verifyPinFirst && pinPlain.isNotBlank()) {
                 val pinResp = postEnvelope(
                     serviceType = SERVICE_VERIFY_PIN,
@@ -1178,8 +1194,9 @@ class CheryHttpClient(
                     },
                     globalId = authToken
                 )
-                if (!isSuccessCode(pinResp.resultCode)) {
+                if (pinResp.resultCode != RESULT_SUCCESS) {
                     val msg = pinResp.message.ifBlank { "PIN 码校验失败" }
+                    val isTransientServerErr = pinResp.resultCode.startsWith("05") || pinResp.resultCode.startsWith("5")
                     return RemoteCommandResult(
                         success = false,
                         command = command,
@@ -1190,9 +1207,11 @@ class CheryHttpClient(
                         responseSign = pinResp.envelope.optString("sign"),
                         rawResponse = pinResp.rawBody,
                         error = msg,
-                        isPinError = isPinRejection(pinResp.resultCode, msg)
+                        isPinError = !isTransientServerErr,
+                        pinVerified = false
                     )
                 }
+                pinVerifiedBy125 = true
             }
             val spec = commandSpec(command, params)
             val commandData = JSONObject().apply {
@@ -1208,19 +1227,57 @@ class CheryHttpClient(
                 data = commandData,
                 globalId = authToken
             )
-            val success = isSuccessCode(response.resultCode)
             val resultData = response.dataObjectOrNull()
+            val dataResult = if (resultData != null) jsonText(resultData, "result") else ""
+            val dataAccepted = dataResult.isEmpty() || dataResult == "1"
+            val success = response.resultCode == RESULT_SUCCESS && dataAccepted
+            val suspectedPinError = !success && !pinVerifiedBy125 && isPinRejection(response.resultCode, response.message)
+            val confirmedPinError = if (suspectedPinError && pinPlain.isNotBlank()) {
+                // Double-check against service 125 so vehicle-state/anti-theft rejections never falsely wipe a valid cached PIN.
+                try {
+                    val verifyResp = postEnvelope(
+                        serviceType = SERVICE_VERIFY_PIN,
+                        data = JSONObject().apply {
+                            put("vin", vin.trim().uppercase(Locale.US))
+                            put("vehiclePass", hashPasswordOrPin(pinPlain))
+                            put("openGesturePass", "0")
+                        },
+                        globalId = authToken
+                    )
+                    verifyResp.resultCode != RESULT_SUCCESS &&
+                        !verifyResp.resultCode.startsWith("05") &&
+                        !verifyResp.resultCode.startsWith("5")
+                } catch (err: Exception) {
+                    if (err is CherySessionExpiredException || err is CheryDeviceBindingRequiredException) throw err
+                    false
+                }
+            } else {
+                suspectedPinError
+            }
+            val errMsg = if (success) {
+                null
+            } else {
+                val baseMsg = response.message.ifBlank {
+                    if (!dataAccepted) "云端未受理指令 (result=$dataResult)" else "云端未受理指令"
+                }
+                if (response.resultCode.isNotBlank() && response.resultCode != RESULT_SUCCESS) {
+                    "$baseMsg (${response.resultCode})"
+                } else {
+                    baseMsg
+                }
+            }
             RemoteCommandResult(
                 success = success,
                 command = command,
                 requestId = response.envelope.optString("requestId", requestId).ifBlank { requestId },
                 resultCode = response.resultCode,
                 resultMessage = response.message,
-                seq = resultData?.optString("seq").orEmpty(),
+                seq = if (resultData != null) jsonText(resultData, "seq") else "",
                 responseSign = response.envelope.optString("sign"),
                 rawResponse = response.rawBody,
-                error = if (success) null else response.message.ifBlank { "remote command rejected" },
-                isPinError = !success && isPinRejection(response.resultCode, response.message)
+                error = errMsg,
+                isPinError = confirmedPinError,
+                pinVerified = pinVerifiedBy125 || success
             )
         } catch (error: Exception) {
             if (error is CheryDeviceBindingRequiredException) throw error
@@ -2976,7 +3033,16 @@ class CheryHttpClient(
             if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
         }
         val env = executeZyhlService("970", payload, accessToken)
-        return zyhlEnvelopeSucceeded(env)
+        return is970CommandAccepted(env)
+    }
+
+    /** Validates zyhl 970 responses: outer resultCode == "0200" AND data.result == "1" (when present). */
+    fun is970CommandAccepted(envelope: JSONObject): Boolean {
+        val code = jsonText(envelope, "resultCode").ifBlank { jsonText(envelope, "code") }
+        if (code != RESULT_SUCCESS) return false
+        val data = zyhlDataObject(envelope)
+        val innerResult = jsonText(data, "result")
+        return innerResult.isEmpty() || innerResult == "1"
     }
 
     /** Toggles cabin auto air-ventilation via zyhl 975 (DataReq975). */
@@ -3088,7 +3154,7 @@ class CheryHttpClient(
             if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
         }
         val env = executeZyhlService("970", payload, accessToken)
-        return zyhlEnvelopeSucceeded(env)
+        return is970CommandAccepted(env)
     }
 
     /** Queries departure/travel pre-conditioning schedules via zyhl 143 (DataResp143). */
@@ -3146,7 +3212,7 @@ class CheryHttpClient(
             if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
         }
         val env = executeZyhlService("970", payload, accessToken)
-        return zyhlEnvelopeSucceeded(env)
+        return is970CommandAccepted(env)
     }
 
     /** Sends a navigation POI destination to the vehicle head-unit via zyhl 943. */

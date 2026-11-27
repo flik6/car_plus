@@ -622,7 +622,8 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                 CarWidgetStateStore.setTransientHint(appCtx, "正在${actionLabel}...")
                 CarWidgetManager.updateAllWidgets(appCtx)
 
-                val result = runCatching {
+                var sessionExpired = false
+                val result = try {
                     client.sendRemoteCommand(
                         vin = profile.vin,
                         userId = profile.userId,
@@ -632,14 +633,25 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                         pin = savedPin,
                         params = params
                     )
-                }.getOrNull()
+                } catch (_: com.chery.carplus.cloud.CherySessionExpiredException) {
+                    sessionExpired = true
+                    null
+                } catch (_: Throwable) {
+                    null
+                }
+
+                if (sessionExpired) {
+                    CarWidgetStateStore.setTransientHint(appCtx, "")
+                    CarWidgetManager.updateAllWidgets(appCtx)
+                    mainHandler.post {
+                        Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
+                        launchAppForAction(appCtx, cmd, needPinCache = false)
+                    }
+                    return@launch
+                }
 
                 if (result?.isPinError == true) {
-                    store.saveProfile(
-                        profile.copy(controlPin = ""),
-                        activate = true,
-                        preserveExistingPinIfBlank = false
-                    )
+                    store.updateControlPin(profile.vin, "")
                     CarWidgetStateStore.setTransientHint(appCtx, "")
                     CarWidgetManager.updateAllWidgets(appCtx)
                     mainHandler.post {

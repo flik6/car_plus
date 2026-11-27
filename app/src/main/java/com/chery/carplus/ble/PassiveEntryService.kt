@@ -163,16 +163,19 @@ object PassiveEntryRuntime {
                         ?: store.getActiveProfile().takeIf { it.vin.equals(activeVin, ignoreCase = true) }
                     val mac = PassiveEntryPrerequisiteChecker.normalizeMac(profile?.bleMac)
                     if (profile != null && mac != null) {
-                        appendLog("App 退至后台且刚才处于车旁连接，交接给后台无感服务继续监测离车上锁")
-                        PassiveEntryService.startForWake(
-                            context = appContext,
-                            vin = profile.vin,
-                            bleMac = mac,
-                            bleName = profile.bleName,
-                            initialRssi = foregroundLastRssi,
-                            wakeSource = "ForegroundHandoff",
-                            assumeAlreadyNear = true
-                        )
+                        appendLog("App 退至后台且刚才处于车旁连接，等待前台释放后交接给后台无感服务")
+                        mainHandler.postDelayed({
+                            if (foregroundAppActive) return@postDelayed
+                            PassiveEntryService.startForWake(
+                                context = appContext,
+                                vin = profile.vin,
+                                bleMac = mac,
+                                bleName = profile.bleName,
+                                initialRssi = foregroundLastRssi,
+                                wakeSource = "ForegroundHandoff",
+                                assumeAlreadyNear = true
+                            )
+                        }, 500L)
                         return
                     }
                 }

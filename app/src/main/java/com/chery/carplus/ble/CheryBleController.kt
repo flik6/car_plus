@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
@@ -22,6 +23,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelUuid
+import android.os.SystemClock
 import com.chery.carplus.profile.VehicleProfile
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
@@ -258,10 +261,16 @@ class CheryBleController(
     private val txFrameHashes = LinkedHashSet<String>()
     private val pinsByAddress = mutableMapOf<String, PairingPinCandidates>()
     private val randomByAddress = mutableMapOf<String, ByteArray>()
+    private val randomTimestampByAddress = mutableMapOf<String, Long>()
+    private val pendingRandomWaitSince = mutableMapOf<String, Long>()
+    private var pendingRandomConnectRunnable: Runnable? = null
+    private var pendingScanRetryRunnable: Runnable? = null
+    private var consecutiveFilteredEmptyScans = 0
     private val nearbyCheryDevices = LinkedHashMap<String, NearbyBleVehicle>()
     private val allScannedAddresses = LinkedHashSet<String>()
     private val debugLogs = ArrayDeque<String>()
     private var diagnosticScanOnly = false
+    private var ffe1ReportedUnbonded = false
     private val pendingActionBySerial = mutableMapOf<Int, String>()
     private val actionTimeoutRunnables = mutableMapOf<Int, Runnable>()
 
@@ -312,9 +321,9 @@ class CheryBleController(
         get() = session?.snapshot()
 
     /**
-     * Consumer-mode proximity watcher. The host Activity owns the Bluetooth
-     * enable prompt; this controller runs a low-power 5-second scan every 20 seconds
-     * (5s scan / 15s idle) while disconnected and silently switches to BLE once nearby.
+     * Consumer-mode proximity watcher. Uses balanced scan duty cycle with aggressive
+     * matching and hardware ScanFilters while staying strictly below Android's
+     * 5-scans-per-30s throttle ceiling.
      */
     fun startAutoProximityWatch(
         profileProvider: () -> VehicleProfile?,
@@ -326,6 +335,70 @@ class CheryBleController(
         proximityEnableRequester = onRequestEnableBluetooth
         if (adapter?.isEnabled == true) bluetoothEnableRequested = false
         scheduleProximityTick(0)
+    }
+
+    /**
+     * High-priority manual scan/pairing trigger (e.g. tapping the Bluetooth icon or
+     * "去配对"). Preempts any slower background scan and immediately starts a
+     * LOW_LATENCY + AGGRESSIVE hardware-filtered scan for maximum discovery speed.
+     */
+    fun triggerImmediatePairingOrConnect(
+        profileProvider: () -> VehicleProfile?,
+        onRequestEnableBluetooth: () -> Unit,
+        durationMs: Long = 10_000L
+    ) = runOnMain {
+        if (closed) return@runOnMain
+        autoProximityEnabled = true
+        proximityProfileProvider = profileProvider
+        proximityEnableRequester = onRequestEnableBluetooth
+        if (isSessionReady()) return@runOnMain
+
+        // Clean up errored GATT first, and NEVER touch active session/material while a GATT handshake is in flight.
+        if (currentGatt != null && currentStage == Stage.ERROR) {
+            runCatching { currentGatt?.disconnect() }
+            runCatching { currentGatt?.close() }
+            currentGatt = null
+            resetLinkState()
+        }
+        if (currentGatt != null) return@runOnMain
+
+        val profile = profileProvider()
+        if (profile == null || !profileHasCompleteKeyMaterial(profile)) {
+            listener?.onChannelModeChanged(false, null, "远程网络控制 · 等待同步蓝牙数字钥匙")
+            return@runOnMain
+        }
+        val currentAdapter = adapter
+        if (currentAdapter == null || !currentAdapter.isEnabled) {
+            onRequestEnableBluetooth()
+            return@runOnMain
+        }
+        bluetoothEnableRequested = false
+
+        val material = buildSessionMaterial(profile) ?: return@runOnMain
+        sessionMaterial = material
+        session = runCatching {
+            InGeekBleSession(material.rootKey16, material.infoBin147, material.edfBin)
+        }.getOrNull() ?: return@runOnMain
+        autoConnectAddress = profile.bleMac.ifBlank { null }
+        autoConnectName = profile.bleName.ifBlank { null }
+        pendingActionKey = null
+        proximityTargetMatched = false
+        diagnosticScanOnly = false
+        cancelPendingRandomConnect()
+        pendingRandomWaitSince.clear()
+        randomByAddress.clear()
+        randomTimestampByAddress.clear()
+
+        val useFilter = consecutiveFilteredEmptyScans == 0
+        appendDebugLog("主动触发高灵敏度蓝牙扫描 (${durationMs / 1000}s, LOW_LATENCY, filter=$useFilter)")
+        startScanInternal(
+            durationMs = durationMs,
+            scanMode = ScanSettings.SCAN_MODE_LOW_LATENCY,
+            useHardwareFilter = useFilter,
+            forcePreempt = true,
+            diagnosticOnly = false
+        )
+        scheduleProximityTick(durationMs + 4_000L)
     }
 
     fun stopAutoProximityWatch() = runOnMain {
@@ -348,9 +421,14 @@ class CheryBleController(
      * so all nearby Chery / InGeek vehicles (matched and non-matched) appear immediately.
      */
     fun startDiagnosticScan(durationMs: Long = 10_000L) = runOnMain {
-        diagnosticScanOnly = true
         appendDebugLog("启动调试模式全量 BLE 扫描 (${durationMs / 1000}s)")
-        startScanInternal(durationMs, ScanSettings.SCAN_MODE_LOW_LATENCY)
+        startScanInternal(
+            durationMs = durationMs,
+            scanMode = ScanSettings.SCAN_MODE_LOW_LATENCY,
+            useHardwareFilter = false,
+            forcePreempt = true,
+            diagnosticOnly = true
+        )
     }
 
     fun clearDebugLogs() = runOnMain {
@@ -611,13 +689,14 @@ class CheryBleController(
 
     fun close() {
         closed = true
-        mainHandler.post {
+        runOnMain {
             autoProximityEnabled = false
             proximityTick?.let(mainHandler::removeCallbacks)
             proximityTick = null
             stopScanInternal()
             unregisterPairingReceiver()
             cancelTimers()
+            cancelPendingRandomConnect()
             writeQueue.clear()
             currentGatt?.disconnect()
             currentGatt?.close()
@@ -697,7 +776,23 @@ class CheryBleController(
         autoConnectName = profile.bleName.ifBlank { null }
         pendingActionKey = null
         proximityTargetMatched = false
-        startScanInternal(PROXIMITY_SCAN_WINDOW_MS, ScanSettings.SCAN_MODE_LOW_POWER)
+        val throttleWaitMs = computeScanThrottleDelayMs(isManualTrigger = false)
+        if (throttleWaitMs > 0L) {
+            appendDebugLog("避让系统 30s 扫描频控，${throttleWaitMs}ms 后自动续扫")
+            scheduleProximityTick(throttleWaitMs)
+            return
+        }
+        val useFilter = consecutiveFilteredEmptyScans < 2
+        if (!useFilter) {
+            appendDebugLog("连续过滤扫描未命中，本次回退全量前台扫描以兼容非标广播")
+        }
+        startScanInternal(
+            durationMs = PROXIMITY_SCAN_WINDOW_MS,
+            scanMode = ScanSettings.SCAN_MODE_BALANCED,
+            useHardwareFilter = useFilter,
+            forcePreempt = false,
+            diagnosticOnly = false
+        )
         scheduleProximityTick(PROXIMITY_INTERVAL_MS)
     }
 
@@ -731,9 +826,68 @@ class CheryBleController(
         )
     }.getOrNull()
 
+    private fun computeScanThrottleDelayMs(isManualTrigger: Boolean): Long = synchronized(scanHistoryLock) {
+        val nowMs = SystemClock.elapsedRealtime()
+        while (processScanStartTimestamps.isNotEmpty() &&
+            nowMs - processScanStartTimestamps.first() >= SCAN_THROTTLE_WINDOW_MS
+        ) {
+            processScanStartTimestamps.removeFirst()
+        }
+        val maxAllowed = if (isManualTrigger) MAX_SCANS_PER_WINDOW_MANUAL else MAX_SCANS_PER_WINDOW_AUTO
+        if (processScanStartTimestamps.size < maxAllowed) return@synchronized 0L
+        val oldest = processScanStartTimestamps.first()
+        (oldest + SCAN_THROTTLE_WINDOW_MS + 400L - nowMs).coerceAtLeast(500L)
+    }
+
+    private fun recordScanStartTimestamp() = synchronized(scanHistoryLock) {
+        processScanStartTimestamps.addLast(SystemClock.elapsedRealtime())
+    }
+
+    private fun buildHardwareScanFilters(): List<ScanFilter>? {
+        val filters = mutableListOf<ScanFilter>()
+        filters += ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(config.vehicleServiceUuid))
+            .build()
+        filters += ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(config.statusServiceUuid))
+            .build()
+        filters += ScanFilter.Builder()
+            .setManufacturerData(0x0759, ByteArray(0))
+            .build()
+        val activeProfile = runCatching { proximityProfileProvider?.invoke() }.getOrNull()
+        val targetMacRaw = sessionMaterial?.bleMac
+            ?: autoConnectAddress
+            ?: activeProfile?.bleMac?.ifBlank { null }
+            ?: config.activeBleMac
+        val targetName = (sessionMaterial?.bleName
+            ?: autoConnectName
+            ?: activeProfile?.bleName?.ifBlank { null }
+            ?: config.activeBleName).orEmpty().trim()
+        val normalizedMac = targetMacRaw?.let { normalizeBleMacAddress(it) }
+        if (normalizedMac != null) {
+            filters += ScanFilter.Builder()
+                .setDeviceAddress(normalizedMac)
+                .build()
+            if (targetName.isBlank()) {
+                val compact = normalizedMac.replace(":", "")
+                filters += ScanFilter.Builder().setDeviceName("CHR$compact").build()
+                filters += ScanFilter.Builder().setDeviceName("BLE_DK_$compact").build()
+            }
+        }
+        if (targetName.isNotBlank()) {
+            filters += ScanFilter.Builder()
+                .setDeviceName(targetName)
+                .build()
+        }
+        return filters.takeIf { it.isNotEmpty() }
+    }
+
     private fun startScanInternal(
         durationMs: Long,
-        scanMode: Int = ScanSettings.SCAN_MODE_LOW_POWER
+        scanMode: Int = ScanSettings.SCAN_MODE_BALANCED,
+        useHardwareFilter: Boolean = false,
+        forcePreempt: Boolean = false,
+        diagnosticOnly: Boolean = false
     ) {
         if (closed) return
         val permissionError = scanPermissionError()
@@ -751,31 +905,56 @@ class CheryBleController(
             fail("无法获取 BLE 扫描器")
             return
         }
+        val throttleDelay = computeScanThrottleDelayMs(isManualTrigger = forcePreempt || diagnosticOnly)
+        if (throttleDelay > 0L) {
+            pendingScanRetryRunnable?.let(mainHandler::removeCallbacks)
+            pendingScanRetryRunnable = Runnable {
+                pendingScanRetryRunnable = null
+                if (!closed && currentGatt == null && !isSessionReady()) {
+                    startScanInternal(durationMs, scanMode, useHardwareFilter, forcePreempt, diagnosticOnly)
+                }
+            }.also { mainHandler.postDelayed(it, throttleDelay) }
+            if (scanning) {
+                appendDebugLog("系统扫描频控保护中，沿用当前窗口并于 ${throttleDelay}ms 后升级扫描")
+            } else {
+                appendDebugLog("系统扫描频控保护，${throttleDelay}ms 后自动重试")
+            }
+            return
+        }
         stopScanInternal()
-        val settings = ScanSettings.Builder()
+        diagnosticScanOnly = diagnosticOnly
+        val settingsBuilder = ScanSettings.Builder()
             .setScanMode(scanMode)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-            .setMatchMode(
-                if (scanMode == ScanSettings.SCAN_MODE_LOW_POWER) {
-                    ScanSettings.MATCH_MODE_STICKY
-                } else {
-                    ScanSettings.MATCH_MODE_AGGRESSIVE
-                }
-            )
+            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
             .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
             .setReportDelay(0)
-            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            settingsBuilder.setLegacy(true)
+        }
+        val settings = settingsBuilder.build()
+        val filters = if (!diagnosticOnly && useHardwareFilter) buildHardwareScanFilters() else null
         scanning = true
         currentStage = Stage.SCANNING
         emitStage()
         try {
-            currentScanner.startScan(null, settings, leScanCallback)
+            recordScanStartTimestamp()
+            currentScanner.startScan(filters, settings, leScanCallback)
         } catch (error: Throwable) {
             scanning = false
             fail("启动 BLE 扫描失败", error)
             return
         }
-        val stopTask = Runnable { if (scanning) stopScanInternal() }
+        val stopTask = Runnable {
+            if (scanning) {
+                if (!diagnosticScanOnly && filters != null && !proximityTargetMatched && currentGatt == null) {
+                    consecutiveFilteredEmptyScans = (consecutiveFilteredEmptyScans + 1).coerceAtMost(3)
+                } else if (filters == null && !proximityTargetMatched && currentGatt == null) {
+                    consecutiveFilteredEmptyScans = 0
+                }
+                stopScanInternal()
+            }
+        }
         scanStopRunnable = stopTask
         mainHandler.postDelayed(stopTask, durationMs.coerceAtLeast(1_000))
     }
@@ -783,10 +962,28 @@ class CheryBleController(
     private fun stopScanInternal() {
         scanStopRunnable?.let(mainHandler::removeCallbacks)
         scanStopRunnable = null
+        pendingScanRetryRunnable?.let(mainHandler::removeCallbacks)
+        pendingScanRetryRunnable = null
+        cancelPendingRandomConnect()
         diagnosticScanOnly = false
         if (!scanning) return
         scanning = false
         runCatching { scanner?.stopScan(leScanCallback) }
+    }
+
+    private fun cancelPendingRandomConnect() {
+        pendingRandomConnectRunnable?.let(mainHandler::removeCallbacks)
+        pendingRandomConnectRunnable = null
+    }
+
+    private fun getFreshRandom(address: String): ByteArray? {
+        val ts = randomTimestampByAddress[address] ?: return null
+        if (SystemClock.elapsedRealtime() - ts > RANDOM_CACHE_TTL_MS) {
+            randomByAddress.remove(address)
+            randomTimestampByAddress.remove(address)
+            return null
+        }
+        return randomByAddress[address]
     }
 
     private val leScanCallback = object : ScanCallback() {
@@ -800,7 +997,7 @@ class CheryBleController(
 
         override fun onScanFailed(errorCode: Int) {
             mainHandler.post {
-                scanning = false
+                stopScanInternal()
                 fail("BLE 扫描失败，错误码 $errorCode")
             }
         }
@@ -812,10 +1009,16 @@ class CheryBleController(
         val record = result.scanRecord
         allScannedAddresses.add(device.address)
         val random = BlePairingPinCalculator.extractAdvRandomBytes(record)
-        val randomHex = random?.toHex() ?: ""
-        if (random != null) randomByAddress[device.address] = random
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (random != null) {
+            randomByAddress[device.address] = random
+            randomTimestampByAddress[device.address] = nowElapsed
+        }
+        val effectiveRandom = random ?: getFreshRandom(device.address)
+        val randomHex = effectiveRandom?.toHex() ?: ""
 
-        val name = safeDeviceName(device) ?: record?.deviceName
+        val name = record?.deviceName?.takeIf { it.isNotBlank() }
+            ?: safeDeviceName(device)?.takeIf { it.isNotBlank() }
         val uuids = record?.serviceUuids?.map { it.uuid.toString().lowercase() }.orEmpty()
         val matchEval = evaluateStrictTargetMatch(device, name)
         val isCheryCandidate = matchEval.matched || isLikelyCheryVehicle(name, uuids)
@@ -828,10 +1031,12 @@ class CheryBleController(
             BlePairingPinCalculator.calculateCandidates(
                 activeMacOr12Hex = effectiveMac,
                 bleName = name ?: config.activeBleName ?: sessionMaterial?.bleName,
-                random4 = random ?: ByteArray(4)
+                random4 = effectiveRandom ?: ByteArray(4)
             )
         }.getOrNull()
-        if (pins != null) pinsByAddress[device.address] = pins
+        if (pins != null && (effectiveRandom != null || !pinsByAddress.containsKey(device.address))) {
+            pinsByAddress[device.address] = pins
+        }
 
         if (isCheryCandidate) {
             val prev = nearbyCheryDevices[device.address]
@@ -842,7 +1047,7 @@ class CheryBleController(
                 rssi = result.rssi,
                 serviceUuids = uuids,
                 advRandomHex = randomHex,
-                calculatedPin = pins?.primaryPin.orEmpty(),
+                calculatedPin = pinsByAddress[device.address]?.primaryPin ?: pins?.primaryPin.orEmpty(),
                 isMatchedTarget = matchEval.matched,
                 matchReason = matchEval.reason,
                 bondState = bond,
@@ -855,37 +1060,75 @@ class CheryBleController(
             }
         }
 
-        if (pins != null) {
-            listener?.onDeviceScanned(device, result.rssi, randomHex, pins)
+        val resolvedPins = pinsByAddress[device.address] ?: pins
+        if (resolvedPins != null) {
+            listener?.onDeviceScanned(device, result.rssi, randomHex, resolvedPins)
         }
 
-        if (diagnosticScanOnly) return
+        if (diagnosticScanOnly || !scanning || currentGatt != null || isSessionReady()) return
 
         val proximityMatches = autoProximityEnabled &&
             sessionMaterial != null &&
             proximityTargetMatches(device, name, result)
-        if (proximityMatches) {
-            proximityTargetMatched = true
-            currentRssi = result.rssi
+        val targetMatches = autoConnectTargetMatches(device, name, result)
+        val shouldConnectProximity = proximityMatches
+        val shouldConnectAction = !shouldConnectProximity && targetMatches && pendingActionKey != null && sessionMaterial != null
+        if (!shouldConnectProximity && !shouldConnectAction) return
+
+        consecutiveFilteredEmptyScans = 0
+        currentRssi = result.rssi
+        val actionToRun = if (shouldConnectAction) pendingActionKey else null
+        val bondState = runCatching { device.bondState }.getOrDefault(BluetoothDevice.BOND_NONE)
+        if (bondState != BluetoothDevice.BOND_BONDED && effectiveRandom == null) {
+            val isFirstWait = !pendingRandomWaitSince.containsKey(device.address)
+            val firstWaitMs = pendingRandomWaitSince.getOrPut(device.address) { nowElapsed }
+            if (nowElapsed - firstWaitMs < RANDOM_WAIT_TIMEOUT_MS) {
+                if (isFirstWait) {
+                    appendDebugLog("已命中本车蓝牙 ${device.address}，短等 4B 随机数以计算配对码...")
+                    cancelPendingRandomConnect()
+                    val capturedMaterial = sessionMaterial!!
+                    val capturedReason = matchEval.reason
+                    val capturedRssi = result.rssi
+                    val fallbackTask = Runnable {
+                        pendingRandomConnectRunnable = null
+                        if (closed || currentGatt != null || isSessionReady()) return@Runnable
+                        pendingRandomWaitSince.remove(device.address)
+                        proximityTargetMatched = true
+                        appendDebugLog("等待随机数超时，继续建连本车蓝牙 ${device.address} ($capturedReason)")
+                        if (shouldConnectProximity) {
+                            listener?.onChannelModeChanged(false, capturedRssi, "发现本车蓝牙 · 正在自动切换蓝牙控制...")
+                            pinsByAddress[device.address]?.primaryPin?.let { pin ->
+                                listener?.onPairingPinAvailable(pin, device.address)
+                            }
+                        }
+                        stopScanInternal()
+                        connectAndAuthenticate(device, capturedMaterial, actionToRun)
+                    }
+                    pendingRandomConnectRunnable = fallbackTask
+                    mainHandler.postDelayed(fallbackTask, RANDOM_WAIT_TIMEOUT_MS)
+                }
+                return
+            }
+        }
+        cancelPendingRandomConnect()
+        pendingRandomWaitSince.remove(device.address)
+        proximityTargetMatched = true
+        if (shouldConnectProximity) {
             appendDebugLog("精准命中本车蓝牙 ${device.address} (${matchEval.reason})，开始建立连接")
             listener?.onChannelModeChanged(
                 false,
                 result.rssi,
                 "发现本车蓝牙 · 正在自动切换蓝牙控制..."
             )
-            pins?.primaryPin?.let { pin ->
+            resolvedPins?.primaryPin?.let { pin ->
                 listener?.onPairingPinAvailable(pin, device.address)
             }
             stopScanInternal()
             connectAndAuthenticate(device, sessionMaterial!!, null)
-            return
-        }
-
-        val targetMatches = autoConnectTargetMatches(device, name, result)
-        if (targetMatches && pendingActionKey != null && sessionMaterial != null) {
+        } else {
             appendDebugLog("主动控车命中本车蓝牙 ${device.address} (${matchEval.reason})")
             stopScanInternal()
-            connectAndAuthenticate(device, sessionMaterial!!, pendingActionKey)
+            connectAndAuthenticate(device, sessionMaterial!!, actionToRun)
         }
     }
 
@@ -961,11 +1204,12 @@ class CheryBleController(
     ): Boolean = evaluateStrictTargetMatch(device, name).matched
 
     private fun rememberPairingPins(device: BluetoothDevice, material: SessionMaterial) {
-        val random = randomByAddress[device.address] ?: ByteArray(4)
+        val random = getFreshRandom(device.address)
+        if (random == null && pinsByAddress.containsKey(device.address)) return
         val mac = material.bleMac ?: config.activeBleMac ?: device.address
         val name = material.bleName ?: config.activeBleName ?: safeDeviceName(device)
         runCatching {
-            BlePairingPinCalculator.calculateCandidates(mac, name, random)
+            BlePairingPinCalculator.calculateCandidates(mac, name, random ?: ByteArray(4))
         }.getOrNull()?.let { pinsByAddress[device.address] = it }
     }
 
@@ -975,6 +1219,11 @@ class CheryBleController(
         if (permissionError != null) {
             fail(permissionError)
             return
+        }
+        currentGatt?.let { prior ->
+            runCatching { prior.disconnect() }
+            runCatching { prior.close() }
+            currentGatt = null
         }
         resetLinkState()
         connectingAddress = device.address
@@ -1007,12 +1256,14 @@ class CheryBleController(
         notificationsReady = false
         ffe1Ready = false
         ffe1Hex = null
+        ffe1ReportedUnbonded = false
         authStarted = false
         auth02Done = false
         session03Done = false
         account80Done = false
         authenticated = false
         waitingForBond = false
+        connectingAddress = null
         serviceDiscoveryStarted = false
         mtuPayloadChunkSize = 14
         writeCharacteristic = null
@@ -1119,6 +1370,9 @@ class CheryBleController(
             }
 
             BluetoothProfile.STATE_DISCONNECTED -> {
+                val wasUnauthStaleBond = !authenticated &&
+                    ffe1ReportedUnbonded &&
+                    runCatching { gatt.device.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)
                 if (gatt === currentGatt) {
                     currentGatt = null
                     runCatching { gatt.close() }
@@ -1129,7 +1383,9 @@ class CheryBleController(
                 currentStage = Stage.DISCONNECTED
                 emitStage()
                 listener?.onConnectionStateChanged(false, currentStage.label)
-                if (status != BluetoothGatt.GATT_SUCCESS) {
+                if (wasUnauthStaleBond) {
+                    listener?.onError("车端要求重新配对，请在手机「设置 → 蓝牙」取消配对旧记录后重试", null)
+                } else if (status != BluetoothGatt.GATT_SUCCESS) {
                     listener?.onError("GATT 连接断开，status=$status", null)
                 }
                 listener?.onChannelModeChanged(false, null, "远程云端连接 (HTTP)")
@@ -1234,11 +1490,17 @@ class CheryBleController(
         emitStage()
         when (bytes.firstOrNull()?.toInt()?.and(0xFF)) {
             0x81 -> {
+                bondTimeout?.let(mainHandler::removeCallbacks)
+                bondTimeout = null
                 ffe1Ready = true
+                ffe1ReportedUnbonded = false
                 waitingForBond = false
                 maybeBeginHandshake()
             }
-            0x10, 0x20 -> requestBond(gatt.device)
+            0x10, 0x20 -> {
+                ffe1ReportedUnbonded = true
+                requestBond(gatt.device)
+            }
             null -> {
                 ffe1Ready = true
                 maybeBeginHandshake()
@@ -1261,11 +1523,17 @@ class CheryBleController(
                 ffe1Hex = value.toHex()
                 when (value[0].toInt() and 0xFF) {
                     0x81 -> {
+                        bondTimeout?.let(mainHandler::removeCallbacks)
+                        bondTimeout = null
                         ffe1Ready = true
+                        ffe1ReportedUnbonded = false
                         waitingForBond = false
                         maybeBeginHandshake()
                     }
-                    0x10, 0x20 -> requestBond(gatt.device)
+                    0x10, 0x20 -> {
+                        ffe1ReportedUnbonded = true
+                        requestBond(gatt.device)
+                    }
                 }
             }
             config.notifyCharacteristicUuid -> processNotification(value)
@@ -1290,6 +1558,9 @@ class CheryBleController(
         if (device.bondState == BluetoothDevice.BOND_BONDED) {
             waitingForBond = false
             ffe1Ready = true
+            if (ffe1ReportedUnbonded) {
+                appendDebugLog("警告：车端 FFE1 要求配对 ($ffe1Hex)，但手机系统仍保留旧配对记录 (${device.address})")
+            }
             maybeBeginHandshake()
             return
         }
@@ -1330,7 +1601,10 @@ class CheryBleController(
     private fun handlePairingRequest(intent: Intent) {
         @Suppress("DEPRECATION")
         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
-        if (connectingAddress != null && !device.address.equals(connectingAddress, ignoreCase = true)) {
+        if (currentGatt == null ||
+            connectingAddress == null ||
+            !device.address.equals(connectingAddress, ignoreCase = true)
+        ) {
             return
         }
         val pin = resolvePinForDevice(device)
@@ -1353,20 +1627,26 @@ class CheryBleController(
         @Suppress("DEPRECATION")
         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
         val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
-        if (device.address != connectingAddress) return
+        if (connectingAddress == null || !device.address.equals(connectingAddress, ignoreCase = true)) return
         when (bondState) {
             BluetoothDevice.BOND_BONDED -> {
                 bondTimeout?.let(mainHandler::removeCallbacks)
                 bondTimeout = null
                 waitingForBond = false
                 ffe1Ready = true
+                ffe1ReportedUnbonded = false
                 appendDebugLog("系统蓝牙配对成功 (${device.address})")
                 listener?.onBondCompleted(true, device.address)
                 maybeBeginHandshake()
             }
             BluetoothDevice.BOND_NONE -> {
                 if (waitingForBond) {
+                    bondTimeout?.let(mainHandler::removeCallbacks)
+                    bondTimeout = null
                     waitingForBond = false
+                    randomByAddress.remove(device.address)
+                    randomTimestampByAddress.remove(device.address)
+                    pinsByAddress.remove(device.address)
                     appendDebugLog("系统蓝牙配对未完成或已取消 (${device.address})")
                     listener?.onBondCompleted(false, device.address)
                     fail("系统蓝牙配对未完成")
@@ -1715,6 +1995,7 @@ class CheryBleController(
         accountTimeout = null
         account80Done = true
         authenticated = true
+        ffe1ReportedUnbonded = false
         currentStage = Stage.AUTHENTICATED
         emitStage()
         session?.snapshot()?.let { listener?.onAuthenticated(it) }
@@ -1916,23 +2197,31 @@ class CheryBleController(
     }
 
     private fun fail(message: String, throwable: Throwable? = null) {
-        appendDebugLog("ERR: $message${throwable?.message?.let { " ($it)" }.orEmpty()}")
+        cancelTimers()
+        val activeGattDevice = currentGatt?.device
+        val staleBondHint = if (ffe1ReportedUnbonded &&
+            activeGattDevice != null &&
+            runCatching { activeGattDevice.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)
+        ) {
+            "车端要求重新配对，请在手机「设置 → 蓝牙」取消配对旧记录后重试"
+        } else {
+            message
+        }
+        appendDebugLog("ERR: $staleBondHint${throwable?.message?.let { " ($it)" }.orEmpty()}")
         currentStage = Stage.ERROR
+        proximityTargetMatched = false
+        currentRssi = null
         emitStage()
-        listener?.onError(message, throwable)
+        val failedGatt = currentGatt
+        if (failedGatt != null && !isSessionReady()) {
+            currentGatt = null
+            runCatching { failedGatt.disconnect() }
+            runCatching { failedGatt.close() }
+            resetLinkState()
+        }
+        listener?.onError(staleBondHint, throwable)
         if (autoProximityEnabled) {
-            listener?.onChannelModeChanged(false, currentRssi, "远程云端连接 (HTTP)")
-            mainHandler.postDelayed({
-                if (!isSessionReady() && currentGatt != null) {
-                    runCatching { currentGatt?.disconnect() }
-                    runCatching { currentGatt?.close() }
-                    currentGatt = null
-                    resetLinkState()
-                    currentRssi = null
-                    proximityTargetMatched = false
-                    scheduleProximityTick(1_500)
-                }
-            }, 900L)
+            listener?.onChannelModeChanged(false, null, "远程云端连接 (HTTP)")
             scheduleProximityTick(PROXIMITY_INTERVAL_MS)
         }
     }
@@ -1983,8 +2272,15 @@ class CheryBleController(
     }
 
     companion object {
-        private const val PROXIMITY_SCAN_WINDOW_MS = 5_000L
-        private const val PROXIMITY_INTERVAL_MS = 20_000L // 5s scan + 15s idle
+        private val scanHistoryLock = Any()
+        private val processScanStartTimestamps = ArrayDeque<Long>()
+        private const val PROXIMITY_SCAN_WINDOW_MS = 6_000L
+        private const val PROXIMITY_INTERVAL_MS = 14_000L // 6s scan + 8s idle (< 3 scans / 30s)
+        private const val SCAN_THROTTLE_WINDOW_MS = 30_500L
+        private const val MAX_SCANS_PER_WINDOW_AUTO = 3
+        private const val MAX_SCANS_PER_WINDOW_MANUAL = 4
+        private const val RANDOM_WAIT_TIMEOUT_MS = 1_800L
+        private const val RANDOM_CACHE_TTL_MS = 60_000L
         private const val BLUETOOTH_RETRY_MS = 4_000L
         private val CHERY_VEHICLE_NAME = Regex("^CHR[0-9A-F]{12}$")
         private val CHERY_DK_NAME = Regex("^BLE_DK_[0-9A-F]{12}$")

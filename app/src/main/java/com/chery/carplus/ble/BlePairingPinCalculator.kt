@@ -97,6 +97,13 @@ object BlePairingPinCalculator {
 
         val manufacturer = scanRecord.manufacturerSpecificData
         if (manufacturer != null) {
+            // Pass 1: prioritize Chery company ID (0x0759) when multiple manufacturer blocks are present.
+            for (index in 0 until manufacturer.size()) {
+                val companyId = manufacturer.keyAt(index)
+                if (companyId != 0x0759) continue
+                val value = manufacturer.valueAt(index) ?: continue
+                selectRandomFromManufacturer(value, companyId)?.let { return it }
+            }
             for (index in 0 until manufacturer.size()) {
                 val companyId = manufacturer.keyAt(index)
                 val value = manufacturer.valueAt(index) ?: continue

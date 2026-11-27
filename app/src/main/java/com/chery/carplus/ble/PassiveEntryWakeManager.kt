@@ -94,11 +94,21 @@ object PassiveEntryWakeManager {
             val pendingIntent = buildScanPendingIntent(appContext, create = true)
             if (scanner != null && pendingIntent != null) {
                 runCatching { scanner.stopScan(pendingIntent) }
-                val filters = listOf(
-                    ScanFilter.Builder()
-                        .setDeviceAddress(targetMac)
-                        .build()
-                )
+                val filters = buildList {
+                    add(
+                        ScanFilter.Builder()
+                            .setDeviceAddress(targetMac)
+                            .build()
+                    )
+                    val bleName = profile.bleName.trim()
+                    if (bleName.isNotBlank()) {
+                        add(
+                            ScanFilter.Builder()
+                                .setDeviceName(bleName)
+                                .build()
+                        )
+                    }
+                }
                 val settings = ScanSettings.Builder()
                     .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
                     .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)

@@ -243,8 +243,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var wasBackgrounded = false
     private var smsCountdownJob: Job? = null
     private var telemetryJob: Job? = null
+    private var postActionRefreshJob: Job? = null
     private var periodicRefreshJob: Job? = null
+    private var bleRssiPollJob: Job? = null
     private var geocodeJob: Job? = null
+    private var pendingResumeBleRunnable: Runnable? = null
+    private var liveLocationListener: android.location.LocationListener? = null
+    private var liveLocationCancelSignal: android.os.CancellationSignal? = null
+    @Volatile
+    private var latestLiveDeviceLocation: Location? = null
+    private var lastLiveLocationRequestMs = 0L
+    private lateinit var locationPermissionLauncher: ActivityResultLauncher<Array<String>>
     private var statusHideRunnable: Runnable? = null
     private var appDialog: android.app.Dialog? = null
     private var vehicleSwitcherPopup: PopupWindow? = null
@@ -399,16 +408,33 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             profileProvider = { profileStore.getActiveProfile() },
             telemetryProvider = { activeTelemetry },
             cachedPinProvider = { sessionVehiclePin },
-            onPinUpdated = { newPin ->
-                sessionVehiclePin = newPin
-                val p = profileStore.getActiveProfile()
-                if (p.vin.isNotBlank()) {
-                    currentProfile = profileStore.saveProfile(p.copy(controlPin = newPin), activate = true)
+            onPinUpdated = { targetVin, newPin ->
+                val resolvedVin = targetVin.trim().uppercase(Locale.US).ifBlank {
+                    profileStore.getActiveProfile().vin
+                }
+                if (resolvedVin.isNotBlank()) {
+                    lifecycleScope.launch {
+                        val updated = withContext(Dispatchers.IO) {
+                            profileStore.updateControlPin(resolvedVin, newPin)
+                        }
+                        val active = profileStore.getActiveProfile()
+                        if (active.vin.equals(resolvedVin, ignoreCase = true)) {
+                            sessionVehiclePin = newPin
+                            currentProfile = updated ?: active
+                        }
+                    }
                 }
             },
             onRefreshTelemetry = { refreshTelemetry(silent = false) },
             onTriggerCloudKeyProvision = { launchCloudProvision(profileStore.getActiveProfile(), automatic = false) },
-            onScanNearbyBle = { startProximityWhenPermitted() },
+            onScanNearbyBle = {
+                if (ensureBlePermissions()) {
+                    bleController.triggerImmediatePairingOrConnect(
+                        profileProvider = { profileStore.getActiveProfile() },
+                        onRequestEnableBluetooth = { requestBluetoothEnable() }
+                    )
+                }
+            },
             onStatusMessage = { showHomeStatus(it) },
             onLogout = { logoutToWelcome() },
             isBleConnected = { bleConnected || bleController.isSessionReady() },
@@ -421,7 +447,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             tripTrackEnabledProvider = { cloudTripTrackEnabled },
             requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
             onRequirePinEveryTimeChanged = { enabled ->
-                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, enabled).apply()
+                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, enabled).commit()
                 showHomeStatus(if (enabled) "已开启每次控车验证 PIN 码" else "已关闭每次控车验证 PIN 码")
             },
             onOpenOverlaySubpage = { view, onDestroy -> pushSubpageOverlay(view, onDestroy) },
@@ -454,6 +480,24 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         ) {
             securityPassiveRefreshCallback?.invoke()
             if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
+        }
+
+        locationPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) {
+            if (hasDeviceLocationPermission()) {
+                startLiveDeviceLocationUpdates()
+                if (currentScreen == Screen.HOME) {
+                    val updatedLocSub = formatLocationSubtitle(activeTelemetry)
+                    locationRowSubtitle?.apply {
+                        text = updatedLocSub
+                        visibility = if (updatedLocSub.isNotBlank()) View.VISIBLE else View.GONE
+                    }
+                }
+                locationAddressObservers.toList().forEach { observer ->
+                    observer(currentStreetLabel())
+                }
+            }
         }
 
         companionAssocLauncher = registerForActivityResult(
@@ -784,22 +828,23 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             if (forcePinCache && act != CarWidgetManager.CMD_REFRESH) {
                 val profile = profileStore.getActiveProfile().also { currentProfile = it }
                 if (profile.vin.isNotBlank()) {
+                    val widgetSnap = CarWidgetStateStore.load(this)
                     val (actionKey, label, temp) = when (act) {
                         CarWidgetManager.CMD_TOGGLE_LOCK -> {
-                            val locked = activeTelemetry?.doorLocked ?: true
+                            val locked = activeTelemetry?.doorLocked ?: widgetSnap.doorLocked
                             if (locked) Triple("unlock", "解锁", null) else Triple("lock", "锁车", null)
                         }
                         CarWidgetManager.CMD_TOGGLE_AC -> {
-                            val acOn = activeTelemetry?.acOn == true
+                            val acOn = activeTelemetry?.acOn ?: widgetSnap.acOn
                             if (acOn) Triple("ac_off", "关闭空调", null) else Triple("ac_on", "开启空调", climateTemperatureCelsius)
                         }
                         CarWidgetManager.CMD_FIND_CAR -> Triple("find_car", "闪灯鸣笛寻车", null)
                         CarWidgetManager.CMD_TOGGLE_TRUNK -> {
-                            val open = activeTelemetry?.trunkOpen == true
+                            val open = activeTelemetry?.trunkOpen ?: widgetSnap.trunkOpen
                             if (open) Triple("tailgate_close", "关闭后备箱", null) else Triple("trunk_open", "开启后备箱", null)
                         }
                         CarWidgetManager.CMD_TOGGLE_ENGINE -> {
-                            val running = activeTelemetry?.engineRunning == true
+                            val running = activeTelemetry?.engineRunning ?: widgetSnap.engineRunning
                             if (running) Triple("engine_stop", "远程熄火", null) else Triple("engine_start", "远程启动", null)
                         }
                         else -> Triple("", "", null)
@@ -845,16 +890,42 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     override fun onResume() {
         super.onResume()
+        val passiveWasRunning = PassiveEntryRuntime.isServiceRunning()
         PassiveEntryRuntime.setForegroundAppActive(this, true)
         carVisual?.onHostResume()
+        pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
+        pendingResumeBleRunnable = null
         if (currentScreen == Screen.HOME) {
             if (wasBackgrounded && !quickDeckExpanded) {
                 carVisual?.playEntranceAnimation()
             }
             wasBackgrounded = false
-            startProximityWhenPermitted()
+            if (passiveWasRunning) {
+                // Allow PassiveEntryService to finish closing its GATT link so T-Box resumes advertising.
+                val task = Runnable {
+                    pendingResumeBleRunnable = null
+                    if (currentScreen == Screen.HOME &&
+                        !wasBackgrounded &&
+                        !isFinishing &&
+                        !isDestroyed &&
+                        lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                    ) {
+                        startProximityWhenPermitted()
+                    }
+                }
+                pendingResumeBleRunnable = task
+                mainHandler.postDelayed(task, 600L)
+            } else {
+                startProximityWhenPermitted()
+            }
             startPeriodicHomeRefresh()
+            startForegroundBleRssiPolling()
+            startLiveDeviceLocationUpdates()
             refreshTelemetry(silent = true)
+        } else if (currentScreen == Screen.LOCATION) {
+            startLiveDeviceLocationUpdates()
+        } else if (currentScreen == Screen.SECURITY) {
+            startForegroundBleRssiPolling()
         }
         securityPassiveRefreshCallback?.invoke()
         if (::passiveEntrySheets.isInitialized) {
@@ -863,7 +934,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     override fun onPause() {
+        pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
+        pendingResumeBleRunnable = null
         stopPeriodicHomeRefresh()
+        stopForegroundBleRssiPolling()
+        stopLiveDeviceLocationUpdates()
         carVisual?.onHostPause()
         super.onPause()
     }
@@ -871,13 +946,23 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     override fun onStop() {
         super.onStop()
         wasBackgrounded = true
+        // Stop foreground scanning; if passive entry is active, release foreground GATT cleanly before background handoff.
+        bleController.stopAutoProximityWatch()
+        if (PassiveEntryStore.getActiveEnabledVin(this).isNotBlank()) {
+            bleController.disconnect()
+        }
         PassiveEntryRuntime.setForegroundAppActive(this, false)
     }
 
     override fun onDestroy() {
+        pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
+        pendingResumeBleRunnable = null
         smsCountdownJob?.cancel()
         telemetryJob?.cancel()
+        postActionRefreshJob?.cancel()
         periodicRefreshJob?.cancel()
+        bleRssiPollJob?.cancel()
+        stopLiveDeviceLocationUpdates()
         geocodeJob?.cancel()
         provisioningJob?.cancel()
         deckExpandAnimator?.cancel()
@@ -911,6 +996,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             while (isActive) {
                 delay(30_000L)
                 if (currentScreen == Screen.HOME) {
+                    requestFreshDeviceLocationIfStale()
                     refreshTelemetry(silent = true)
                 }
             }
@@ -920,6 +1006,173 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun stopPeriodicHomeRefresh() {
         periodicRefreshJob?.cancel()
         periodicRefreshJob = null
+    }
+
+    private fun startForegroundBleRssiPolling() {
+        if (bleRssiPollJob?.isActive == true) return
+        bleRssiPollJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(5_000L)
+                if (bleController.isSessionReady()) {
+                    bleController.requestRemoteRssi()
+                }
+            }
+        }
+    }
+
+    private fun stopForegroundBleRssiPolling() {
+        bleRssiPollJob?.cancel()
+        bleRssiPollJob = null
+    }
+
+    private fun resumeHomeForegroundLoops() {
+        startPeriodicHomeRefresh()
+        startForegroundBleRssiPolling()
+        startLiveDeviceLocationUpdates()
+        if (!PassiveEntryRuntime.isServiceRunning()) {
+            startProximityWhenPermitted()
+        }
+        refreshTelemetry(silent = true)
+    }
+
+    private fun maybeRequestDeviceLocationPermissionOnce() {
+        if (hasDeviceLocationPermission()) return
+        if (!::locationPermissionLauncher.isInitialized) return
+        if (uiPrefs.getBoolean(KEY_LOCATION_PERM_PROMPTED, false)) return
+        uiPrefs.edit().putBoolean(KEY_LOCATION_PERM_PROMPTED, true).apply()
+        locationPermissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        )
+    }
+
+    private fun hasDeviceLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startLiveDeviceLocationUpdates() {
+        if (!hasDeviceLocationPermission()) return
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        if (liveLocationListener == null) {
+            val listener = object : android.location.LocationListener {
+                override fun onLocationChanged(location: Location) {
+                    onFreshDeviceLocationReceived(location)
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) = Unit
+                override fun onProviderEnabled(provider: String) = Unit
+                override fun onProviderDisabled(provider: String) = Unit
+            }
+            val candidateProviders = buildList {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    add(LocationManager.FUSED_PROVIDER)
+                }
+                add(LocationManager.NETWORK_PROVIDER)
+                add(LocationManager.GPS_PROVIDER)
+            }
+            var registeredAny = false
+            candidateProviders.forEach { provider ->
+                val ok = runCatching {
+                    if (lm.isProviderEnabled(provider)) {
+                        lm.requestLocationUpdates(provider, 10_000L, 15f, listener, Looper.getMainLooper())
+                        true
+                    } else {
+                        false
+                    }
+                }.getOrDefault(false)
+                if (ok) registeredAny = true
+            }
+            if (registeredAny) {
+                liveLocationListener = listener
+            }
+        }
+        requestFreshDeviceLocationIfStale()
+    }
+
+    private fun locationAgeMs(loc: Location): Long {
+        val elapsedNanos = runCatching { loc.elapsedRealtimeNanos }.getOrDefault(0L)
+        if (elapsedNanos > 0L) {
+            return ((android.os.SystemClock.elapsedRealtimeNanos() - elapsedNanos) / 1_000_000L).coerceAtLeast(0L)
+        }
+        return (System.currentTimeMillis() - loc.time).coerceAtLeast(0L)
+    }
+
+    private fun isUsableDeviceLocation(loc: Location): Boolean {
+        if (loc.latitude.isNaN() || loc.longitude.isNaN()) return false
+        if (loc.latitude !in -90.0..90.0 || loc.longitude !in -180.0..180.0) return false
+        if (loc.latitude == 0.0 && loc.longitude == 0.0) return false
+        return locationAgeMs(loc) <= MAX_DEVICE_LOCATION_AGE_MS
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun requestFreshDeviceLocationIfStale() {
+        if (!hasDeviceLocationPermission()) return
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
+        val existingAgeMs = latestLiveDeviceLocation?.let { locationAgeMs(it) } ?: Long.MAX_VALUE
+        if (existingAgeMs < 15_000L || nowElapsed - lastLiveLocationRequestMs < 8_000L) return
+        lastLiveLocationRequestMs = nowElapsed
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val provider = when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    runCatching { lm.isProviderEnabled(LocationManager.FUSED_PROVIDER) }.getOrDefault(false) ->
+                    LocationManager.FUSED_PROVIDER
+                runCatching { lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false) ->
+                    LocationManager.NETWORK_PROVIDER
+                runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false) ->
+                    LocationManager.GPS_PROVIDER
+                else -> null
+            } ?: return
+            liveLocationCancelSignal?.cancel()
+            val signal = android.os.CancellationSignal()
+            liveLocationCancelSignal = signal
+            runCatching {
+                lm.getCurrentLocation(provider, signal, mainExecutor) { loc ->
+                    if (isDestroyed || isFinishing || signal.isCanceled) return@getCurrentLocation
+                    if (loc != null) onFreshDeviceLocationReceived(loc)
+                }
+            }
+        }
+    }
+
+    private fun stopLiveDeviceLocationUpdates() {
+        liveLocationCancelSignal?.cancel()
+        liveLocationCancelSignal = null
+        val listener = liveLocationListener ?: return
+        liveLocationListener = null
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        runCatching { lm.removeUpdates(listener) }
+    }
+
+    private fun onFreshDeviceLocationReceived(location: Location) {
+        if (!isUsableDeviceLocation(location)) return
+        val prev = latestLiveDeviceLocation
+        if (prev != null && isUsableDeviceLocation(prev)) {
+            val ageDeltaMs = locationAgeMs(prev) - locationAgeMs(location)
+            // If incoming fix is older, ignore; if within 60s, ignore much worse accuracy.
+            if (ageDeltaMs < 0L) return
+            if (ageDeltaMs < 60_000L && location.hasAccuracy() && prev.hasAccuracy() &&
+                location.accuracy > prev.accuracy * 2f && location.accuracy > 120f
+            ) {
+                return
+            }
+        }
+        latestLiveDeviceLocation = location
+        if (currentScreen == Screen.HOME) {
+            val updatedLocSub = formatLocationSubtitle(activeTelemetry)
+            locationRowSubtitle?.apply {
+                text = updatedLocSub
+                visibility = if (updatedLocSub.isNotBlank()) View.VISIBLE else View.GONE
+            }
+        }
+        locationAddressObservers.toList().forEach { observer ->
+            observer(currentStreetLabel())
+        }
     }
 
     private fun dismissAppDialogImmediately() {
@@ -1823,7 +2076,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         lastGeocodeSettled = false
 
         val profile = profileStore.getActiveProfile().also { currentProfile = it }
-        if (profile.controlPin.isNotBlank()) sessionVehiclePin = profile.controlPin
+        sessionVehiclePin = profile.controlPin
 
         val rootFrame = FrameLayout(this).apply {
             setBackgroundColor(BG_HOME)
@@ -1992,8 +2245,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
 
         refreshHomeHeaderAndRows()
-        startProximityWhenPermitted()
+        if (!PassiveEntryRuntime.isServiceRunning()) {
+            startProximityWhenPermitted()
+        }
         startPeriodicHomeRefresh()
+        startForegroundBleRssiPolling()
+        startLiveDeviceLocationUpdates()
+        if (hasAllBlePermissionsGranted()) {
+            maybeRequestDeviceLocationPermissionOnce()
+        }
         syncCloudVehicleMeta()
         refreshTelemetry(silent = true)
     }
@@ -2132,7 +2392,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 keyRole = existing?.keyRole ?: 1,
                 accessToken = activeProfile.accessToken,
                 sdkToken = activeProfile.sdkToken,
-                controlPin = firstNonBlank(existing?.controlPin.orEmpty(), sessionVehiclePin, activeProfile.controlPin)
+                controlPin = existing?.controlPin.orEmpty()
             )
             val saved = withContext(Dispatchers.IO) {
                 localByVin.keys.filter { it !in cloudVins }.forEach { profileStore.deleteProfile(it) }
@@ -2146,6 +2406,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
             val wasEmpty = carVisual == null || !currentVin.equals(chosenVin, ignoreCase = true)
             if (wasEmpty) {
+                telemetryJob?.cancel()
+                postActionRefreshJob?.cancel()
+                geocodeJob?.cancel()
+                lastGeocodedKey = ""
+                lastGeocodedAddress = null
                 activeTelemetry = null
                 homeRootView = null
                 clearSubpageOverlayStack()
@@ -2163,12 +2428,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun openAddVehicleSubpage() {
         val addView = featureSheets.buildAddVehicleSubpageView(
             onBack = { popSubpageOverlay() },
-            onVehicleBound = { handleVehicleBound() }
+            onVehicleBound = { boundVin, boundPin -> handleVehicleBound(boundVin, boundPin) }
         )
         pushSubpageOverlay(addView)
     }
 
-    private fun handleVehicleBound() {
+    private fun handleVehicleBound(boundVin: String = "", boundPin: String = "") {
         popSubpageOverlay()
         val activeProfile = profileStore.getActiveProfile()
         if (activeProfile.accessToken.isBlank()) return
@@ -2183,7 +2448,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }.getOrNull().orEmpty().filter { it.vin.isNotBlank() }
 
-            val chosen = cloudVehicles.firstOrNull { it.vin.trim().uppercase(Locale.US) !in existingVins }
+            val normalizedBoundVin = boundVin.trim().uppercase(Locale.US)
+            val chosen = cloudVehicles.firstOrNull { normalizedBoundVin.isNotBlank() && it.vin.trim().uppercase(Locale.US) == normalizedBoundVin }
+                ?: cloudVehicles.firstOrNull { it.vin.trim().uppercase(Locale.US) !in existingVins }
                 ?: cloudVehicles.firstOrNull { it.selected == "1" }
                 ?: cloudVehicles.firstOrNull()
             if (chosen == null) {
@@ -2191,6 +2458,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 return@launch
             }
             val newVin = chosen.vin.trim().uppercase(Locale.US)
+            val pinForNewVehicle = if (normalizedBoundVin.isBlank() || newVin == normalizedBoundVin) {
+                boundPin.trim()
+            } else {
+                ""
+            }
             val newProfile = VehicleProfile(
                 vin = newVin,
                 userId = activeProfile.userId,
@@ -2204,7 +2476,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 edfHex = "",
                 accessToken = activeProfile.accessToken,
                 sdkToken = activeProfile.sdkToken,
-                controlPin = sessionVehiclePin.ifBlank { activeProfile.controlPin }
+                controlPin = pinForNewVehicle
             )
             val saved = withContext(Dispatchers.IO) {
                 profileStore.saveProfile(newProfile, activate = true)
@@ -2214,6 +2486,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             cloudTripTrackEnabled = chosen.isTracksOpen ?: cloudTripTrackEnabled
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
+            telemetryJob?.cancel()
+            postActionRefreshJob?.cancel()
+            geocodeJob?.cancel()
+            lastGeocodedKey = ""
+            lastGeocodedAddress = null
             activeTelemetry = null
             homeRootView = null
             showHomeScreen()
@@ -2244,7 +2521,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         carVisual?.onHostResume()
         refreshHomeHeaderAndRows()
-        startProximityWhenPermitted()
+        resumeHomeForegroundLoops()
     }
 
     private fun buildHomeHeader(page: LinearLayout) {
@@ -2486,9 +2763,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             Toast.makeText(this, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
             return
         }
-        val cachedPin = sessionVehiclePin.ifBlank { profile.controlPin }
+        val cachedPin = profile.controlPin.trim().ifBlank { sessionVehiclePin.trim() }
         val needPin = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) || cachedPin.length != 6
         if (!needPin) {
+            sessionVehiclePin = cachedPin
             onPinReady(cachedPin)
             return
         }
@@ -2506,10 +2784,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }.getOrDefault(false)
                 if (verified) {
                     sessionVehiclePin = pin
-                    currentProfile = profileStore.saveProfile(
-                        profile.copy(controlPin = pin),
-                        activate = true
-                    )
+                    currentProfile = withContext(Dispatchers.IO) {
+                        profileStore.updateControlPin(profile.vin, pin)
+                    } ?: profileStore.getActiveProfile()
                     dismiss()
                     onPinReady(pin)
                 } else {
@@ -2665,11 +2942,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             if (verified) {
                                 sessionVehiclePin = pin
                                 currentProfile = withContext(Dispatchers.IO) {
-                                    profileStore.saveProfile(
-                                        profile.copy(controlPin = pin),
-                                        activate = true
-                                    )
-                                }
+                                    profileStore.updateControlPin(profile.vin, pin)
+                                } ?: profileStore.getActiveProfile()
                                 uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, targetChecked).commit()
                                 setChecked(targetChecked, animate = true)
                                 dismiss()
@@ -2858,12 +3132,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             put("paras", org.json.JSONObject().put("0002", if (targetEnabled) 1 else 0))
                             put("passwordType", "0")
                             if (verifiedPin.isNotBlank()) {
-                                put("safePasswd", hashZyhlPinFor970(verifiedPin))
+                                put("safePasswd", httpClient.hashPasswordOrPin(verifiedPin))
                             }
                         }
                         val env = httpClient.executeZyhlService("970", payload, profile.accessToken)
-                        val code = env.optString("resultCode").ifBlank { env.optString("code") }
-                        code == "0200" || code == "200" || code == "0"
+                        httpClient.is970CommandAccepted(env)
                     }
                 }.getOrDefault(false)
                 theftBusy = false
@@ -2902,7 +3175,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     cancelText = "取消",
                     dangerConfirm = !targetEnabled
                 ) {
-                    val cachedPin = sessionVehiclePin.ifBlank { profile.controlPin }
+                    val cachedPin = profile.controlPin.trim().ifBlank { sessionVehiclePin.trim() }
                     val needPin = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) || cachedPin.length != 6
                     if (needPin) {
                         appDialog?.dismiss()
@@ -2919,10 +3192,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 }.getOrDefault(false)
                                 if (verified) {
                                     sessionVehiclePin = pin
-                                    currentProfile = profileStore.saveProfile(
-                                        profile.copy(controlPin = pin),
-                                        activate = true
-                                    )
+                                    currentProfile = withContext(Dispatchers.IO) {
+                                        profileStore.updateControlPin(profile.vin, pin)
+                                    } ?: profileStore.getActiveProfile()
                                     dismiss()
                                     submitAntiTheftToggle(targetEnabled, pin)
                                 } else {
@@ -3153,6 +3425,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         configureSystemBars(BG_HOME)
         contentFrame.setBackgroundColor(BG_HOME)
         carVisual?.onHostPause()
+        maybeRequestDeviceLocationPermissionOnce()
+        startLiveDeviceLocationUpdates()
 
         locationOverlayDestroy?.invoke()
         locationOverlayView?.let { contentFrame.removeView(it) }
@@ -3206,11 +3480,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         carVisual?.onHostResume()
         refreshHomeHeaderAndRows()
-        startProximityWhenPermitted()
+        resumeHomeForegroundLoops()
     }
 
     private fun showMessagesSubpageScreen() {
         stopStatusAutoHide()
+        stopLiveDeviceLocationUpdates()
         configureSystemBars(BG_HOME)
         contentFrame.setBackgroundColor(BG_HOME)
         carVisual?.onHostPause()
@@ -3254,7 +3529,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         carVisual?.onHostResume()
         refreshHomeHeaderAndRows()
-        startProximityWhenPermitted()
+        resumeHomeForegroundLoops()
     }
 
     private fun pushSubpageOverlay(view: View, onDestroy: (() -> Unit)? = null) {
@@ -3359,7 +3634,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         carVisual?.onHostResume()
         refreshHomeHeaderAndRows()
-        startProximityWhenPermitted()
+        resumeHomeForegroundLoops()
     }
 
     private fun formatSecurityDigitalKeyStatus(): String {
@@ -3723,9 +3998,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             launchCloudProvision(profile, automatic = false)
             return
         }
-        bleController.stopAutoProximityWatch()
-        startProximityWhenPermitted()
-        showHomeStatus("正在扫描并连接附近蓝牙钥匙...")
+        if (!ensureBlePermissions()) return
+        bleController.triggerImmediatePairingOrConnect(
+            profileProvider = { profileStore.getActiveProfile() },
+            onRequestEnableBluetooth = { requestBluetoothEnable() }
+        )
+        showHomeStatus("正在高灵敏度扫描并连接附近蓝牙钥匙...")
     }
 
     private fun renderQuickDeckGrid(animateLabels: Boolean = false) {
@@ -4658,19 +4936,33 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun getBestDeviceGcj02Location(): Pair<Double, Double>? {
-        val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val hasCoarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (!hasFine && !hasCoarse) return null
+        if (!hasDeviceLocationPermission()) return null
         val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
-        val providers = listOf(
-            LocationManager.GPS_PROVIDER,
-            LocationManager.NETWORK_PROVIDER,
-            LocationManager.PASSIVE_PROVIDER
-        )
-        var best: Location? = null
+        val providers = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(LocationManager.FUSED_PROVIDER)
+            }
+            add(LocationManager.GPS_PROVIDER)
+            add(LocationManager.NETWORK_PROVIDER)
+            add(LocationManager.PASSIVE_PROVIDER)
+        }
+        var best: Location? = latestLiveDeviceLocation?.takeIf { isUsableDeviceLocation(it) }
         for (provider in providers) {
             val loc = runCatching { lm.getLastKnownLocation(provider) }.getOrNull() ?: continue
-            if (best == null || loc.time > best.time) {
+            if (!isUsableDeviceLocation(loc)) continue
+            val currentBest = best
+            if (currentBest == null) {
+                best = loc
+                continue
+            }
+            val locAge = locationAgeMs(loc)
+            val bestAge = locationAgeMs(currentBest)
+            val ageDiff = bestAge - locAge // positive => loc is fresher
+            val significantlyMoreAccurate = loc.hasAccuracy() && currentBest.hasAccuracy() &&
+                loc.accuracy + 30f < currentBest.accuracy
+            if (ageDiff > 60_000L || (kotlin.math.abs(ageDiff) <= 60_000L && significantlyMoreAccurate)) {
+                best = loc
+            } else if (ageDiff > 0L && (!loc.hasAccuracy() || !currentBest.hasAccuracy() || loc.accuracy <= currentBest.accuracy * 2f)) {
                 best = loc
             }
         }
@@ -4707,9 +4999,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val r = 6371000.0
         val dLat = (lat2 - lat1) * PI / 180.0
         val dLon = (lon2 - lon1) * PI / 180.0
-        val a = sin(dLat / 2.0) * sin(dLat / 2.0) +
+        val a = (sin(dLat / 2.0) * sin(dLat / 2.0) +
             cos(lat1 * PI / 180.0) * cos(lat2 * PI / 180.0) *
-            sin(dLon / 2.0) * sin(dLon / 2.0)
+            sin(dLon / 2.0) * sin(dLon / 2.0)).coerceIn(0.0, 1.0)
         return 2.0 * r * atan2(sqrt(a), sqrt(1.0 - a))
     }
 
@@ -5128,7 +5420,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             keyRole = existing?.keyRole ?: 1,
             accessToken = firstNonBlank(activeProfile.accessToken, existing?.accessToken.orEmpty()),
             sdkToken = firstNonBlank(activeProfile.sdkToken, existing?.sdkToken.orEmpty()),
-            controlPin = firstNonBlank(existing?.controlPin.orEmpty(), sessionVehiclePin, activeProfile.controlPin)
+            controlPin = existing?.controlPin.orEmpty()
         )
 
         lifecycleScope.launch {
@@ -5148,6 +5440,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             sessionVehiclePin = saved.controlPin
             activeTelemetry = null
             telemetryJob?.cancel()
+            postActionRefreshJob?.cancel()
+            geocodeJob?.cancel()
+            lastGeocodedKey = ""
+            lastGeocodedAddress = null
             bleController.stopAutoProximityWatch()
             bleController.disconnect()
             bleConnected = false
@@ -5541,7 +5837,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 return@showInputSheet
             }
             sessionVehiclePin = pin
-            currentProfile = profileStore.saveProfile(profile.copy(controlPin = pin), activate = true)
+            lifecycleScope.launch {
+                val updated = withContext(Dispatchers.IO) {
+                    profileStore.updateControlPin(profile.vin, pin)
+                }
+                if (updated != null && profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                    currentProfile = updated
+                }
+            }
             showHomeStatus("PIN 码已保存")
         }
     }
@@ -5549,16 +5852,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     // =========================================================================
     // Smart Dual-Mode Command Router (BLE Nearby -> HTTP Fallback)
     // =========================================================================
-
-    private fun hashZyhlPinFor970(pinPlain: String): String {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(pinPlain.toByteArray(Charsets.UTF_8))
-        val hexLower = digest.joinToString("") { "%02x".format(it) }
-        return android.util.Base64.encodeToString(
-            hexLower.toByteArray(Charsets.UTF_8),
-            android.util.Base64.NO_WRAP
-        )
-    }
 
     private fun executeBleActionImmediate(
         actionKey: String,
@@ -5628,13 +5921,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         }.getOrDefault(false)
                         if (verified) {
                             sessionVehiclePin = pin
-                            currentProfile = profileStore.saveProfile(
-                                profile.copy(controlPin = pin),
-                                activate = true
-                            )
+                            val latestProfile = withContext(Dispatchers.IO) {
+                                profileStore.updateControlPin(profile.vin, pin)
+                            } ?: profileStore.getActiveProfile()
+                            currentProfile = latestProfile
                             dismiss()
                             if (!executeBleActionImmediate(actionKey, label, temperatureCelsius)) {
-                                sendHttpVehicleCommand(profile, actionKey, label, temperatureCelsius, pin, extraParams)
+                                sendHttpVehicleCommand(latestProfile, actionKey, label, temperatureCelsius, pin, extraParams)
                             }
                         } else {
                             showError("云端 PIN 码错误，请重试")
@@ -5645,8 +5938,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
         }
 
-        val cachedPin = sessionVehiclePin.ifBlank { profile.controlPin }
-        if (requirePinEveryTime || cachedPin.isBlank()) {
+        val cachedPin = profile.controlPin.trim().ifBlank { sessionVehiclePin.trim() }
+        if (requirePinEveryTime || cachedPin.length != 6) {
             showVehiclePinSheet(profile, actionKey, label, temperatureCelsius, extraParams)
         } else {
             sessionVehiclePin = cachedPin
@@ -5690,7 +5983,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             sdkToken = profile.sdkToken,
                             command = command,
                             pin = pin,
-                            params = params
+                            params = params,
+                            verifyPinFirst = true
                         )
                     }
                 }
@@ -5704,22 +5998,39 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
                 val result = res.getOrThrow()
                 if (result.isPinError) {
-                    sessionVehiclePin = ""
-                    val cleared = profile.copy(controlPin = "")
-                    currentProfile = cleared
-                    if (profile.vin.isNotBlank()) {
-                        withContext(Dispatchers.IO) {
-                            profileStore.saveProfile(
-                                cleared,
-                                activate = true,
-                                preserveExistingPinIfBlank = false
-                            )
+                    // Only clear cached PIN if the rejected input matches what was cached.
+                    if (sessionVehiclePin == pin || profile.controlPin == pin) {
+                        if (profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                            sessionVehiclePin = ""
+                        }
+                        if (profile.vin.isNotBlank()) {
+                            val cleared = withContext(Dispatchers.IO) {
+                                profileStore.updateControlPin(profile.vin, "")
+                            }
+                            if (cleared != null && profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                                currentProfile = cleared
+                            }
                         }
                     }
-                    showError("PIN 码错误，请重新输入")
+                    val pinErrMsg = result.resultMessage.ifBlank { "PIN 码错误，请重新输入" }.take(40)
+                    showError(pinErrMsg)
+                } else if (!result.pinVerified) {
+                    // Network or transient server error before service 125 confirmed the PIN: do NOT persist unverified PIN.
+                    showError(result.error.orEmpty().ifBlank { "网络异常，PIN 码校验未完成，请重试" }.take(60))
                 } else {
+                    // Service 125 confirmed this PIN is valid; persist it atomically even if 970 rejected for vehicle state.
+                    val isStillActive = profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)
+                    if (isStillActive) sessionVehiclePin = pin
+                    val updatedProfile = if (profile.vin.isNotBlank()) {
+                        withContext(Dispatchers.IO) {
+                            profileStore.updateControlPin(profile.vin, pin)
+                        } ?: profileStore.getActiveProfile()
+                    } else {
+                        profile
+                    }
+                    if (isStillActive) currentProfile = updatedProfile
                     dismiss()
-                    handleRemoteResult(result, profile, actionKey, label, temperatureCelsius, pin)
+                    handleRemoteResult(result, updatedProfile, actionKey, label, temperatureCelsius, pin, extraParams)
                 }
             }
         }
@@ -5762,7 +6073,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
             res.onSuccess { result ->
-                handleRemoteResult(result, profile, actionKey, label, temperatureCelsius, pin)
+                handleRemoteResult(result, profile, actionKey, label, temperatureCelsius, pin, extraParams)
             }.onFailure { err ->
                 if (err !is CherySessionExpiredException) {
                     showHomeStatus("控车失败：${err.message.orEmpty().take(80)}")
@@ -5777,40 +6088,46 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         actionKey: String,
         label: String,
         temperatureCelsius: Double?,
-        usedPin: String
+        usedPin: String,
+        extraParams: Map<String, String> = emptyMap()
     ) {
+        val isStillActive = profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)
         if (result.success) {
-            if (usedPin.isNotBlank()) {
-                sessionVehiclePin = usedPin
+            if (usedPin.length == 6) {
+                if (isStillActive) sessionVehiclePin = usedPin
                 if (profile.controlPin != usedPin && profile.vin.isNotBlank()) {
                     lifecycleScope.launch {
                         val saved = withContext(Dispatchers.IO) {
-                            profileStore.saveProfile(profile.copy(controlPin = usedPin), activate = true)
+                            profileStore.updateControlPin(profile.vin, usedPin)
                         }
-                        currentProfile = saved
+                        if (saved != null && profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                            currentProfile = saved
+                        }
                     }
                 }
             }
-            applyOptimisticAction(actionKey)
-            showHomeStatus("已完成：$label")
-            scheduleTelemetryRefresh()
+            if (isStillActive) {
+                applyOptimisticAction(actionKey)
+                showHomeStatus("已完成：$label")
+                scheduleTelemetryRefresh()
+            }
         } else if (result.isPinError) {
-            sessionVehiclePin = ""
-            val cleared = profile.copy(controlPin = "")
-            currentProfile = cleared
+            if (isStillActive) sessionVehiclePin = ""
             if (profile.vin.isNotBlank()) {
                 lifecycleScope.launch {
-                    withContext(Dispatchers.IO) {
-                        profileStore.saveProfile(
-                            cleared,
-                            activate = true,
-                            preserveExistingPinIfBlank = false
-                        )
+                    val cleared = withContext(Dispatchers.IO) {
+                        profileStore.updateControlPin(profile.vin, "")
+                    } ?: profileStore.getActiveProfile()
+                    if (profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                        currentProfile = cleared
+                        showHomeStatus("本机 PIN 码已失效，请重新验证")
+                        showVehiclePinSheet(cleared, actionKey, label, temperatureCelsius, extraParams)
                     }
                 }
+            } else if (isStillActive) {
+                showHomeStatus("本机 PIN 码已失效，请重新验证")
+                showVehiclePinSheet(profile.copy(controlPin = ""), actionKey, label, temperatureCelsius, extraParams)
             }
-            showHomeStatus("PIN 码错误，请重新输入")
-            showVehiclePinSheet(cleared, actionKey, label, temperatureCelsius)
         } else {
             AppHaptics.perform(contentFrame, HapticLevel.ERROR_REJECT)
             val msg = result.error ?: result.resultMessage.ifBlank { "云端未受理指令" }
@@ -5819,6 +6136,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun applyOptimisticAction(actionKey: String) {
+        // Cancel any pre-action telemetry request so its stale response cannot revert optimistic UI.
+        telemetryJob?.cancel()
         val current = activeTelemetry
         if (current != null) {
             activeTelemetry = when (actionKey) {
@@ -5890,10 +6209,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         else -> null
     }
 
-    private fun refreshTelemetry(silent: Boolean) {
+    private fun refreshTelemetry(silent: Boolean, forceRestart: Boolean = false) {
         val profile = profileStore.getActiveProfile()
         if (profile.vin.isBlank() || profile.accessToken.isBlank()) return
-        if (telemetryJob?.isActive == true) return
+        if (forceRestart) {
+            telemetryJob?.cancel()
+        } else if (telemetryJob?.isActive == true) {
+            return
+        }
         if (!silent) showHomeStatus("正在同步车况...")
         telemetryJob = lifecycleScope.launch {
             val result = runCatching {
@@ -5905,6 +6228,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         userId = profile.userId
                     )
                 }
+            }
+            if (!isActive || !profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
+                return@launch
             }
             result.onSuccess {
                 activeTelemetry = it
@@ -5928,9 +6254,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun scheduleTelemetryRefresh() {
-        lifecycleScope.launch {
-            delay(1_500L)
-            refreshTelemetry(silent = true)
+        postActionRefreshJob?.cancel()
+        postActionRefreshJob = lifecycleScope.launch {
+            delay(2_200L)
+            refreshTelemetry(silent = true, forceRestart = true)
+            telemetryJob?.join()
+            delay(4_500L)
+            refreshTelemetry(silent = true, forceRestart = true)
         }
     }
 
@@ -5960,11 +6290,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 if (!isActive) return@launch
                 if (result?.success == true) {
                     val provisioned = result.profile ?: profile
-                    val latestPin = firstNonBlank(
-                        profileStore.getActiveProfile().controlPin,
-                        sessionVehiclePin,
-                        profile.controlPin
-                    )
+                    val stillActive = profileStore.getActiveProfile().vin.equals(provisioned.vin, ignoreCase = true)
                     val merged = withContext(Dispatchers.IO) {
                         profileStore.saveProfile(
                             provisioned.copy(
@@ -5974,14 +6300,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 accountType = profile.accountType,
                                 accessToken = profile.accessToken,
                                 sdkToken = profile.sdkToken,
-                                controlPin = latestPin
+                                controlPin = ""
                             ),
-                            activate = true
+                            activate = stillActive,
+                            preserveExistingPinIfBlank = true
                         )
                     }
-                    currentProfile = merged
-                    showHomeStatus("手机数字钥匙已同步")
-                    startProximityWhenPermitted()
+                    if (stillActive) {
+                        currentProfile = merged
+                        sessionVehiclePin = merged.controlPin
+                        showHomeStatus("手机数字钥匙已同步")
+                        startProximityWhenPermitted()
+                    }
                 } else if (!automatic) {
                     val reason = result?.error ?: result?.message ?: "云端未返回有效钥匙材料"
                     showHomeStatus("钥匙同步失败：${reason.take(90)}")
@@ -6034,7 +6364,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         provisioningJob?.cancel()
         provisioningActive = false
         telemetryJob?.cancel()
+        postActionRefreshJob?.cancel()
         stopPeriodicHomeRefresh()
+        stopForegroundBleRssiPolling()
+        stopLiveDeviceLocationUpdates()
+        latestLiveDeviceLocation = null
         geocodeJob?.cancel()
         smsCountdownJob?.cancel()
         stopStatusAutoHide()
@@ -6099,8 +6433,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return
         }
         val remaining = profileStore.listProfiles().firstOrNull { it.vin.isNotBlank() }
+        telemetryJob?.cancel()
+        postActionRefreshJob?.cancel()
+        geocodeJob?.cancel()
+        lastGeocodedKey = ""
+        lastGeocodedAddress = null
         if (remaining != null) {
-            currentProfile = profileStore.setActiveVin(remaining.vin) ?: remaining
+            val switched = profileStore.setActiveVin(remaining.vin) ?: remaining
+            currentProfile = switched
+            sessionVehiclePin = switched.controlPin
             uiPrefs.edit()
                 .putString(KEY_MODEL_NAME, remaining.bleName.ifBlank { "我的座驾" })
                 .remove(KEY_PLATE_NO)
@@ -6110,6 +6451,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             refreshTelemetry(silent = true)
             return
         }
+        sessionVehiclePin = ""
         if (activeProfile.accessToken.isNotBlank()) {
             lifecycleScope.launch {
                 val nextCloud = runCatching {
@@ -6166,14 +6508,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             alpha = 0.45f
             animate().alpha(1f).setDuration(380L).start()
         }
-        bleController.startAutoProximityWatch(
-            profileProvider = { profileStore.getActiveProfile() }
-        ) { requestBluetoothEnable() }
+        bleController.triggerImmediatePairingOrConnect(
+            profileProvider = { profileStore.getActiveProfile() },
+            onRequestEnableBluetooth = { requestBluetoothEnable() }
+        )
         showHomeStatus(
             if (bleNearby || bleController.isVehicleNearby) {
                 "正在连接附近车辆蓝牙..."
             } else {
-                "正在扫描并连接车辆蓝牙..."
+                "正在高灵敏度扫描并连接车辆蓝牙..."
             }
         )
     }
@@ -6196,6 +6539,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
         }.onFailure {
             showHomeStatus("请开启系统蓝牙以使用手机钥匙")
+        }
+    }
+
+    private fun hasAllBlePermissionsGranted(): Boolean {
+        val required = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+        return required.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -6225,7 +6579,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         if (requestCode != REQUEST_BLE_PERMISSIONS) return
         blePermissionsRequested = false
         if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-            if (currentScreen == Screen.HOME) startProximityWhenPermitted()
+            if (currentScreen == Screen.HOME) {
+                startProximityWhenPermitted()
+                maybeRequestDeviceLocationPermissionOnce()
+            }
         }
     }
 
@@ -6237,8 +6594,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         runOnUiThread {
             bleConnected = isBleConnected
             bleNearby = !isBleConnected && (
-                statusText.contains("发现附近车辆") || statusText.contains("正在握手")
-            )
+                bleController.isVehicleNearby ||
+                    statusText.contains("发现附近车辆") ||
+                    statusText.contains("发现本车蓝牙") ||
+                    statusText.contains("正在自动切换") ||
+                    statusText.contains("蓝牙数字钥匙正在连接") ||
+                    statusText.contains("正在握手")
+                )
             updateSecurityRow()
             if (isBleConnected) {
                 lastPairingPin = ""
@@ -6252,6 +6614,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     override fun onRssiUpdated(rssi: Int) {
         runOnUiThread {
+            updateSecurityRow()
             PassiveEntryRuntime.reportForegroundBleRssi(rssi, bleConnected || bleController.isSessionReady())
             if (::passiveEntrySheets.isInitialized) {
                 passiveEntrySheets.refreshIfOpen()
@@ -6340,10 +6703,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     Toast.makeText(this, "请先授予蓝牙权限", Toast.LENGTH_SHORT).show()
                     return
                 }
-                Toast.makeText(this, "正在靠近扫描车辆，请在车旁完成首次蓝牙配对", Toast.LENGTH_LONG).show()
-                bleController.startAutoProximityWatch(
-                    profileProvider = { profileStore.getActiveProfile() }
-                ) { requestBluetoothEnable() }
+                Toast.makeText(this, "正在高灵敏度扫描车辆，请在车旁完成首次蓝牙配对", Toast.LENGTH_LONG).show()
+                bleController.triggerImmediatePairingOrConnect(
+                    profileProvider = { profileStore.getActiveProfile() },
+                    onRequestEnableBluetooth = { requestBluetoothEnable() }
+                )
             }
             PrerequisiteId.NOTIFICATIONS -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -6424,8 +6788,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
                 sessionVehiclePin = pin
                 val savedProfile = withContext(Dispatchers.IO) {
-                    profileStore.saveProfile(profile.copy(controlPin = pin), activate = true)
-                }
+                    profileStore.updateControlPin(profile.vin, pin)
+                } ?: profileStore.getActiveProfile()
                 currentProfile = savedProfile
                 dismiss()
                 val wakeResult = PassiveEntryWakeManager.enableForVehicle(this@MainActivity, savedProfile)
@@ -7097,6 +7461,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private const val KEY_QUICK_ACTIONS = "quick_actions"
         private const val DEFAULT_QUICK_ACTIONS = "LOCK,CLIMATE,FLASH,TRUNK"
         private const val KEY_REQUIRE_PIN_EVERY_TIME = "require_pin_every_time"
+        private const val KEY_LOCATION_PERM_PROMPTED = "location_perm_prompted"
+        private const val MAX_DEVICE_LOCATION_AGE_MS = 15L * 60L * 1000L
 
         private val MOBILE_REGEX = Regex("^1\\d{10}$")
         private val PIN_REGEX = Regex("^\\d{6}$")

@@ -155,7 +155,7 @@ class VehicleProfileStore(context: Context) {
     private val appContext: Context = context.applicationContext
     private val prefs: SharedPreferences = appContext
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val lock = Any()
+    private val lock: Any get() = storeLock
     private var accountDraft: VehicleProfile? = null
 
     init {
@@ -268,6 +268,28 @@ class VehicleProfileStore(context: Context) {
         }
         persistLocked(profiles, activeVin)
         normalized
+    }
+
+    /**
+     * Atomically updates only [VehicleProfile.controlPin] for [vin] without touching
+     * freshly provisioned BLE key material, tokens, or other vehicles' PINs.
+     */
+    fun updateControlPin(vin: String, newPin: String): VehicleProfile? = synchronized(lock) {
+        val targetVin = vin.trim().uppercase(Locale.US)
+        if (targetVin.isBlank()) return@synchronized null
+        val profiles = readProfilesLocked().toMutableList()
+        val index = profiles.indexOfFirst { it.vin.equals(targetVin, ignoreCase = true) }
+        if (index < 0) return@synchronized null
+        val updated = profiles[index].copy(
+            controlPin = newPin.trim(),
+            updatedAt = System.currentTimeMillis()
+        )
+        profiles[index] = updated
+        val activeVin = prefs.getString(KEY_ACTIVE_VIN, "").orEmpty()
+            .takeIf { active -> profiles.any { it.vin.equals(active, ignoreCase = true) } }
+            ?: updated.vin
+        persistLocked(profiles, activeVin)
+        updated
     }
 
     fun deleteProfile(vin: String) = synchronized(lock) {
@@ -434,6 +456,7 @@ class VehicleProfileStore(context: Context) {
     }
 
     companion object {
+        private val storeLock = Any()
         const val PREFS_NAME = "car_plus_profiles"
         private const val KEY_PROFILES = "profiles"
         private const val KEY_ACTIVE_VIN = "activeVin"
