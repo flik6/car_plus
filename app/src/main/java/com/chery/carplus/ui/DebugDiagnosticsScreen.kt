@@ -23,6 +23,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.lifecycle.LifecycleCoroutineScope
 import com.chery.carplus.ble.CheryBleController
+import com.chery.carplus.ble.PassiveEntryPrerequisiteChecker
+import com.chery.carplus.ble.PassiveEntryRuntime
+import com.chery.carplus.ble.PassiveEntryStore
 import com.chery.carplus.cloud.AppUpdater
 import com.chery.carplus.cloud.VehicleTelemetry
 import com.chery.carplus.profile.VehicleProfile
@@ -223,6 +226,27 @@ class DebugDiagnosticsScreen(
                     "MTU 分片 / 配对中" to "${ble.mtuPayloadChunkSize}B · waitingForBond=${ble.waitingForBond}",
                     "钥匙材料完整度" to "root=${profile.rootKeyHex.length / 2}B info=${profile.infoHex.length / 2}B edf=${profile.edfHex.length / 2}B uid=${maskMiddle(profile.userId)}",
                     "最近动态配对码" to lastPairingPinProvider().ifBlank { "--" }
+                )
+            ),
+            lp(top = dp(4), bottom = dp(10))
+        )
+        body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+        // 2b. Passive BLE Unlock / Walk-Away Lock Engine
+        val passiveCfg = PassiveEntryStore.load(context, profile.vin)
+        val passiveSnap = PassiveEntryRuntime.currentSnapshot()
+        val passivePrereq = PassiveEntryPrerequisiteChecker.evaluate(context, profile)
+        body.addView(AppComponents.createSectionHeader(context, "蓝牙无感解锁/上锁引擎"))
+        body.addView(
+            infoCard(
+                listOf(
+                    "总开关 / 子策略" to "${if (passiveCfg.enabled) "已开启" else "已关闭"} · 解锁:${yn(passiveCfg.autoUnlockEnabled)} 上锁:${yn(passiveCfg.autoLockEnabled)}",
+                    "唤醒通道" to "${passiveSnap.wakeChannelLabel}（就绪:${yn(passiveSnap.wakeChannelActive)} · 前台服务:${yn(passiveSnap.serviceRunning)}）",
+                    "运行状态" to passiveSnap.state.label,
+                    "实时/滤波 RSSI" to "${passiveSnap.currentRawRssi?.let { "${it}dBm" } ?: "--"} / ${passiveSnap.filteredRssi?.let { "${it}dBm" } ?: "--"}",
+                    "生效阈值" to "解锁 >= ${passiveCfg.effectiveUnlockRssi} dBm · 上锁 <= ${passiveCfg.effectiveLockRssi} dBm (${passiveCfg.sensitivity.label})",
+                    "前置条件" to passivePrereq.summaryText,
+                    "最近无感触发" to passiveSnap.lastEventText.ifBlank { passiveCfg.lastTriggerSummary }.ifBlank { "--" }
                 )
             ),
             lp(top = dp(4), bottom = dp(10))

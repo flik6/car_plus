@@ -170,6 +170,8 @@ class CheryBleController(
             statusText: String
         ) = Unit
 
+        fun onRssiUpdated(rssi: Int) = Unit
+
         fun onError(message: String, throwable: Throwable? = null) = Unit
     }
 
@@ -426,6 +428,58 @@ class CheryBleController(
         }
         rememberPairingPins(device, material)
         connectGatt(device)
+    }
+
+    /**
+     * Connects directly to a known paired vehicle BLE MAC address without waiting
+     * for a full foreground scan cycle, then runs the standard FFE1 -> 0x02 -> 0x03 -> 0x80 handshake.
+     */
+    fun connectDirectlyByAddress(
+        address: String,
+        material: SessionMaterial,
+        bleName: String? = null
+    ): Boolean {
+        if (closed) return false
+        val normalized = normalizeBleMacAddress(address) ?: return false
+        val currentAdapter = adapter ?: return false
+        if (!currentAdapter.isEnabled) return false
+        val device = runCatching { currentAdapter.getRemoteDevice(normalized) }.getOrNull() ?: return false
+        runOnMain {
+            if (closed) return@runOnMain
+            if (isSessionReady()) return@runOnMain
+            autoConnectAddress = normalized
+            autoConnectName = bleName ?: material.bleName
+            pendingActionKey = null
+            sessionMaterial = material.copy(
+                bleMac = normalized,
+                bleName = bleName ?: material.bleName
+            )
+            session = try {
+                InGeekBleSession(material.rootKey16, material.infoBin147, material.edfBin)
+            } catch (error: Throwable) {
+                fail("钥匙材料初始化失败", error)
+                return@runOnMain
+            }
+            rememberPairingPins(device, sessionMaterial!!)
+            appendDebugLog("后台直连本车蓝牙 $normalized")
+            connectGatt(device)
+        }
+        return true
+    }
+
+    /**
+     * Requests a live RSSI reading on the active GATT link (result delivered via [Listener.onRssiUpdated]).
+     */
+    fun requestRemoteRssi(): Boolean {
+        val gatt = currentGatt ?: return false
+        if (closed || connectPermissionError() != null) return false
+        return runCatching { gatt.readRemoteRssi() }.getOrDefault(false)
+    }
+
+    private fun normalizeBleMacAddress(raw: String): String? {
+        val compact = raw.trim().replace(":", "").replace("-", "").uppercase(Locale.US)
+        if (compact.length != 12 || !compact.all { it in '0'..'9' || it in 'A'..'F' }) return null
+        return compact.chunked(2).joinToString(":")
     }
 
     fun executeActionWithAutoConnect(
@@ -1023,6 +1077,14 @@ class CheryBleController(
             status: Int
         ) {
             mainHandler.post { finishWrite(status == BluetoothGatt.GATT_SUCCESS, status) }
+        }
+
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            mainHandler.post {
+                if (gatt !== currentGatt || status != BluetoothGatt.GATT_SUCCESS) return@post
+                currentRssi = rssi
+                listener?.onRssiUpdated(rssi)
+            }
         }
     }
 

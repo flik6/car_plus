@@ -2732,18 +2732,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             passiveIconView?.tintColor = if (cfg.enabled) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_PRIMARY
             passiveSubtitleTv?.text = when {
                 cfg.enabled && !report.allRequiredSatisfied ->
-                    "已开启 · 缺少 ${report.missingRequiredCount} 项必备条件（点此修复）"
+                    "缺 ${report.missingRequiredCount} 项条件 · 点此修复"
                 cfg.enabled -> {
                     val modeBits = buildList {
                         if (cfg.autoUnlockEnabled) add("解锁")
                         if (cfg.autoLockEnabled) add("上锁")
                     }.joinToString("/").ifBlank { "仅监听" }
-                    "已开启（$modeBits）· ${snap.state.label} · 点此调灵敏度"
+                    "$modeBits · ${snap.state.label}"
                 }
                 report.allRequiredSatisfied ->
-                    "前置条件已满足 · 靠近自动解锁与离车自动上锁"
+                    "靠近解锁 · 离车上锁"
                 else ->
-                    "开启前需先完成 ${report.missingRequiredCount} 项前置条件（点此查看）"
+                    "需完成 ${report.missingRequiredCount} 项设置"
             }
         }
         securityPassiveRefreshCallback = { refreshPassiveEntrySecurityRow() }
@@ -2772,7 +2772,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 AppComponents.showConfirmDialog(
                     context = this@MainActivity,
                     title = "关闭蓝牙无感解锁/上锁",
-                    message = "关闭后将停止后台蓝牙扫描监听，不再自动执行靠近解锁与离车上锁。",
+                    message = "关闭后将停止靠近解锁与离车上锁。",
                     confirmText = "确认关闭",
                     cancelText = "取消",
                     dangerConfirm = true
@@ -6410,7 +6410,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         appDialog = SixDigitPinSheet.showVerifyPinSheet(
             context = this,
             title = "验证 PIN 码",
-            subtitle = "验证 6 位云端 PIN 码后开启蓝牙无感解锁/上锁（后续自动触发无需再输 PIN 码）"
+            subtitle = "验证 PIN 码以开启蓝牙无感"
         ) { pin, showError, dismiss ->
             lifecycleScope.launch {
                 val verified = runCatching {
