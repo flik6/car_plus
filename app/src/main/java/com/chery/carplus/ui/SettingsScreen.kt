@@ -164,12 +164,14 @@ class SettingsScreen(
         return host
     }
 
+    private fun formatVehicleRowTrailing(): String {
+        val hasBoundVehicle = profileProvider().vin.isNotBlank() || modelNameProvider().isNotBlank()
+        if (!hasBoundVehicle) return "未绑定车辆"
+        return plateNoProvider().trim().ifBlank { "未设置车牌" }
+    }
+
     fun refreshVehicleRow() {
-        val trailing = listOfNotNull(
-            modelNameProvider().takeIf { it.isNotBlank() },
-            plateNoProvider().takeIf { it.isNotBlank() }
-        ).joinToString(" · ").ifBlank { "查看与编辑" }
-        mainVehicleTrailingTv?.text = trailing
+        mainVehicleTrailingTv?.text = formatVehicleRowTrailing()
     }
 
     fun cancelBackgroundJobs() {
@@ -475,15 +477,11 @@ class SettingsScreen(
 
         // 2. Group 0: 我的车辆管理 (900/935/932/933/934/931/930)
         body.addView(AppComponents.createSectionHeader(activity, "车辆管理"))
-        val vehicleTrailing = listOfNotNull(
-            modelNameProvider().takeIf { it.isNotBlank() },
-            plateNoProvider().takeIf { it.isNotBlank() }
-        ).joinToString(" · ").ifBlank { "查看与编辑" }
         val vehicleRow = AppComponents.createListRow(
             context = activity,
             icon = AppIconType.CAR_CONTROLS,
             title = "车辆管理",
-            trailingText = vehicleTrailing,
+            trailingText = formatVehicleRowTrailing(),
             showChevron = true,
             onClick = { onOpenVehicleSwitcher() }
         )
@@ -1128,12 +1126,10 @@ class SettingsScreen(
         )
 
         brandSection.addView(
-            text("Qiri 念「奇瑞」，+ 读「家」—— 屋檐下停着车，车里装着回家的路。", 12.5f, ABOUT_SUBTITLE_MUTED).apply {
+            text("Qiri+，奇瑞家", 12.5f, ABOUT_SUBTITLE_MUTED).apply {
                 gravity = Gravity.CENTER
-                setLineSpacing(0f, 1.45f)
-                setPadding(dp(12), 0, dp(12), 0)
             },
-            lp(top = dp(10))
+            lp(top = dp(6))
         )
         body.addView(brandSection, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))

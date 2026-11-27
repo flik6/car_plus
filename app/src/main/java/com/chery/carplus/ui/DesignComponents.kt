@@ -498,14 +498,20 @@ object AppComponents {
         hint: String,
         initialValue: String = "",
         inputType: Int = InputType.TYPE_CLASS_TEXT,
-        maxLength: Int? = null
+        maxLength: Int? = null,
+        showUnderline: Boolean = true,
+        onFocusChanged: ((Boolean) -> Unit)? = null
     ): Pair<LinearLayout, EditText> {
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
         val linePx = (0.8f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
-        val underline = View(context).apply {
-            setBackgroundColor(ThemeTokens.DIVIDER)
+        val underline = if (showUnderline) {
+            View(context).apply {
+                setBackgroundColor(ThemeTokens.DIVIDER)
+            }
+        } else {
+            null
         }
         val edit = EditText(context).apply {
             setText(initialValue)
@@ -514,24 +520,28 @@ object AppComponents {
             setTextColor(ThemeTokens.TEXT_PRIMARY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             setBackgroundColor(Color.TRANSPARENT)
-            setPadding(0, dp(context, 10f), 0, dp(context, 10f))
+            val vertPad = if (showUnderline) dp(context, 10f) else dp(context, 8f)
+            setPadding(0, vertPad, 0, vertPad)
             this.inputType = inputType
             isSingleLine = true
             if (maxLength != null && maxLength > 0) {
                 filters = arrayOf(InputFilter.LengthFilter(maxLength))
             }
             setOnFocusChangeListener { _, hasFocus ->
-                underline.setBackgroundColor(if (hasFocus) ThemeTokens.ACCENT_ACTIVE else ThemeTokens.DIVIDER)
+                underline?.setBackgroundColor(if (hasFocus) ThemeTokens.ACCENT_ACTIVE else ThemeTokens.DIVIDER)
+                onFocusChanged?.invoke(hasFocus)
             }
         }
         container.addView(
             edit,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         )
-        container.addView(
-            underline,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, linePx)
-        )
+        if (underline != null) {
+            container.addView(
+                underline,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, linePx)
+            )
+        }
         return container to edit
     }
 
@@ -593,6 +603,7 @@ object AppComponents {
         initialValue: String = "",
         mode: DateTimeMode = DateTimeMode.DATE_TIME,
         title: String? = null,
+        showUnderline: Boolean = true,
         onValueChanged: (String) -> Unit = {}
     ): Pair<LinearLayout, () -> String> {
         var currentValue = initialValue.trim()
@@ -618,10 +629,11 @@ object AppComponents {
             ellipsize = TextUtils.TruncateAt.END
         }
 
+        val vertPad = if (showUnderline) dp(context, 10f) else dp(context, 8f)
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(context, 10f), 0, dp(context, 10f))
+            setPadding(0, vertPad, 0, vertPad)
         }
         row.addView(valueView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(
@@ -634,11 +646,6 @@ object AppComponents {
                 marginStart = dp(context, 8f)
             }
         )
-
-        val linePx = (0.8f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
-        val underline = View(context).apply {
-            setBackgroundColor(ThemeTokens.DIVIDER)
-        }
 
         MotionSpec.attachPressPhysics(outer, pressedScale = 0.985f)
         outer.setOnClickListener {
@@ -659,10 +666,16 @@ object AppComponents {
             row,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         )
-        outer.addView(
-            underline,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, linePx)
-        )
+        if (showUnderline) {
+            val linePx = (0.8f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
+            val underline = View(context).apply {
+                setBackgroundColor(ThemeTokens.DIVIDER)
+            }
+            outer.addView(
+                underline,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, linePx)
+            )
+        }
 
         return outer to { currentValue }
     }
@@ -677,6 +690,7 @@ object AppComponents {
         initialEnd: String = "",
         mode: WheelDateTimeMode = WheelDateTimeMode.DATE_TIME_RANGE,
         title: String? = null,
+        showUnderline: Boolean = true,
         onRangeChanged: (start: String, end: String) -> Unit = { _, _ -> }
     ): Pair<LinearLayout, () -> Pair<String, String>> {
         var curStart = initialStart.trim()
@@ -698,19 +712,17 @@ object AppComponents {
             ellipsize = TextUtils.TruncateAt.END
         }
 
+        val vertPad = if (showUnderline) dp(context, 10f) else dp(context, 8f)
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(context, 10f), 0, dp(context, 10f))
+            setPadding(0, vertPad, 0, vertPad)
         }
         row.addView(valueView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(
             AppIconView(context, AppIconType.CALENDAR, ThemeTokens.TEXT_SUB),
             LinearLayout.LayoutParams(dp(context, 18f), dp(context, 18f)).apply { marginStart = dp(context, 8f) }
         )
-
-        val linePx = (0.8f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
-        val underline = View(context).apply { setBackgroundColor(ThemeTokens.DIVIDER) }
 
         MotionSpec.attachPressPhysics(outer, pressedScale = 0.985f)
         outer.setOnClickListener {
@@ -730,7 +742,11 @@ object AppComponents {
         }
 
         outer.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        outer.addView(underline, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, linePx))
+        if (showUnderline) {
+            val linePx = (0.8f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
+            val underline = View(context).apply { setBackgroundColor(ThemeTokens.DIVIDER) }
+            outer.addView(underline, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, linePx))
+        }
         return outer to { curStart to curEnd }
     }
 

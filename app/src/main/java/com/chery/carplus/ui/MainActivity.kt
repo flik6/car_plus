@@ -6201,20 +6201,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         fun buildOptions(items: List<SwitchableVehicleItem>): List<DropdownOption> =
             items.map { item ->
-                val sub = listOfNotNull(
-                    item.plateNo.takeIf { it.isNotBlank() },
-                    maskedVin(item.vin)
-                ).joinToString(" · ")
                 DropdownOption(
                     id = item.vin,
                     title = item.displayName,
-                    subtitle = sub,
+                    subtitle = item.plateNo.trim().ifBlank { "未设置车牌" },
                     selected = item.vin.equals(activeVin, ignoreCase = true)
                 )
             } + DropdownOption(
                 id = "__MANAGE_VEHICLES__",
                 title = "车辆管理",
-                subtitle = "查看座驾档案与编辑信息",
+                subtitle = "",
                 selected = false
             )
 
@@ -6290,7 +6286,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     }
                 }
                 val mergedList = merged.values.toList()
-                if (mergedList.size != initialItems.size || mergedList.any { it.plateNo.isNotBlank() && cachedPlateNo.isBlank() }) {
+                val initialSignature = initialItems.map { Triple(it.vin, it.displayName, it.plateNo.trim()) }
+                val mergedSignature = mergedList.map { Triple(it.vin, it.displayName, it.plateNo.trim()) }
+                if (mergedSignature != initialSignature) {
                     presentDropdown(mergedList)
                 }
             }
@@ -6346,10 +6344,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         orientation = LinearLayout.VERTICAL
                     }
                     textCol.addView(text(item.displayName, 16f, TEXT_PRIMARY, Typeface.BOLD))
-                    val sub = listOfNotNull(
-                        item.plateNo.takeIf { it.isNotBlank() },
-                        maskedVin(item.vin)
-                    ).joinToString(" · ")
+                    val sub = item.plateNo.trim().ifBlank { "未设置车牌" }
                     textCol.addView(text(sub, 12.5f, TEXT_SECONDARY).apply {
                         layoutParams = lp(top = dp(4))
                     })

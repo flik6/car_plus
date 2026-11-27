@@ -520,16 +520,21 @@ internal class VehicleManagementScreens(
             body.addView(AppComponents.createSectionHeader(context, "授权信息"), lp())
 
             if (isEditing) {
+                val nameHairline = AppComponents.createHairline(context, startInsetDp = 20)
                 val (nameBox, nameInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入驾驶员姓名",
                     initialValue = currentName,
                     inputType = InputType.TYPE_CLASS_TEXT,
-                    maxLength = 20
+                    maxLength = 20,
+                    showUnderline = false,
+                    onFocusChanged = { hasFocus ->
+                        nameHairline.setBackgroundColor(if (hasFocus) ThemeTokens.ACCENT_ACTIVE else ThemeTokens.DIVIDER)
+                    }
                 )
                 draftNameInput = nameInput
                 body.addView(buildInlineEditRow("姓名", nameBox), lp())
-                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(nameHairline)
             } else {
                 body.addView(buildBorderlessInfoRow("姓名", currentName), lp())
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
@@ -562,7 +567,8 @@ internal class VehicleManagementScreens(
                     initialStart = currentStart,
                     initialEnd = currentEnd,
                     mode = WheelDateTimeMode.DATE_TIME_RANGE,
-                    title = "选择授权时段"
+                    title = "选择授权时段",
+                    showUnderline = false
                 )
                 getDraftRange = rangeProvider
                 body.addView(buildInlineEditRow("授权时段", rangeBox), lp())
@@ -1713,34 +1719,45 @@ internal class VehicleManagementScreens(
             body.addView(AppComponents.createSectionHeader(context, "基本信息"), lp())
 
             if (isEditing) {
+                val plateHairline = AppComponents.createHairline(context, startInsetDp = 20)
                 val (plateBox, plateInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入车牌号",
                     initialValue = vehicle.plateNo,
                     inputType = InputType.TYPE_CLASS_TEXT,
-                    maxLength = 12
+                    maxLength = 12,
+                    showUnderline = false,
+                    onFocusChanged = { hasFocus ->
+                        plateHairline.setBackgroundColor(if (hasFocus) ThemeTokens.ACCENT_ACTIVE else ThemeTokens.DIVIDER)
+                    }
                 )
                 plateInputRef = plateInput
                 body.addView(buildInlineEditRow("车牌号", plateBox), lp())
-                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(plateHairline)
 
+                val ownerHairline = AppComponents.createHairline(context, startInsetDp = 20)
                 val (ownerBox, ownerInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入车主姓名",
                     initialValue = vehicle.hostName,
                     inputType = InputType.TYPE_CLASS_TEXT,
-                    maxLength = 24
+                    maxLength = 24,
+                    showUnderline = false,
+                    onFocusChanged = { hasFocus ->
+                        ownerHairline.setBackgroundColor(if (hasFocus) ThemeTokens.ACCENT_ACTIVE else ThemeTokens.DIVIDER)
+                    }
                 )
                 ownerInputRef = ownerInput
                 body.addView(buildInlineEditRow("车主姓名", ownerBox), lp())
-                body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+                body.addView(ownerHairline)
 
                 val (purchaseDateBox, getPurchaseDate) = AppComponents.createDateTimePickerField(
                     context = context,
                     hint = "请选择购车时间",
                     initialValue = normalizeDateOnly(vehicle.purchaseTime),
                     mode = DateTimeMode.DATE,
-                    title = "选择购车时间"
+                    title = "选择购车时间",
+                    showUnderline = false
                 )
                 getPurchaseDateRef = getPurchaseDate
                 body.addView(buildInlineEditRow("购车时间", purchaseDateBox), lp())
@@ -2370,7 +2387,7 @@ internal class VehicleManagementScreens(
         return LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(56)
+            minimumHeight = dp(54)
             setPadding(dp(20), dp(6), dp(20), dp(6))
             addView(
                 text(label, 14.5f, ThemeTokens.TEXT_SUB).apply { minWidth = dp(84) },
@@ -2378,7 +2395,7 @@ internal class VehicleManagementScreens(
             )
             addView(
                 inputView,
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(8) }
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(12) }
             )
         }
     }
