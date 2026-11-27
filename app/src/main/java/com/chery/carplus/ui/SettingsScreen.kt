@@ -69,9 +69,7 @@ class SettingsScreen(
     @Suppress("UNUSED_PARAMETER")
     private val onOpenPinManagement: () -> Unit = {},
     private val onPickAvatarImage: (onPicked: (Uri) -> Unit) -> Unit,
-    private val onLogout: () -> Unit,
-    private val onToggleTripTrack: (enabled: Boolean, onResult: (Boolean) -> Unit) -> Unit = { _, cb -> cb(false) },
-    private val initialTripTrackEnabled: Boolean? = null
+    private val onLogout: () -> Unit
 ) {
 
     private enum class SubPage {
@@ -92,12 +90,6 @@ class SettingsScreen(
     private val accountPrefs: SharedPreferences =
         activity.getSharedPreferences(PREFS_ACCOUNT_PROFILE, Context.MODE_PRIVATE)
 
-    init {
-        if (initialTripTrackEnabled != null) {
-            accountPrefs.edit().putBoolean(KEY_TRIP_TRACK_ENABLED, initialTripTrackEnabled).apply()
-        }
-    }
-
     private var currentSubPage: SubPage = SubPage.MAIN
     private var pageHost: FrameLayout? = null
 
@@ -114,7 +106,6 @@ class SettingsScreen(
     // Live UI hooks on MAIN page
     private var mainAboutBadgeDot: View? = null
     private var mainAboutValueText: TextView? = null
-    private var tripTrackBusy: Boolean = false
     private var activeConfirmDialog: Dialog? = null
     private var activeDropdown: PopupWindow? = null
 
@@ -301,10 +292,8 @@ class SettingsScreen(
             lp()
         )
 
-        // 3. Group 2: 系统与隐私
-        body.addView(AppComponents.createSectionHeader(activity, "系统与隐私"))
-        body.addView(buildTripTrackToggleRow(), lp())
-        body.addView(AppComponents.createHairline(activity, startInsetDp = 58))
+        // 3. Group 2: 通用 (vehicle-scoped trip track toggle lives in 安全性)
+        body.addView(AppComponents.createSectionHeader(activity, "通用"))
 
         // About CarPlus unified row with live version + update dot
         val (curName, _) = AppUpdater.getCurrentVersion(activity)
@@ -1290,80 +1279,8 @@ class SettingsScreen(
     }
 
     // =========================================================================
-    // Shared Component Compositions (AppComponents + ToggleSwitch)
+    // Shared Component Compositions (AppComponents)
     // =========================================================================
-
-    private fun buildTripTrackToggleRow(): View {
-        val trailingBox = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        val syncingLabel = text("同步中...", 12f, ThemeTokens.TEXT_SUB).apply {
-            visibility = View.GONE
-        }
-        trailingBox.addView(
-            syncingLabel,
-            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(10) }
-        )
-
-        val tripSwitch = ToggleSwitch(activity).apply {
-            setChecked(accountPrefs.getBoolean(KEY_TRIP_TRACK_ENABLED, true), animate = false)
-        }
-        tripSwitch.onToggleAttempt = { targetEnabled ->
-            if (!tripTrackBusy) {
-                val currentEnabled = accountPrefs.getBoolean(KEY_TRIP_TRACK_ENABLED, true)
-                activeConfirmDialog?.dismiss()
-                val titleText = if (targetEnabled) "开启行程轨迹记录" else "关闭行程轨迹记录"
-                val messageText = if (targetEnabled) {
-                    "开启后将自动记录车辆行驶路线与历史行程数据。"
-                } else {
-                    "关闭后将停止记录新的行驶轨迹，已有历史记录不受影响。"
-                }
-                activeConfirmDialog = AppComponents.showConfirmDialog(
-                    context = activity,
-                    title = titleText,
-                    message = messageText,
-                    confirmText = "确认",
-                    cancelText = "取消",
-                    dangerConfirm = !targetEnabled
-                ) {
-                    if (tripTrackBusy) return@showConfirmDialog
-                    tripTrackBusy = true
-                    syncingLabel.visibility = View.VISIBLE
-                    tripSwitch.isEnabled = false
-                    tripSwitch.alpha = 0.55f
-
-                    onToggleTripTrack(targetEnabled) { success ->
-                        activity.runOnUiThread {
-                            tripTrackBusy = false
-                            syncingLabel.visibility = View.GONE
-                            tripSwitch.isEnabled = true
-                            tripSwitch.alpha = 1f
-                            if (success) {
-                                accountPrefs.edit().putBoolean(KEY_TRIP_TRACK_ENABLED, targetEnabled).apply()
-                                tripSwitch.setChecked(targetEnabled, animate = true)
-                                toast(if (targetEnabled) "已开启行程轨迹记录" else "已关闭行程轨迹记录")
-                            } else {
-                                tripSwitch.setChecked(currentEnabled, animate = true)
-                                toast("行程轨迹设置同步失败，请稍后重试")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        trailingBox.addView(tripSwitch)
-
-        return AppComponents.createListRow(
-            context = activity,
-            icon = AppIconType.LOCATION_ARROW,
-            title = "行程轨迹记录",
-            trailingView = trailingBox,
-            showChevron = false,
-            onClick = null
-        )
-    }
 
     private fun showLogoutConfirmDialog() {
         activeConfirmDialog?.dismiss()
@@ -1512,7 +1429,6 @@ class SettingsScreen(
         private const val KEY_EMAIL = "email"
         private const val KEY_GENDER = "gender"
         private const val KEY_REGION = "region"
-        private const val KEY_TRIP_TRACK_ENABLED = "trip_track_enabled"
         private const val AVATAR_FILENAME = "user_avatar.jpg"
 
         private val ABOUT_BADGE_SURFACE = Color.parseColor("#1E2026")

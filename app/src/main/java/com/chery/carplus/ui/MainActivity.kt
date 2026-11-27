@@ -1969,24 +1969,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 pendingAvatarPickCallback = onPicked
                 avatarPickerLauncher.launch("image/*")
             },
-            onLogout = { logoutToWelcome() },
-            onToggleTripTrack = { enabled, onResult ->
-                val profile = profileStore.getActiveProfile()
-                if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
-                    onResult(false)
-                } else {
-                    lifecycleScope.launch {
-                        val ok = runCatching {
-                            withContext(Dispatchers.IO) {
-                                httpClient.setTripTrackSwitch(profile.vin, enabled, profile.accessToken)
-                            }
-                        }.getOrDefault(false)
-                        if (ok) cloudTripTrackEnabled = enabled
-                        onResult(ok)
-                    }
-                }
-            },
-            initialTripTrackEnabled = cloudTripTrackEnabled
+            onLogout = { logoutToWelcome() }
         )
         settingsScreen = screen
         currentScreen = Screen.SETTINGS
@@ -2148,6 +2131,88 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 title = "电子围栏",
                 showChevron = true
             ) { featureSheets.showGeofenceSheet() },
+            lp()
+        )
+        content.addView(AppComponents.createHairline(this, startInsetDp = 58))
+
+        // Row 5: 行程轨迹记录 (per-vehicle cloud trip track toggle with confirmation)
+        val tripTrailing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val tripSyncLabel = text("同步中...", 12f, TEXT_SECONDARY).apply {
+            visibility = View.GONE
+        }
+        tripTrailing.addView(
+            tripSyncLabel,
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(10) }
+        )
+        var tripBusy = false
+        val tripSwitch = ToggleSwitch(this).apply {
+            setChecked(cloudTripTrackEnabled ?: true, animate = false)
+        }
+        tripSwitch.onToggleAttempt = { targetEnabled ->
+            if (!tripBusy) {
+                val previousEnabled = cloudTripTrackEnabled ?: tripSwitch.checked
+                val titleText = if (targetEnabled) "开启行程轨迹记录" else "关闭行程轨迹记录"
+                val messageText = if (targetEnabled) {
+                    "开启后将自动记录当前车辆的行驶路线与历史行程数据。"
+                } else {
+                    "关闭后将停止记录当前车辆新的行驶轨迹，已有历史记录不受影响。"
+                }
+                AppComponents.showConfirmDialog(
+                    context = this@MainActivity,
+                    title = titleText,
+                    message = messageText,
+                    confirmText = "确认",
+                    cancelText = "取消",
+                    dangerConfirm = !targetEnabled
+                ) {
+                    if (tripBusy) return@showConfirmDialog
+                    val profile = profileStore.getActiveProfile()
+                    if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+                        tripSwitch.setChecked(previousEnabled, animate = true)
+                        Toast.makeText(this@MainActivity, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
+                        return@showConfirmDialog
+                    }
+                    tripBusy = true
+                    tripSyncLabel.visibility = View.VISIBLE
+                    tripSwitch.isEnabled = false
+                    tripSwitch.alpha = 0.55f
+                    lifecycleScope.launch {
+                        val ok = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.setTripTrackSwitch(profile.vin, targetEnabled, profile.accessToken)
+                            }
+                        }.getOrDefault(false)
+                        tripBusy = false
+                        tripSyncLabel.visibility = View.GONE
+                        tripSwitch.isEnabled = true
+                        tripSwitch.alpha = 1f
+                        if (ok) {
+                            cloudTripTrackEnabled = targetEnabled
+                            tripSwitch.setChecked(targetEnabled, animate = true)
+                            val msg = if (targetEnabled) "已开启行程轨迹记录" else "已关闭行程轨迹记录"
+                            Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                        } else {
+                            tripSwitch.setChecked(previousEnabled, animate = true)
+                            Toast.makeText(this@MainActivity, "行程轨迹设置同步失败，请稍后重试", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        }
+        tripTrailing.addView(tripSwitch)
+        content.addView(
+            AppComponents.createListRow(
+                context = this,
+                icon = AppIconType.LOCATION_ARROW,
+                title = "行程轨迹记录",
+                subtitle = "记录当前车辆行驶路线与历史行程",
+                trailingView = tripTrailing,
+                showChevron = false,
+                onClick = null
+            ),
             lp()
         )
 
@@ -3064,38 +3129,38 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         climateRowSubtitle = tempRow.second
         list.addView(tempRow.first)
 
-        // Row 2: 地点 (全屏实时位置与历史行程子页)
+        // Row 2: 地点 (全屏实时位置与历史行程子页；街道信息未获取前不展示占位文案)
         val locRow = createMenuRowWithRefs(
             icon = AppIconType.LOCATION_ARROW,
             title = "地点",
-            initialSubtitle = "位置信息待同步",
+            initialSubtitle = "",
             withStatusDot = false
         ) { showLocationSubpageScreen() }
-        locationRowSubtitle = locRow.second
+        locationRowSubtitle = locRow.second?.apply { visibility = View.GONE }
         list.addView(locRow.first)
 
-        // Row 3: 安全性 (车控密码开关 / 修改密码 / 防盗体检 / 电子围栏)
-        list.addView(
-            createMenuRow(
-                icon = AppIconType.SHIELD_CHECK,
-                title = "安全性",
-                subtitle = null,
-                withStatusDot = false
-            ) { showSecuritySubpageScreen() }
-        )
+        // Row 3: 安全性 (手机钥匙实时状态 + 车控密码开关 / 修改密码 / 防盗体检 / 电子围栏)
+        val securityRow = createMenuRowWithRefs(
+            icon = AppIconType.SHIELD_CHECK,
+            title = "安全性",
+            initialSubtitle = "手机钥匙未连接 · 远程网络控制",
+            withStatusDot = true
+        ) { showSecuritySubpageScreen() }
+        securityRowSubtitle = securityRow.second
+        securityDotView = securityRow.third
+        list.addView(securityRow.first)
 
         // Row 4: 驾驶员 (直达远程授权管理)
-        val driversRow = createMenuRowWithRefs(
-            icon = AppIconType.KEY_ROUND,
-            title = "驾驶员",
-            initialSubtitle = "手机钥匙已断开连接 · 远程网络控制",
-            withStatusDot = true
-        ) { showDriversSubpageScreen() }
-        securityRowSubtitle = driversRow.second
-        securityDotView = driversRow.third
-        list.addView(driversRow.first)
+        list.addView(
+            createMenuRow(
+                icon = AppIconType.KEY_ROUND,
+                title = "驾驶员",
+                subtitle = null,
+                withStatusDot = false
+            ) { showDriversSubpageScreen() }
+        )
 
-        // Row 5: 车辆信息 (基础车况信息 / 车辆升级 OTA)
+        // Row 5: 车辆信息 (基础车况信息 / 车辆版本)
         list.addView(
             createMenuRow(
                 icon = AppIconType.CAR_CONTROLS,
@@ -3110,79 +3175,51 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val footerBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(22), dp(22), dp(22), dp(10))
+            setPadding(dp(22), dp(22), dp(22), dp(12))
         }
 
-        // Clean Tesla-style centered plate signature above the odometer footer (keeps top energy row spotless)
-        plateBadgeView = text("", 12.5f, FOOTER_TEXT).apply {
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(4), dp(12), dp(4))
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            visibility = View.GONE
-            isClickable = true
-            isFocusable = true
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.96f, haptic = false)
-            setOnClickListener {
-                val curPlate = firstNonBlank(
-                    activeTelemetry?.licensePlate.orEmpty(),
-                    uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
-                )
-                val active = profileStore.getActiveProfile()
-                managementScreens.openVehicleInfoScreen(
-                    initialVehicle = managementScreens.cachedVehicleSummary(active.vin),
-                    vinFallback = active.vin,
-                    startInEditMode = curPlate.isBlank()
-                )
-            }
-        }
-        footerBox.addView(plateBadgeView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-
+        // Unified centered footer metric: defaults to license plate; single-tap cycles vehicle info
+        plateBadgeView = null
         homeFooterView = text("", 12.5f, FOOTER_TEXT).apply {
             gravity = Gravity.CENTER_HORIZONTAL
             setLineSpacing(0f, 1.4f)
-            setPadding(dp(12), dp(2), dp(12), dp(4))
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
             isClickable = true
             isFocusable = true
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.96f, haptic = false)
             setOnClickListener { handleHomeFooterTap() }
         }
-        footerBox.addView(homeFooterView, lp())
+        footerBox.addView(homeFooterView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         page.addView(footerBox, lp())
     }
 
-    private fun formatHomeFooterMetric(telemetry: VehicleTelemetry?, index: Int): String = when (index % 3) {
+    private fun formatHomeFooterMetric(telemetry: VehicleTelemetry?, index: Int): String = when (index % 4) {
         0 -> {
+            val plateNo = firstNonBlank(
+                telemetry?.licensePlate.orEmpty(),
+                uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
+            )
+            if (plateNo.isNotBlank()) plateNo else "未设置车牌"
+        }
+        1 -> {
             val odo = telemetry?.odometerKm?.takeIf { it > 0.0 }
             if (odo != null) "总里程 ${String.format(Locale.US, "%,d", odo.roundToInt())} km" else "总里程 -- km"
         }
-        1 -> {
-            val fuel = telemetry?.fuelPercent ?: telemetry?.electricitySurplus?.toDoubleOrNull()
-            if (fuel != null) "剩余油量 ${fuel.roundToInt()}%" else "剩余油量 --%"
-        }
-        else -> {
+        2 -> {
             val range = telemetry?.remainingRangeKm?.takeIf { it > 0.0 }
             if (range != null) "剩余续航 ${range.roundToInt()} km" else "剩余续航 -- km"
+        }
+        else -> {
+            val fuel = telemetry?.fuelPercent ?: telemetry?.electricitySurplus?.toDoubleOrNull()
+            if (fuel != null) "剩余油量 ${fuel.roundToInt()}%" else "剩余油量 --%"
         }
     }
 
     private fun handleHomeFooterTap() {
-        val now = System.currentTimeMillis()
-        if (footerTapCount == 0 || now - footerTapWindowStartMs > 2_500L) {
-            footerTapWindowStartMs = now
-            footerTapCount = 1
-        } else {
-            footerTapCount++
-        }
-        if (footerTapCount >= 5) {
-            footerTapCount = 0
-            footerTapWindowStartMs = 0L
-            AppHaptics.perform(homeFooterView, HapticLevel.LONG_PRESS_MODE)
-            showDetailedVehicleTelemetrySheet()
-            return
-        }
-
         AppHaptics.perform(homeFooterView, HapticLevel.LIGHT_TICK)
-        footerMetricIndex = (footerMetricIndex + 1) % 3
+        footerMetricIndex = (footerMetricIndex + 1) % 4
         val nextText = formatHomeFooterMetric(activeTelemetry, footerMetricIndex)
         homeFooterView?.let { tv ->
             tv.animate().cancel()
@@ -3524,7 +3561,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             else -> "空调已关闭"
         }
 
-        locationRowSubtitle?.text = formatLocationSubtitle(telemetry)
+        val locSub = formatLocationSubtitle(telemetry)
+        locationRowSubtitle?.apply {
+            text = locSub
+            visibility = if (locSub.isNotBlank()) View.VISIBLE else View.GONE
+        }
         updateHomeFooter(telemetry)
         updateSecurityRow()
     }
@@ -3560,7 +3601,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             else -> {
                 securityDotView?.state = StatusDotView.State.DISCONNECTED
-                securityRowSubtitle?.text = "手机钥匙已断开连接 · 远程网络控制"
+                securityRowSubtitle?.text = "手机钥匙未连接 · 远程网络控制"
                 channelBadgeIcon?.apply {
                     iconType = AppIconType.BLUETOOTH_ICON
                     contentDescription = "蓝牙通道未连接，当前使用远程网络"
@@ -3576,16 +3617,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val lon = telemetry?.longitude
         if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
             val key = streetLookupKey(lat, lon)
-            val address = when {
-                key == lastGeocodedKey && !lastGeocodedAddress.isNullOrBlank() -> lastGeocodedAddress!!
-                key == lastGeocodedKey && lastGeocodeSettled -> "街道信息暂不可用"
-                else -> {
+            val address = if (key == lastGeocodedKey && !lastGeocodedAddress.isNullOrBlank()) {
+                lastGeocodedAddress!!
+            } else {
+                if (key != lastGeocodedKey) {
                     triggerHomeReverseGeocode(lat, lon, key)
-                    "街道信息待获取"
                 }
+                null
             }
-            val distance = formatDistanceToVehicle(lat, lon) ?: "距离暂不可用"
-            return "$address · $distance"
+            val distance = formatDistanceToVehicle(lat, lon)
+            return listOfNotNull(address, distance).joinToString(" · ")
         }
         return "车辆位置暂不可用"
     }
@@ -3621,7 +3662,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     observer(currentStreetLabel())
                 }
                 if (currentScreen == Screen.HOME) {
-                    locationRowSubtitle?.text = formatLocationSubtitle(activeTelemetry)
+                    val updatedLocSub = formatLocationSubtitle(activeTelemetry)
+                    locationRowSubtitle?.apply {
+                        text = updatedLocSub
+                        visibility = if (updatedLocSub.isNotBlank()) View.VISIBLE else View.GONE
+                    }
                 }
             }
         }

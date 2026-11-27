@@ -338,7 +338,8 @@
     var sunroofNode = null;
 
     var trunkNodeRe = /mesh_1($|_\d)/;
-    var wheelMeshRe = /mesh_0(\.|_|$)/;
+    // GLTFLoader strips ':' and '.' via sanitizeNodeName, turning 'mesh_0.001' into 'mesh_0001'
+    var wheelMeshRe = /mesh_0(?:001|\.|_|$)/;
     var windowNodeRe = /mesh_(2_4|3_2|4_4|5_2)(_|$)/;
 
     model.traverse(function (obj) {
@@ -381,7 +382,7 @@
         if (!buckets) continue;
         var matName = (mesh.material && mesh.material.name) ? mesh.material.name : '';
         var isCaliper = mesh.name.indexOf('mesh_0_4') !== -1 && matName.indexOf('phong10SG1') !== -1;
-        var isTire = mesh.name.indexOf('mesh_0.001') !== -1 && matName.indexOf('phong19SG1') !== -1;
+        var isTire = matName.indexOf('phong19SG1') !== -1;
         splitEntries.push({
           buckets: buckets,
           material: mesh.material,
@@ -525,12 +526,12 @@
         });
       },
       setSteering: function (centerSteerRad) {
-        var clamped = clamp(centerSteerRad, -0.52, 0.52);
-        // Subtle Ackermann inner/outer steering geometry
-        var innerGain = 1.08;
-        var outerGain = 0.93;
-        var flAngle = clamped > 0 ? clamped * innerGain : clamped * outerGain;
-        var frAngle = clamped > 0 ? clamped * outerGain : clamped * innerGain;
+        var clamped = clamp(centerSteerRad, -0.30, 0.30);
+        // Subtle Ackermann inner/outer steering geometry (+X is driver-side left)
+        var innerGain = 1.07;
+        var outerGain = 0.94;
+        var flAngle = clamped > 0 ? clamped * outerGain : clamped * innerGain;
+        var frAngle = clamped > 0 ? clamped * innerGain : clamped * outerGain;
         if (wheelAssemblies.FL) wheelAssemblies.FL.steerPivot.rotation.y = flAngle;
         if (wheelAssemblies.FR) wheelAssemblies.FR.steerPivot.rotation.y = frAngle;
       },
@@ -1082,6 +1083,8 @@
 
     var container = new THREE.Group();
     container.name = 'car_container_' + cfg.key;
+    // Keep hidden until GLB finishes parsing so contact shadow never renders alone on empty canvas
+    container.visible = false;
     currentContainer = container;
     scene.add(container);
 
@@ -1156,6 +1159,7 @@
         if (!hasCustomDemoAngle) {
           startEntranceAnimation();
         }
+        container.visible = true;
 
         notifyAndroidReady();
         requestAnimationFrame(function () {

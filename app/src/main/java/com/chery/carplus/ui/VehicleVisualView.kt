@@ -1,8 +1,9 @@
 package com.chery.carplus.ui
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
@@ -21,6 +22,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.webkit.WebViewAssetLoader
+import com.chery.carplus.R
 import org.json.JSONObject
 
 /**
@@ -133,7 +135,8 @@ class VehicleVisualView @JvmOverloads constructor(
     private var isDestroyed = false
 
     private val webView: OrbitWebView
-    private val placeholderView: ImageView
+    private val placeholderView: FrameLayout
+    private var loadingPulseAnimator: ObjectAnimator? = null
     private val fallbackLabel: TextView
     private val hintBadge: TextView
 
@@ -180,15 +183,34 @@ class VehicleVisualView @JvmOverloads constructor(
         }
         addView(webView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
-        // Keep seamless dark stage clear so the 3D drive-in entrance animation plays unobstructed
-        placeholderView = ImageView(context).apply {
-            setBackgroundColor(bgColor)
-            visibility = View.GONE
+        // Subtle ambient CHERY emblem breathing on #161719 while 3D GLB initializes,
+        // fading smoothly out the instant the 3D car begins driving in from screen-right.
+        val ambientEmblem = ImageView(context).apply {
+            setImageResource(R.drawable.ic_chery_adaptive_mark)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            alpha = 0.22f
             isClickable = false
             isFocusable = false
         }
-        placeholderHidden = true
+        placeholderView = FrameLayout(context).apply {
+            setBackgroundColor(bgColor)
+            isClickable = false
+            isFocusable = false
+            addView(
+                ambientEmblem,
+                LayoutParams(dp(116), dp(36), Gravity.CENTER).apply {
+                    bottomMargin = dp(28)
+                }
+            )
+        }
+        placeholderHidden = false
         addView(placeholderView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        loadingPulseAnimator = ObjectAnimator.ofFloat(ambientEmblem, View.ALPHA, 0.14f, 0.30f).apply {
+            duration = 950L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            start()
+        }
 
         // Subtle bottom-right 360° hint pill
         hintBadge = TextView(context).apply {
@@ -348,6 +370,8 @@ class VehicleVisualView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         isDestroyed = true
+        loadingPulseAnimator?.cancel()
+        loadingPulseAnimator = null
         mainHandler.removeCallbacksAndMessages(null)
         webView.removeJavascriptInterface("Car3DBridge")
         webView.stopLoading()
@@ -358,14 +382,18 @@ class VehicleVisualView @JvmOverloads constructor(
     private fun fadeOutPlaceholder() {
         if (isDestroyed || placeholderHidden) return
         placeholderHidden = true
+        loadingPulseAnimator?.cancel()
+        loadingPulseAnimator = null
         if (placeholderView.visibility != View.VISIBLE) return
         placeholderView.animate().cancel()
         placeholderView.animate()
             .alpha(0f)
-            .setDuration(180L)
+            .translationY(-dp(6).toFloat())
+            .setDuration(220L)
             .setInterpolator(MotionSpec.EASE_OUT_EXPO)
             .withEndAction {
                 placeholderView.visibility = View.GONE
+                placeholderView.translationY = 0f
             }
             .start()
     }

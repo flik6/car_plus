@@ -1790,18 +1790,40 @@ internal class VehicleFeatureSheets(
         val hasVehicleLocation = locationTelemetry?.latitude != null &&
             locationTelemetry.longitude != null &&
             (locationTelemetry.latitude != 0.0 || locationTelemetry.longitude != 0.0)
-        val approxAddr = when {
-            !hasVehicleLocation -> "车辆位置暂不可用"
-            liveAddressLabelProvider().isBlank() -> "街道信息暂不可用"
-            else -> liveAddressLabelProvider()
-        }
+        val initialStreet = liveAddressLabelProvider().trim()
         val distLabel = if (hasVehicleLocation) {
-            liveDistanceLabelProvider().trim().ifBlank { "距离暂不可用" }
+            liveDistanceLabelProvider().trim()
         } else {
-            "距离暂不可用"
+            ""
         }
-        val addressView = text(approxAddr, 15f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 }
-        val distanceView = text(distLabel, 12.5f, TEXT_SUB).apply { maxLines = 1 }
+        val addressView = text("", 15f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 }
+        val distanceView = text("", 12.5f, TEXT_SUB).apply { maxLines = 1 }
+
+        fun applyLocationSummary(hasLoc: Boolean, street: String, dist: String) {
+            when {
+                !hasLoc -> {
+                    addressView.text = "车辆位置暂不可用"
+                    addressView.visibility = View.VISIBLE
+                    distanceView.visibility = View.GONE
+                }
+                street.isNotBlank() -> {
+                    addressView.text = street
+                    addressView.visibility = View.VISIBLE
+                    distanceView.text = dist
+                    distanceView.visibility = if (dist.isNotBlank()) View.VISIBLE else View.GONE
+                }
+                dist.isNotBlank() -> {
+                    addressView.text = dist
+                    addressView.visibility = View.VISIBLE
+                    distanceView.visibility = View.GONE
+                }
+                else -> {
+                    addressView.visibility = View.GONE
+                    distanceView.visibility = View.GONE
+                }
+            }
+        }
+        applyLocationSummary(hasVehicleLocation, initialStreet, distLabel)
         addrBar.addView(addressView)
         addrBar.addView(distanceView, lp(top = dp(2)))
         root.addView(addrBar, lp())
@@ -1810,12 +1832,8 @@ internal class VehicleFeatureSheets(
             val current = telemetryProvider()
             val lat = current?.latitude
             val lon = current?.longitude
-            addressView.text = if (lat == null || lon == null || (lat == 0.0 && lon == 0.0)) {
-                "车辆位置暂不可用"
-            } else {
-                resolved.ifBlank { "街道信息暂不可用" }
-            }
-            distanceView.text = liveDistanceLabelProvider().ifBlank { "距离暂不可用" }
+            val hasLoc = lat != null && lon != null && (lat != 0.0 || lon != 0.0)
+            applyLocationSummary(hasLoc, resolved.trim(), liveDistanceLabelProvider().trim())
         }
 
         root.addView(AppComponents.createHairline(context, startInsetDp = 20))
@@ -2205,7 +2223,7 @@ internal class VehicleFeatureSheets(
         val resolvedPlate = plateNoProvider().ifBlank { t?.licensePlate.orEmpty() }
         val rows = buildList {
             if (resolvedPlate.isNotBlank()) add("车牌号码" to resolvedPlate)
-            add("车辆位置" to if (hasCoords) liveAddressLabelProvider().ifBlank { "街道信息暂不可用" } else "位置暂不可用")
+            add("车辆位置" to if (hasCoords) liveAddressLabelProvider().ifBlank { "已定位" } else "位置暂不可用")
             add("距离" to if (hasCoords) liveDistanceLabelProvider().ifBlank { "距离暂不可用" } else "距离暂不可用")
             add("车辆在线 / 定位状态" to locationStatus)
             t?.time?.takeIf { it.isNotBlank() }?.let { add("定位时间" to it) }
