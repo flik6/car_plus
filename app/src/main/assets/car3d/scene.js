@@ -254,22 +254,16 @@
   }
 
   function buildEntranceChoreography(styleKey, revSideOverride) {
-    // Camera-aligned ground-plane basis for DEFAULT_THETA (+0.76):
-    // (rx, rz) = screen-right unit vector; (awayX, awayZ) = deep-background unit vector
+    // Camera-aligned lateral screen-right unit vector for DEFAULT_THETA (+0.76)
     var rx = Math.cos(DEFAULT_THETA);
     var rz = -Math.sin(DEFAULT_THETA);
-    var awayX = -Math.sin(DEFAULT_THETA);
-    var awayZ = -Math.cos(DEFAULT_THETA);
 
     if (styleKey === 'left_drive') {
-      // Exact mirror of right_drive using mirrored Front-Right 3/4 showcase camera (-DEFAULT_THETA):
-      // car emerges far away from the distant screen-left horizon (-10.2m left, +8.6m deep)
-      // and settles into the mirrored passenger-side Front-Right 3/4 angle (-0.76, 1.36).
+      // Crisp close-in lateral sweep from off-screen left — exact mirror of right_drive
+      // around the mirrored Front-Right 3/4 showcase camera (-DEFAULT_THETA, 1.36).
       var leftTheta = -DEFAULT_THETA;
       var lRx = Math.cos(leftTheta);
       var lRz = -Math.sin(leftTheta);
-      var lAwayX = -Math.sin(leftTheta);
-      var lAwayZ = -Math.cos(leftTheta);
       return {
         bayPose: null,
         camProfile: {
@@ -290,23 +284,23 @@
           {
             type: 'drive',
             dir: 1,
-            duration: 2.28,
+            duration: 1.72,
             ease: 'decel',
-            p0: { x: -lRx * 10.2 + lAwayX * 8.6, z: -lRz * 10.2 + lAwayZ * 8.6 },
-            p1: { x: -lRx * 5.6 + lAwayX * 3.2, z: -lRz * 5.6 + lAwayZ * 3.2 },
-            p2: { x: 0.0, z: -2.85 },
+            p0: { x: -lRx * 7.8, z: -lRz * 7.8 - 1.2 },
+            p1: { x: -lRx * 3.8, z: -lRz * 3.8 - 1.8 },
+            p2: { x: 0.0, z: -2.45 },
             p3: { x: 0.0, z: 0.0 },
-            straightFadeStart: 0.78,
-            headStart: 0.72,
+            straightFadeStart: 0.76,
+            headStart: 0.65,
             headEnd: 0.36,
-            brakeStartT: 0.28,
-            brakePeakT: 0.56,
+            brakeStartT: 0.18,
+            brakePeakT: 0.45,
             stopImpulse: [-0.085, 0.0, 0.012],
             stopFired: false
           },
           {
             type: 'hold',
-            duration: 0.30,
+            duration: 0.28,
             x: 0.0,
             z: 0.0,
             yaw: 0.0,
@@ -504,8 +498,8 @@
       };
     }
 
-    // Default: 'right_drive' — emerges far away from the distant screen-right horizon
-    // (+rx * 10.2 + away * 8.6) and settles into classic Front-Left 3/4 (+0.76, 1.38).
+    // Default: 'right_drive' — crisp close-in lateral showroom curve from off-screen right
+    // settling into classic Front-Left 3/4 (+0.76, 1.38).
     return {
       bayPose: null,
       camProfile: {
@@ -526,23 +520,23 @@
         {
           type: 'drive',
           dir: 1,
-          duration: 2.28,
+          duration: 1.72,
           ease: 'decel',
-          p0: { x: rx * 10.2 + awayX * 8.6, z: rz * 10.2 + awayZ * 8.6 },
-          p1: { x: rx * 5.6 + awayX * 3.2, z: rz * 5.6 + awayZ * 3.2 },
-          p2: { x: 0.0, z: -2.85 },
+          p0: { x: rx * 7.8, z: rz * 7.8 - 1.2 },
+          p1: { x: rx * 3.8, z: rz * 3.8 - 1.8 },
+          p2: { x: 0.0, z: -2.45 },
           p3: { x: 0.0, z: 0.0 },
-          straightFadeStart: 0.78,
-          headStart: 0.72,
+          straightFadeStart: 0.76,
+          headStart: 0.65,
           headEnd: 0.36,
-          brakeStartT: 0.28,
-          brakePeakT: 0.56,
+          brakeStartT: 0.18,
+          brakePeakT: 0.45,
           stopImpulse: [-0.085, 0.0, 0.012],
           stopFired: false
         },
         {
           type: 'hold',
-          duration: 0.30,
+          duration: 0.28,
           x: 0.0,
           z: 0.0,
           yaw: 0.0,

@@ -213,12 +213,23 @@ internal class VehicleManagementScreens(
      * Level-1 minimalist driver card: essential identity, status, mobile, permission & validity only.
      * All management actions (toggle 905, edit 903, records 137, danger revoke 904) live in Level 2.
      */
+    private fun maskDriverPhone(raw: String): String {
+        val clean = raw.trim()
+        if (clean.isBlank()) return SensitiveUiText.MISSING
+        if (clean.length >= 6) {
+            return clean.take(3) + "*".repeat(clean.length - 5) + clean.takeLast(2)
+        }
+        return "*".repeat(clean.length.coerceAtLeast(4))
+    }
+
     private fun buildDriverSummaryCard(
         item: VehicleAuthorizationItem,
         vin: String,
         onChanged: () -> Unit
     ): LinearLayout {
-        val granteeName = item.receiverAccountName.ifBlank { item.receiverMobile.ifBlank { "驾驶员" } }
+        val granteeName = item.receiverAccountName.ifBlank {
+            item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
+        }
         val isControlLevel = item.levelFlag == "1" || item.authority == "1"
 
         val card = LinearLayout(context).apply {
@@ -272,7 +283,7 @@ internal class VehicleManagementScreens(
             gravity = Gravity.CENTER_VERTICAL
         }
         midRow.addView(
-            text(item.receiverMobile.ifBlank { "--" }, 13.5f, ThemeTokens.TEXT_BODY),
+            text(maskDriverPhone(item.receiverMobile), 13.5f, ThemeTokens.TEXT_BODY),
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
         midRow.addView(
@@ -311,7 +322,9 @@ internal class VehicleManagementScreens(
         onChanged: () -> Unit
     ) {
         var currentEnabled = item.enabled
-        var currentName = item.receiverAccountName.ifBlank { item.receiverMobile.ifBlank { "驾驶员" } }
+        var currentName = item.receiverAccountName.ifBlank {
+            item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
+        }
         var currentStart = formatAuthTime(item.startTime).takeUnless { it == "--" }.orEmpty()
         var currentEnd = formatAuthTime(item.endTime).takeUnless { it == "--" }.orEmpty()
         var isEditing = false
@@ -525,7 +538,7 @@ internal class VehicleManagementScreens(
             body.addView(
                 buildBorderlessInfoRow(
                     label = "手机号",
-                    value = item.receiverMobile.ifBlank { SensitiveUiText.MISSING },
+                    value = maskDriverPhone(item.receiverMobile),
                     dimmed = isEditing
                 ),
                 lp()
@@ -827,7 +840,9 @@ internal class VehicleManagementScreens(
         item: VehicleAuthorizationItem,
         vin: String
     ) {
-        val granteeName = item.receiverAccountName.ifBlank { item.receiverMobile.ifBlank { "驾驶员" } }
+        val granteeName = item.receiverAccountName.ifBlank {
+            item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
+        }
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -868,7 +883,7 @@ internal class VehicleManagementScreens(
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
         if (item.receiverMobile.isNotBlank()) {
-            header.addView(text(item.receiverMobile, 13f, ThemeTokens.TEXT_SUB))
+            header.addView(text(maskDriverPhone(item.receiverMobile), 13f, ThemeTokens.TEXT_SUB))
         }
         body.addView(header, lp(bottom = dp(12)))
 
@@ -2053,7 +2068,11 @@ internal class VehicleManagementScreens(
             }
 
             // Section 2: 车辆状态 (live telemetry specs for active vehicle, hidden during edit mode)
-            val liveSpecs = if (isCurrentActive && !isEditing) vehicleLiveSpecsProvider(vehicle.vin) else emptyList()
+            val liveSpecs = if (isCurrentActive && !isEditing) {
+                vehicleLiveSpecsProvider(vehicle.vin).filterNot { (label, _) -> label == "蓝牙钥匙名称" }
+            } else {
+                emptyList()
+            }
             if (liveSpecs.isNotEmpty()) {
                 body.addView(AppComponents.createSectionHeader(context, "车辆状态"), lp())
                 liveSpecs.forEachIndexed { idx, (label, value) ->

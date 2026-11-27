@@ -1128,10 +1128,12 @@ class SettingsScreen(
         )
 
         brandSection.addView(
-            text("离线 3D 车控 · 双模数字钥匙", 12.5f, ABOUT_SUBTITLE_MUTED).apply {
+            text("Qiri 念「奇瑞」，+ 读「家」—— 屋檐下停着车，车里装着回家的路。", 12.5f, ABOUT_SUBTITLE_MUTED).apply {
                 gravity = Gravity.CENTER
+                setLineSpacing(0f, 1.45f)
+                setPadding(dp(12), 0, dp(12), 0)
             },
-            lp(top = dp(6))
+            lp(top = dp(10))
         )
         body.addView(brandSection, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))

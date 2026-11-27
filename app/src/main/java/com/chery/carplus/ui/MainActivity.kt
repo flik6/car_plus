@@ -417,12 +417,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var homeMenuSectionView: View? = null
     private var carVisual: VehicleVisualView? = null
     private data class TpmsCornerViews(
-        val pill: LinearLayout,
         val pressureTv: TextView,
-        val unitTv: TextView,
-        val metaRow: LinearLayout,
-        val statusDot: View,
-        val subTv: TextView
+        val tempTv: TextView
     )
 
     private data class QuickActionDragPayload(
@@ -4111,9 +4107,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         tpmsOverlayContainer = overlay
 
-        val dotSize = dpF(5.5f).roundToInt().coerceAtLeast(dp(5))
-
-        fun makeTpmsHudPill(
+        fun makeMinimalTpmsCorner(
             gravity: Int,
             alignEnd: Boolean,
             startM: Int,
@@ -4121,90 +4115,39 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             endM: Int,
             bottomM: Int
         ): TpmsCornerViews {
-            val pill = LinearLayout(this).apply {
+            val box = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 this.gravity = if (alignEnd) Gravity.END else Gravity.START
-                minimumWidth = dp(76)
-                background = rounded(
-                    fillColor = Color.argb(208, 26, 28, 34),
-                    radiusDp = 11f,
-                    strokeColor = Color.parseColor("#323846"),
-                    strokeWidthDp = 0.8f
-                )
-                setPadding(dp(10), dp(7), dp(10), dp(7))
-                elevation = dpF(2f)
+                background = null
                 clipChildren = false
                 clipToPadding = false
             }
-
-            val pressureRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                this.gravity = Gravity.BOTTOM or (if (alignEnd) Gravity.END else Gravity.START)
-            }
-            val pressureTv = text("--", 16f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+            val pressureTv = text("--", 18f, Color.parseColor("#F2F4F8"), Typeface.BOLD).apply {
                 maxLines = 1
                 isSingleLine = true
                 ellipsize = null
                 includeFontPadding = false
                 fontFeatureSettings = "tnum"
+                setShadowLayer(3f, 0f, 1f, Color.argb(120, 0, 0, 0))
             }
-            val unitTv = text("bar", 10.5f, ThemeTokens.TEXT_SUB).apply {
-                maxLines = 1
-                isSingleLine = true
-                ellipsize = null
-                includeFontPadding = false
-                visibility = View.GONE
-                setPadding(0, 0, 0, dp(1))
-            }
-            pressureRow.addView(pressureTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            pressureRow.addView(
-                unitTv,
-                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                    marginStart = dp(3)
-                }
-            )
-
-            val metaRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                this.gravity = Gravity.CENTER_VERTICAL or (if (alignEnd) Gravity.END else Gravity.START)
-                visibility = View.GONE
-            }
-            val statusDot = View(this).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.parseColor("#5A606E"))
-                }
-            }
-            val subTv = text("", 11f, ThemeTokens.TEXT_SUB).apply {
+            val tempTv = text("", 12f, ThemeTokens.TEXT_SUB).apply {
                 maxLines = 1
                 isSingleLine = true
                 ellipsize = null
                 includeFontPadding = false
                 fontFeatureSettings = "tnum"
+                visibility = View.GONE
+                setShadowLayer(3f, 0f, 1f, Color.argb(120, 0, 0, 0))
             }
-            if (alignEnd) {
-                metaRow.addView(subTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-                metaRow.addView(
-                    statusDot,
-                    LinearLayout.LayoutParams(dotSize, dotSize).apply { marginStart = dp(5) }
-                )
-            } else {
-                metaRow.addView(
-                    statusDot,
-                    LinearLayout.LayoutParams(dotSize, dotSize).apply { marginEnd = dp(5) }
-                )
-                metaRow.addView(subTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            }
-
-            pill.addView(pressureRow, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            pill.addView(
-                metaRow,
+            box.addView(pressureTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            box.addView(
+                tempTv,
                 LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                    topMargin = dp(4)
+                    topMargin = dp(2)
                 }
             )
             overlay.addView(
-                pill,
+                box,
                 FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, gravity).apply {
                     marginStart = startM
                     topMargin = topM
@@ -4212,20 +4155,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     bottomMargin = bottomM
                 }
             )
-            return TpmsCornerViews(
-                pill = pill,
-                pressureTv = pressureTv,
-                unitTv = unitTv,
-                metaRow = metaRow,
-                statusDot = statusDot,
-                subTv = subTv
-            )
+            return TpmsCornerViews(pressureTv = pressureTv, tempTv = tempTv)
         }
 
-        tpmsFlCorner = makeTpmsHudPill(Gravity.TOP or Gravity.START, false, dp(16), dp(14), 0, 0)
-        tpmsFrCorner = makeTpmsHudPill(Gravity.TOP or Gravity.END, true, 0, dp(14), dp(16), 0)
-        tpmsRlCorner = makeTpmsHudPill(Gravity.BOTTOM or Gravity.START, false, dp(16), 0, 0, dp(14))
-        tpmsRrCorner = makeTpmsHudPill(Gravity.BOTTOM or Gravity.END, true, 0, 0, dp(16), dp(14))
+        tpmsFlCorner = makeMinimalTpmsCorner(Gravity.TOP or Gravity.START, false, dp(20), dp(14), 0, 0)
+        tpmsFrCorner = makeMinimalTpmsCorner(Gravity.TOP or Gravity.END, true, 0, dp(14), dp(20), 0)
+        tpmsRlCorner = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.START, false, dp(20), 0, 0, dp(14))
+        tpmsRrCorner = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.END, true, 0, 0, dp(20), dp(14))
         heroContainer.addView(
             overlay,
             FrameLayout.LayoutParams(
@@ -4274,12 +4210,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun updateTpmsBadges(telemetry: VehicleTelemetry?) {
-        val normalDotColor = Color.parseColor("#34D399")
+        val normalColor = Color.parseColor("#F2F4F8")
         val warnColor = Color.parseColor("#F59E0B")
         val dangerColor = Color.parseColor("#F87171")
-        val mutedDotColor = Color.parseColor("#5A606E")
-        val defaultStroke = Color.parseColor("#323846")
-        val pillFill = Color.argb(208, 26, 28, 34)
 
         fun isValidTemp(s: String): Boolean {
             if (s.isBlank() || s == "255" || s == "65535" || s.equals("FFFF", ignoreCase = true)) return false
@@ -4294,58 +4227,31 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         ) {
             if (corner == null) return
             val bar = parseCornerTyrePressureBar(pressureRaw)
+            if (bar != null) {
+                corner.pressureTv.text = String.format(Locale.US, "%.2f", bar)
+                corner.pressureTv.setTextColor(
+                    when {
+                        bar < 1.7 || bar > 3.2 -> dangerColor
+                        bar < 2.0 || bar > 2.9 -> warnColor
+                        else -> normalColor
+                    }
+                )
+            } else {
+                corner.pressureTv.text = "--"
+                corner.pressureTv.setTextColor(ThemeTokens.TEXT_SUB)
+            }
+
             val tempRaw = tempKeys.firstNotNullOfOrNull { key ->
                 telemetry?.conditionFields?.get(key)?.trim()?.takeIf(::isValidTemp)
                     ?: telemetry?.conditionFields?.get(key.uppercase(Locale.US))?.trim()?.takeIf(::isValidTemp)
             }
             val tempNum = tempRaw?.toDoubleOrNull()
-
-            val (pressureTextColor, dotColor, strokeColor, fallbackSub) = when {
-                bar == null -> Quad(ThemeTokens.TEXT_SUB, mutedDotColor, defaultStroke, "")
-                bar < 1.7 || bar > 3.2 -> Quad(
-                    dangerColor,
-                    dangerColor,
-                    Color.argb(115, 248, 113, 113),
-                    if (bar < 1.7) "胎压过低" else "胎压过高"
-                )
-                bar < 2.0 || bar > 2.9 -> Quad(
-                    warnColor,
-                    warnColor,
-                    Color.argb(110, 245, 158, 11),
-                    if (bar < 2.0) "胎压偏低" else "胎压偏高"
-                )
-                else -> Quad(ThemeTokens.TEXT_PRIMARY, normalDotColor, defaultStroke, "胎压正常")
-            }
-
-            if (bar != null) {
-                corner.pressureTv.text = String.format(Locale.US, "%.2f", bar)
-                corner.unitTv.visibility = View.VISIBLE
+            if (tempRaw != null && tempNum != null) {
+                corner.tempTv.text = if (tempNum % 1.0 == 0.0) tempNum.toInt().toString() else tempRaw
+                corner.tempTv.setTextColor(if (tempNum >= 65.0) warnColor else ThemeTokens.TEXT_SUB)
+                corner.tempTv.visibility = View.VISIBLE
             } else {
-                corner.pressureTv.text = "--"
-                corner.unitTv.visibility = View.GONE
-            }
-            corner.pressureTv.setTextColor(pressureTextColor)
-            corner.pill.background = rounded(
-                fillColor = pillFill,
-                radiusDp = 11f,
-                strokeColor = strokeColor,
-                strokeWidthDp = 0.8f
-            )
-            (corner.statusDot.background as? GradientDrawable)?.setColor(dotColor)
-
-            val subLabel = when {
-                tempRaw != null -> "${tempRaw}°C"
-                fallbackSub.isNotBlank() -> fallbackSub
-                else -> ""
-            }
-            if (subLabel.isNotBlank()) {
-                corner.subTv.text = subLabel
-                corner.subTv.setTextColor(
-                    if (tempNum != null && tempNum >= 65.0) warnColor else ThemeTokens.TEXT_SUB
-                )
-                corner.metaRow.visibility = View.VISIBLE
-            } else {
-                corner.metaRow.visibility = View.GONE
+                corner.tempTv.visibility = View.GONE
             }
         }
 
@@ -4354,8 +4260,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         applyCorner(tpmsRlCorner, telemetry?.lRearTyre.orEmpty(), "lRearTyreTemp", "rlTyreTemp", "tyreTempRL", "leftRearTyreTemp")
         applyCorner(tpmsRrCorner, telemetry?.rRearTyre.orEmpty(), "rRearTyreTemp", "rrTyreTemp", "tyreTempRR", "rightRearTyreTemp")
     }
-
-    private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun buildIconQuickActionRow(page: LinearLayout) {
         val row = LinearLayout(this).apply {
@@ -6725,75 +6629,91 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val airTypeInt = uiPrefs.getString(KEY_AIR_TYPE, "1").orEmpty().toIntOrNull()?.coerceIn(0, 1) ?: 1
 
         showBottomSheet("空调") { sheet, dialog ->
-            // Compact status line with colored StatusDotView anchor
+            // Airy, borderless Hero Temperature Stage directly on sheet canvas
             val statusRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+                gravity = Gravity.CENTER
             }
             statusRow.addView(
                 StatusDotView(this).apply {
                     state = if (acActive) StatusDotView.State.CONNECTED else StatusDotView.State.IDLE
                 },
-                LinearLayout.LayoutParams(dp(10), dp(10)).apply { marginEnd = dp(7) }
+                LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) }
             )
             val sub = buildString {
                 append(if (acActive) "运行中" else "已关闭")
-                if (cabin != null) append("  ·  车内 ${cabin.roundToInt()}°C")
+                if (cabin != null) append(" · 车内 ${cabin.roundToInt()}°C")
             }
-            statusRow.addView(text(sub, 13f, TEXT_SECONDARY))
-            sheet.addView(statusRow, lp(top = dp(6), bottom = dp(14)))
+            statusRow.addView(text(sub, 12.5f, ThemeTokens.TEXT_SUB))
+            sheet.addView(statusRow, lp(top = dp(6), bottom = dp(16)))
 
-            // Elevated hero temperature card
-            val heroCard = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(16), dp(16), dp(14))
-                background = rounded(ThemeTokens.BG_CARD_ELEVATED, 14f, ThemeTokens.BORDER_SUBTLE, 0.9f)
-            }
+            fun climateStepButton(symbol: String, onTap: () -> Unit): TextView =
+                text(symbol, 20f, TEXT_PRIMARY, Typeface.NORMAL).apply {
+                    gravity = Gravity.CENTER
+                    includeFontPadding = false
+                    background = rounded(
+                        fillColor = Color.argb(30, 255, 255, 255),
+                        radiusDp = 21f,
+                        strokeColor = Color.argb(38, 255, 255, 255),
+                        strokeWidthDp = 0.8f
+                    )
+                    isClickable = true
+                    isFocusable = true
+                    MotionSpec.attachPressPhysics(this, pressedScale = 0.90f)
+                    setOnClickListener { onTap() }
+                }
+
             val stepper = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
             }
-            val minus = sheetCircleButton("−") {
+            val minus = climateStepButton("−") {
                 AppHaptics.perform(sheetClimateTempView, HapticLevel.LIGHT_TICK)
                 climateTemperatureCelsius = (climateTemperatureCelsius - 0.5).coerceAtLeast(minTemp)
                 sheetClimateTempView?.text = formatTemp(climateTemperatureCelsius)
             }
-            sheetClimateTempView = text(formatTemp(climateTemperatureCelsius), 34f, TEXT_PRIMARY, Typeface.BOLD).apply {
+            sheetClimateTempView = text(formatTemp(climateTemperatureCelsius), 40f, TEXT_PRIMARY, Typeface.BOLD).apply {
                 gravity = Gravity.CENTER
+                includeFontPadding = false
                 fontFeatureSettings = "tnum"
-                setPadding(dp(26), 0, dp(26), 0)
+                minWidth = dp(160)
+                setPadding(dp(14), 0, dp(14), 0)
             }
-            val plus = sheetCircleButton("+") {
+            val plus = climateStepButton("+") {
                 AppHaptics.perform(sheetClimateTempView, HapticLevel.LIGHT_TICK)
                 climateTemperatureCelsius = (climateTemperatureCelsius + 0.5).coerceAtMost(maxTemp)
                 sheetClimateTempView?.text = formatTemp(climateTemperatureCelsius)
             }
-            stepper.addView(minus, LinearLayout.LayoutParams(dp(44), dp(44)))
+            stepper.addView(minus, LinearLayout.LayoutParams(dp(42), dp(42)))
             stepper.addView(sheetClimateTempView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            stepper.addView(plus, LinearLayout.LayoutParams(dp(44), dp(44)))
-            heroCard.addView(stepper, lp(bottom = dp(14)))
+            stepper.addView(plus, LinearLayout.LayoutParams(dp(42), dp(42)))
+            sheet.addView(stepper, lp(bottom = dp(18)))
 
-            // Recessed runtime duration sliding segmented bar (5 / 10 / 15 min)
+            // Slim, low-profile inline runtime selector (5 / 10 / 15 min)
             val durations = listOf(5, 10, 15)
             val durSegBar = MotionSpec.createSlidingSegmentedBar(
                 context = this,
                 labels = durations.map { "${it} 分钟" },
                 initial = durations.indexOf(selectedDuration).coerceAtLeast(0),
-                bgColor = ThemeTokens.SEGMENT_TRACK,
-                pillColor = ThemeTokens.SEGMENT_PILL,
+                bgColor = Color.argb(24, 255, 255, 255),
+                pillColor = Color.argb(48, 255, 255, 255),
                 activeTextColor = ThemeTokens.TEXT_PRIMARY,
                 inactiveTextColor = ThemeTokens.TEXT_SUB,
-                trackStrokeColor = ThemeTokens.SEGMENT_TRACK_BORDER,
-                pillStrokeColor = ThemeTokens.SEGMENT_PILL_BORDER
+                trackStrokeColor = Color.TRANSPARENT,
+                pillStrokeColor = Color.argb(34, 255, 255, 255)
             ) { idx ->
                 selectedDuration = durations.getOrElse(idx) { 10 }
             }
-            heroCard.addView(durSegBar, lp())
-            sheet.addView(heroCard, lp(bottom = dp(14)))
+            // Trim tab vertical padding slightly for a sleek ~36dp bar without clipping row/pill height
+            (durSegBar.getChildAt(1) as? LinearLayout)?.let { tabRow ->
+                for (i in 0 until tabRow.childCount) {
+                    (tabRow.getChildAt(i) as? TextView)?.setPadding(dp(6), dp(6), dp(6), dp(6))
+                }
+            }
+            sheet.addView(durSegBar, lp(bottom = dp(18)))
 
-            // Clean 2-button primary action bar (Start/Apply + Off)
-            val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            val startBtn = primaryActionButton(if (acActive) "更新空调设定" else "开启空调") {
+            // Smart primary action: single full-width "开启空调" when OFF; "更新设定" + "关闭空调" when ON
+            val startBtn = primaryActionButton(if (acActive) "更新设定" else "开启空调") {
                 val extra = buildMap<String, String> {
                     put("airType", airTypeInt.toString())
                     put("controlTime", selectedDuration.toString())
@@ -6813,22 +6733,27 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     extraParams = extra
                 )
             }
-            val offBtn = secondaryActionButton("关闭空调") {
-                dialog.dismiss()
-                dispatchSmartVehicleCommand("ac_off", "关闭空调", extraParams = mapOf("airType" to airTypeInt.toString()))
+            if (acActive) {
+                val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                val offBtn = secondaryActionButton("关闭空调") {
+                    dialog.dismiss()
+                    dispatchSmartVehicleCommand("ac_off", "关闭空调", extraParams = mapOf("airType" to airTypeInt.toString()))
+                }
+                actionRow.addView(startBtn, LinearLayout.LayoutParams(0, dp(46), 1.2f))
+                actionRow.addView(offBtn, LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginStart = dp(10) })
+                sheet.addView(actionRow, lp(bottom = dp(16)))
+            } else {
+                sheet.addView(startBtn, lp(height = dp(46), bottom = dp(16)))
             }
-            actionRow.addView(startBtn, LinearLayout.LayoutParams(0, dp(46), 1.35f))
-            actionRow.addView(offBtn, LinearLayout.LayoutParams(0, dp(46), 0.9f).apply { marginStart = dp(10) })
-            sheet.addView(actionRow, lp(bottom = dp(14)))
 
-            // Divider before clean collapsible comfort & schedule rows
+            // Subtle hairline divider before clean collapsible comfort & schedule rows
             sheet.addView(View(this).apply {
                 setBackgroundColor(ThemeTokens.DIVIDER)
-            }, LinearLayout.LayoutParams(MATCH_PARENT, dpF(0.7f).roundToInt().coerceAtLeast(1)))
+            }, LinearLayout.LayoutParams(MATCH_PARENT, dpF(0.6f).roundToInt().coerceAtLeast(1)))
 
-            // Collapsible "座舱舒适项" row (collapsed by default to keep sheet calm & uncluttered)
+            // Collapsible "舒适选项" row (collapsed by default to keep sheet calm & uncluttered)
             var comfortExpanded = false
-            val comfortSummaryTv = text("", 12.5f, TEXT_SECONDARY).apply {
+            val comfortSummaryTv = text("", 12.5f, ThemeTokens.TEXT_SUB).apply {
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             }
@@ -6845,7 +6770,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     activeLabels.size <= 2 -> activeLabels.joinToString(" · ")
                     else -> "已选 ${activeLabels.size} 项"
                 }
-                comfortSummaryTv.setTextColor(if (activeLabels.isNotEmpty()) ACCENT_BLUE else TEXT_SECONDARY)
+                comfortSummaryTv.setTextColor(if (activeLabels.isNotEmpty()) ACCENT_BLUE else ThemeTokens.TEXT_SUB)
             }
             updateComfortSummary()
 
@@ -6853,13 +6778,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             val comfortPanel = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 visibility = View.GONE
-                setPadding(0, dp(4), 0, dp(10))
+                setPadding(0, dp(2), 0, dp(10))
             }
 
             val comfortHeaderRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(13), 0, dp(13))
+                setPadding(0, dp(12), 0, dp(12))
                 isClickable = true
                 isFocusable = true
                 MotionSpec.attachPressPhysics(this, pressedScale = 0.985f, haptic = false)
@@ -6875,26 +6800,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
             comfortHeaderRow.addView(
-                AppIconView(this, AppIconType.FAN_BLADE, TEXT_PRIMARY),
-                LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(12) }
+                AppIconView(this, AppIconType.FAN_BLADE, ThemeTokens.TEXT_SUB),
+                LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(10) }
             )
             comfortHeaderRow.addView(
-                text("座舱舒适项", 15f, TEXT_PRIMARY),
+                text("舒适选项", 14.5f, TEXT_PRIMARY),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
             )
             comfortHeaderRow.addView(
                 comfortSummaryTv,
                 LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(6) }
             )
-            comfortHeaderRow.addView(comfortChevron, LinearLayout.LayoutParams(dp(16), dp(16)))
+            comfortHeaderRow.addView(comfortChevron, LinearLayout.LayoutParams(dp(15), dp(15)))
             sheet.addView(comfortHeaderRow, lp())
 
             fun styleComfortChip(tv: TextView, active: Boolean) {
                 tv.background = rounded(
-                    if (active) TILE_ACTIVE_BG else ThemeTokens.BTN_SECONDARY,
+                    if (active) TILE_ACTIVE_BG else Color.argb(24, 255, 255, 255),
                     10f,
-                    if (active) ACCENT_BLUE else ThemeTokens.BTN_SECONDARY_BORDER,
-                    0.9f
+                    if (active) ACCENT_BLUE else Color.argb(30, 255, 255, 255),
+                    0.8f
                 )
                 tv.setTextColor(if (active) TEXT_PRIMARY else TEXT_BODY)
             }
@@ -6934,9 +6859,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 airPm = !airPm
                 styleComfortChip(tv, airPm)
             }
-            rowA.addView(frontDefrostChip, LinearLayout.LayoutParams(0, dp(36), 1f))
-            rowA.addView(rearDefrostChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(8) })
-            rowA.addView(airPmChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(8) })
+            rowA.addView(frontDefrostChip, LinearLayout.LayoutParams(0, dp(34), 1f))
+            rowA.addView(rearDefrostChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(8) })
+            rowA.addView(airPmChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(8) })
             comfortPanel.addView(rowA, lp(bottom = dp(8)))
 
             val rowB = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -6972,10 +6897,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
                 styleComfortChip(tv, passVent)
             }
-            rowB.addView(driverHeatChip, LinearLayout.LayoutParams(0, dp(36), 1f))
-            rowB.addView(passHeatChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
-            rowB.addView(driverVentChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
-            rowB.addView(passVentChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
+            rowB.addView(driverHeatChip, LinearLayout.LayoutParams(0, dp(34), 1f))
+            rowB.addView(passHeatChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(6) })
+            rowB.addView(driverVentChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(6) })
+            rowB.addView(passVentChip, LinearLayout.LayoutParams(0, dp(34), 1f).apply { marginStart = dp(6) })
             comfortPanel.addView(rowB, lp(bottom = dp(10)))
 
             val extrasRow = LinearLayout(this).apply {
@@ -7013,12 +6938,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             // Aligned bottom hairline + "预约出行" row
             sheet.addView(View(this).apply {
                 setBackgroundColor(ThemeTokens.DIVIDER)
-            }, LinearLayout.LayoutParams(MATCH_PARENT, dpF(0.7f).roundToInt().coerceAtLeast(1)))
+            }, LinearLayout.LayoutParams(MATCH_PARENT, dpF(0.6f).roundToInt().coerceAtLeast(1)))
 
             val scheduleRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(13), 0, dp(4))
+                setPadding(0, dp(12), 0, dp(2))
                 isClickable = true
                 isFocusable = true
                 MotionSpec.attachPressPhysics(this, pressedScale = 0.985f, haptic = false)
@@ -7032,16 +6957,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
             scheduleRow.addView(
-                AppIconView(this, AppIconType.CLOCK, TEXT_PRIMARY),
-                LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(12) }
+                AppIconView(this, AppIconType.CLOCK, ThemeTokens.TEXT_SUB),
+                LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginEnd = dp(10) }
             )
             scheduleRow.addView(
-                text("预约出行", 15f, TEXT_PRIMARY),
+                text("预约出行", 14.5f, TEXT_PRIMARY),
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
             )
             scheduleRow.addView(
                 AppIconView(this, AppIconType.CHEVRON_RIGHT, Color.parseColor("#6B707D")),
-                LinearLayout.LayoutParams(dp(16), dp(16))
+                LinearLayout.LayoutParams(dp(15), dp(15))
             )
             sheet.addView(scheduleRow, lp())
         }
@@ -8680,16 +8605,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
             addView(labelView)
-        }
-
-    private fun sheetCircleButton(label: String, onClick: () -> Unit): TextView =
-        text(label, 22f, TEXT_PRIMARY, Typeface.BOLD).apply {
-            gravity = Gravity.CENTER
-            background = rounded(ThemeTokens.BTN_SECONDARY, 22f, ThemeTokens.BTN_SECONDARY_BORDER, 0.9f)
-            isClickable = true
-            isFocusable = true
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.90f)
-            setOnClickListener { onClick() }
         }
 
     private fun primaryActionButton(label: String, onClick: () -> Unit): TextView =
