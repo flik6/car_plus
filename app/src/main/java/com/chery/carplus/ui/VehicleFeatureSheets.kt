@@ -44,6 +44,7 @@ import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CherySessionExpiredException
 import com.chery.carplus.cloud.GeofenceItem
 import com.chery.carplus.cloud.InGeekCloudProvisioner
+import com.chery.carplus.cloud.PoiSearchResult
 import com.chery.carplus.cloud.TripDayGroup
 import com.chery.carplus.cloud.TripRecordItem
 import com.chery.carplus.cloud.VehicleAuthorizationItem
@@ -1663,6 +1664,14 @@ internal class VehicleFeatureSheets(
         val assetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
             .build()
+        var pickedPoiLat: Double? = null
+        var pickedPoiLon: Double? = null
+        var pickedPoiName = ""
+        var pickedPoiAddress = ""
+        var pickedBannerView: LinearLayout? = null
+        var pickedTitleView: TextView? = null
+        var pickedSubView: TextView? = null
+
         val wv = object : WebView(context) {
             @SuppressLint("ClickableViewAccessibility")
             override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -1696,6 +1705,37 @@ internal class VehicleFeatureSheets(
                             if (mapDestroyed) return@post
                             livePill.visibility = if (isViewingRoute) View.VISIBLE else View.GONE
                             if (!isViewingRoute) clearTripSelection()
+                        }
+                    }
+
+                    @JavascriptInterface
+                    fun onMapTapped(lat: Double, lon: Double) {
+                        post {
+                            if (mapDestroyed) return@post
+                            pickedPoiLat = lat
+                            pickedPoiLon = lon
+                            val coordStr = String.format(Locale.US, "%.5f, %.5f", lat, lon)
+                            pickedPoiName = "地图选点"
+                            pickedPoiAddress = coordStr
+                            pickedTitleView?.text = "已选目的地 · 正在解析地址..."
+                            pickedSubView?.text = coordStr
+                            pickedBannerView?.visibility = View.VISIBLE
+                            scope.launch {
+                                val resolved = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        httpClient.reverseGeocodeApproxAddress(lat, lon)
+                                    }
+                                }.getOrNull().orEmpty().trim()
+                                if (mapDestroyed || pickedPoiLat != lat || pickedPoiLon != lon) return@launch
+                                if (resolved.isNotBlank()) {
+                                    pickedPoiName = resolved
+                                    pickedPoiAddress = resolved
+                                    pickedTitleView?.text = resolved
+                                    pickedSubView?.text = coordStr
+                                } else {
+                                    pickedTitleView?.text = "地图选点"
+                                }
+                            }
                         }
                     }
                 },
@@ -1774,6 +1814,46 @@ internal class VehicleFeatureSheets(
             }
         )
 
+        // Embedded "Send to Car (943)" pill inside the map overlay (bottom-left)
+        val sendToCarBtn = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(Color.argb(232, 24, 26, 32), 18f, Color.argb(110, 16, 185, 129), 0.9f)
+            setPadding(dp(12), 0, dp(14), 0)
+            isClickable = true
+            isFocusable = true
+            elevation = dpF(4f)
+            contentDescription = "发送目的地到车机导航"
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.94f)
+            setOnClickListener {
+                AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
+                showSendPoiToCarSheet(
+                    initialName = pickedPoiName,
+                    initialAddress = pickedPoiAddress,
+                    initialLat = pickedPoiLat,
+                    initialLon = pickedPoiLon
+                ) { lat, lon, label ->
+                    pickedPoiLat = lat
+                    pickedPoiLon = lon
+                    pickedPoiName = label
+                    pickedPoiAddress = label
+                    runMapJs("window.CarMap && window.CarMap.setPickedDestination($lat, $lon, ${JSONObject.quote(label)});")
+                }
+            }
+        }
+        sendToCarBtn.addView(
+            AppIconView(context, AppIconType.MAP_PIN, Color.parseColor("#10B981")),
+            LinearLayout.LayoutParams(dp(15), dp(15)).apply { marginEnd = dp(5) }
+        )
+        sendToCarBtn.addView(text("发送到车", 13f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD))
+        mapContainer.addView(
+            sendToCarBtn,
+            FrameLayout.LayoutParams(WRAP_CONTENT, dp(36), Gravity.BOTTOM or Gravity.START).apply {
+                marginStart = dp(12)
+                bottomMargin = dp(12)
+            }
+        )
+
         root.addView(
             mapContainer,
             LinearLayout.LayoutParams(MATCH_PARENT, mapHeight).apply {
@@ -1781,6 +1861,89 @@ internal class VehicleFeatureSheets(
                 marginEnd = dp(16)
                 topMargin = dp(6)
                 bottomMargin = dp(4)
+            }
+        )
+
+        // Inline picked-destination quick-send bar (visible after user taps on the map)
+        val pickedBar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(CARD_INNER, 12f, Color.argb(95, 16, 185, 129), 0.9f)
+            setPadding(dp(14), dp(10), dp(10), dp(10))
+            visibility = View.GONE
+        }
+        val pickedTextCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val pTitle = text("", 13.5f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 }
+        val pSub = text("", 11.5f, TEXT_SUB).apply { maxLines = 1 }
+        pickedTitleView = pTitle
+        pickedSubView = pSub
+        pickedTextCol.addView(pTitle)
+        pickedTextCol.addView(pSub, lp(top = dp(2)))
+        pickedBar.addView(pickedTextCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+
+        val quickSendPill = text("发送到车", 12.5f, Color.WHITE, Typeface.BOLD).apply {
+            background = rounded(Color.parseColor("#10B981"), 9f)
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            isClickable = true
+            isFocusable = true
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.93f)
+            setOnClickListener {
+                val lat = pickedPoiLat ?: return@setOnClickListener
+                val lon = pickedPoiLon ?: return@setOnClickListener
+                val destName = pickedPoiName.ifBlank { "地图选点" }
+                val destAddr = pickedPoiAddress.ifBlank { destName }
+                val active = profileProvider()
+                if (active.vin.isBlank() || active.accessToken.isBlank()) {
+                    toast("当前暂无有效绑定车辆")
+                    return@setOnClickListener
+                }
+                isEnabled = false
+                alpha = 0.6f
+                text = "发送中..."
+                scope.launch {
+                    val ok = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.sendPoiToVehicle(
+                                vin = active.vin,
+                                name = destName,
+                                address = destAddr,
+                                lat = String.format(Locale.US, "%.6f", lat),
+                                lon = String.format(Locale.US, "%.6f", lon),
+                                telephone = active.mobileNo,
+                                accessToken = active.accessToken
+                            )
+                        }
+                    }.getOrDefault(false)
+                    isEnabled = true
+                    alpha = 1f
+                    text = "发送到车"
+                    toast(if (ok) "已发送「$destName」到车机导航" else "发送到车失败，请稍后重试")
+                }
+            }
+        }
+        pickedBar.addView(quickSendPill, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) })
+
+        val clearPickBtn = AppIconView(context, AppIconType.CLOSE_ICON, TEXT_SUB).apply {
+            setPadding(dp(8), dp(8), dp(6), dp(8))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                pickedPoiLat = null
+                pickedPoiLon = null
+                pickedPoiName = ""
+                pickedPoiAddress = ""
+                pickedBar.visibility = View.GONE
+                runMapJs("window.CarMap && window.CarMap.clearPickedDestination();")
+            }
+        }
+        pickedBar.addView(clearPickBtn, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(4) })
+        pickedBannerView = pickedBar
+        root.addView(
+            pickedBar,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                marginStart = dp(16)
+                marginEnd = dp(16)
+                topMargin = dp(6)
             }
         )
 
@@ -2516,7 +2679,52 @@ internal class VehicleFeatureSheets(
             pairs.forEachIndexed { idx, (k, v) ->
                 box.addView(kvRow(k, v), lp(top = if (idx == 0) dp(8) else dp(2)))
             }
-            box.addView(primaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(18), height = dp(44)))
+            val endPt = trip.points.lastOrNull()
+            if (endPt != null && (endPt.lat != 0.0 || endPt.lon != 0.0)) {
+                val btnRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                btnRow.addView(secondaryBtn("关闭") { dialog.dismiss() }, weightLp(0, dp(44)))
+                lateinit var sendEndBtn: TextView
+                sendEndBtn = primaryBtn("发送终点到车") {
+                    val active = profileProvider()
+                    if (active.vin.isBlank() || active.accessToken.isBlank()) {
+                        toast("当前暂无有效绑定车辆")
+                        return@primaryBtn
+                    }
+                    val destName = trip.endAddress.ifBlank { "历史行程终点" }
+                    sendEndBtn.isEnabled = false
+                    sendEndBtn.alpha = 0.65f
+                    sendEndBtn.text = "发送中..."
+                    scope.launch {
+                        val ok = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.sendPoiToVehicle(
+                                    vin = active.vin,
+                                    name = destName,
+                                    address = destName,
+                                    lat = String.format(Locale.US, "%.6f", endPt.lat),
+                                    lon = String.format(Locale.US, "%.6f", endPt.lon),
+                                    telephone = active.mobileNo,
+                                    accessToken = active.accessToken
+                                )
+                            }
+                        }.getOrDefault(false)
+                        if (!dialog.isShowing) return@launch
+                        if (ok) {
+                            dialog.dismiss()
+                            toast("已发送「$destName」到车机导航")
+                        } else {
+                            sendEndBtn.isEnabled = true
+                            sendEndBtn.alpha = 1f
+                            sendEndBtn.text = "发送终点到车"
+                            toast("发送到车失败，请稍后重试")
+                        }
+                    }
+                }
+                btnRow.addView(sendEndBtn, weightLp(dp(10), dp(44)))
+                box.addView(btnRow, lp(top = dp(18)))
+            } else {
+                box.addView(primaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(18), height = dp(44)))
+            }
         }
     }
 
@@ -3844,6 +4052,186 @@ internal class VehicleFeatureSheets(
                     enabled = summary?.masterEnabled ?: (first?.enabled == true),
                     startTime = first?.startTime.orEmpty().ifBlank { "08:00" }
                 )
+            }
+        }
+    }
+
+    /**
+     * Send-POI-to-Car sheet (zyhl 943): supports keyword POI search, map-tapped point confirmation,
+     * and Android Share / geo: incoming locations.
+     */
+    fun showSendPoiToCarSheet(
+        initialName: String = "",
+        initialAddress: String = "",
+        initialLat: Double? = null,
+        initialLon: Double? = null,
+        initialQuery: String = "",
+        onDestinationPreview: ((Double, Double, String) -> Unit)? = null
+    ) {
+        val activeProfile = profileProvider()
+        var selectedLat: Double? = initialLat?.takeIf { it != 0.0 || (initialLon ?: 0.0) != 0.0 }
+        var selectedLon: Double? = initialLon?.takeIf { selectedLat != null }
+        var selectedAddress = initialAddress.trim()
+
+        showSheet("发送目的地到车") { sheet, dialog ->
+            sheet.addView(
+                text("搜索目的地或轻触地图选点，一键推送至车机导航（也可在高德/百度/微信分享位置给 CarPlus）。", 12.5f, TEXT_SUB).apply {
+                    setLineSpacing(0f, 1.38f)
+                },
+                lp(top = dp(4))
+            )
+
+            // Search bar row
+            val searchRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val searchEt = modalInput("搜索地点、大厦、车站或地址", InputType.TYPE_CLASS_TEXT).apply {
+                if (initialQuery.isNotBlank()) setText(initialQuery)
+            }
+            lateinit var searchBtn: TextView
+            val resultsHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+
+            val nameEt = modalInput("目的地名称（车机显示）", InputType.TYPE_CLASS_TEXT).apply {
+                if (initialName.isNotBlank()) setText(initialName)
+            }
+            val coordHintTv = text(
+                if (selectedLat != null && selectedLon != null) {
+                    "已锁定坐标：${String.format(Locale.US, "%.5f, %.5f", selectedLat, selectedLon)}"
+                } else {
+                    "尚未选择坐标：请先搜索地点或在地图点击选点"
+                },
+                12f,
+                if (selectedLat != null) Color.parseColor("#10B981") else TEXT_SUB
+            )
+
+            fun applySelectedPoi(poi: PoiSearchResult) {
+                selectedLat = poi.lat
+                selectedLon = poi.lon
+                selectedAddress = poi.address
+                nameEt.setText(poi.name)
+                coordHintTv.text = "已锁定：${poi.address.take(44)}（${String.format(Locale.US, "%.5f, %.5f", poi.lat, poi.lon)}）"
+                coordHintTv.setTextColor(Color.parseColor("#10B981"))
+                onDestinationPreview?.invoke(poi.lat, poi.lon, poi.name)
+            }
+
+            fun runPoiSearch(queryText: String) {
+                val q = queryText.trim()
+                if (q.isBlank()) {
+                    toast("请输入搜索关键词")
+                    return
+                }
+                searchBtn.isEnabled = false
+                searchBtn.alpha = 0.6f
+                searchBtn.text = "搜索中"
+                resultsHost.removeAllViews()
+                resultsHost.addView(text("正在检索地点...", 12.5f, TEXT_SUB).apply {
+                    setPadding(dp(4), dp(8), dp(4), dp(8))
+                })
+                scope.launch {
+                    val t = telemetryProvider()
+                    val list = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.searchPoi(q, t?.latitude, t?.longitude)
+                        }
+                    }.getOrDefault(emptyList())
+                    if (!dialog.isShowing) return@launch
+                    searchBtn.isEnabled = true
+                    searchBtn.alpha = 1f
+                    searchBtn.text = "搜索"
+                    resultsHost.removeAllViews()
+                    if (list.isEmpty()) {
+                        resultsHost.addView(text("未找到匹配地点，可尝试更具体的城市+地名", 12.5f, TEXT_SUB).apply {
+                            setPadding(dp(4), dp(8), dp(4), dp(8))
+                        })
+                        return@launch
+                    }
+                    list.take(5).forEach { poi ->
+                        val itemCard = LinearLayout(context).apply {
+                            orientation = LinearLayout.VERTICAL
+                            background = rounded(CARD_INNER, 10f)
+                            setPadding(dp(12), dp(10), dp(12), dp(10))
+                            isClickable = true
+                            isFocusable = true
+                            MotionSpec.attachPressPhysics(this, pressedScale = 0.98f)
+                            setOnClickListener {
+                                applySelectedPoi(poi)
+                                resultsHost.removeAllViews()
+                                toast("已选中：${poi.name}")
+                            }
+                        }
+                        itemCard.addView(text(poi.name, 13.5f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 })
+                        itemCard.addView(text(poi.address, 11.5f, TEXT_SUB).apply { maxLines = 1 }, lp(top = dp(2)))
+                        resultsHost.addView(itemCard, lp(top = dp(6)))
+                    }
+                    if (selectedLat == null && list.isNotEmpty()) {
+                        applySelectedPoi(list.first())
+                    }
+                }
+            }
+
+            searchBtn = secondaryBtn("搜索") { runPoiSearch(searchEt.text.toString()) }
+            searchRow.addView(searchEt, LinearLayout.LayoutParams(0, dp(44), 1f))
+            searchRow.addView(searchBtn, LinearLayout.LayoutParams(dp(74), dp(44)).apply { marginStart = dp(8) })
+
+            sheet.addView(searchRow, lp(top = dp(12)))
+            sheet.addView(resultsHost, lp(top = dp(4)))
+
+            sheet.addView(text("目的地名称", 12f, TEXT_SUB), lp(top = dp(12)))
+            sheet.addView(nameEt, lp(top = dp(4), height = dp(44)))
+            sheet.addView(coordHintTv, lp(top = dp(8), bottom = dp(16)))
+
+            var sending = false
+            lateinit var sendBtn: TextView
+            sendBtn = primaryBtn("发送到车机导航") {
+                if (sending) return@primaryBtn
+                val lat = selectedLat
+                val lon = selectedLon
+                if (lat == null || lon == null) {
+                    toast("请先搜索选择目的地或在地图点选位置")
+                    return@primaryBtn
+                }
+                if (activeProfile.vin.isBlank() || activeProfile.accessToken.isBlank()) {
+                    toast("当前暂无有效绑定车辆")
+                    return@primaryBtn
+                }
+                val finalName = nameEt.text.toString().trim().ifBlank { "目的地" }
+                val finalAddr = selectedAddress.ifBlank { finalName }
+                sending = true
+                sendBtn.isEnabled = false
+                sendBtn.alpha = 0.65f
+                sendBtn.text = "正在推送到车机..."
+                scope.launch {
+                    val ok = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.sendPoiToVehicle(
+                                vin = activeProfile.vin,
+                                name = finalName,
+                                address = finalAddr,
+                                lat = String.format(Locale.US, "%.6f", lat),
+                                lon = String.format(Locale.US, "%.6f", lon),
+                                telephone = activeProfile.mobileNo,
+                                accessToken = activeProfile.accessToken
+                            )
+                        }
+                    }.getOrDefault(false)
+                    if (!dialog.isShowing) return@launch
+                    if (ok) {
+                        dialog.dismiss()
+                        toast("已发送「$finalName」到车机导航")
+                    } else {
+                        sending = false
+                        sendBtn.isEnabled = true
+                        sendBtn.alpha = 1f
+                        sendBtn.text = "发送到车机导航"
+                        toast("发送到车失败，请稍后重试")
+                    }
+                }
+            }
+            sheet.addView(sendBtn, lp(height = dp(48)))
+
+            if (initialQuery.isNotBlank() && selectedLat == null) {
+                runPoiSearch(initialQuery)
             }
         }
     }

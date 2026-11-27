@@ -487,15 +487,21 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
         })
 
+        captureIncomingSharedPoiIntent(intent)
         routeInitialScreen()
     }
 
     private var pendingShortcutAction: String? = null
     private var pendingShortcutRequiresPinCache: Boolean = false
+    private var pendingSharedPoiIntent: Intent? = null
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (captureIncomingSharedPoiIntent(intent)) {
+            consumePendingSharedPoiIfReady()
+            return
+        }
         val act = intent?.getStringExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION).orEmpty()
         if (act.isNotBlank()) {
             pendingShortcutAction = act
@@ -505,6 +511,167 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             ) == true
             routePendingShortcutActionNow()
         }
+    }
+
+    private fun captureIncomingSharedPoiIntent(intent: Intent?): Boolean {
+        if (intent == null) return false
+        val isSendText = intent.action == Intent.ACTION_SEND &&
+            intent.type?.startsWith("text/") == true &&
+            !intent.getStringExtra(Intent.EXTRA_TEXT).isNullOrBlank()
+        val isGeoView = intent.action == Intent.ACTION_VIEW &&
+            intent.data?.scheme.equals("geo", ignoreCase = true)
+        if (!isSendText && !isGeoView) return false
+        pendingSharedPoiIntent = Intent(intent)
+        return true
+    }
+
+    private fun consumePendingSharedPoiIfReady() {
+        val shared = pendingSharedPoiIntent ?: return
+        if (currentScreen == Screen.WELCOME ||
+            currentScreen == Screen.LOGIN_FORM ||
+            currentScreen == Screen.PRIVACY_CONSENT
+        ) {
+            return
+        }
+        val profile = profileStore.getActiveProfile()
+        if (profile.vin.isBlank() || profile.accessToken.isBlank()) return
+        pendingSharedPoiIntent = null
+
+        lifecycleScope.launch {
+            val parsed = withContext(Dispatchers.IO) {
+                parseSharedDestinationIntent(shared)
+            }
+            featureSheets.showSendPoiToCarSheet(
+                initialName = parsed.name,
+                initialAddress = parsed.address,
+                initialLat = parsed.lat,
+                initialLon = parsed.lon,
+                initialQuery = parsed.searchQuery
+            )
+        }
+    }
+
+    private data class ParsedSharedPoi(
+        val name: String = "",
+        val address: String = "",
+        val lat: Double? = null,
+        val lon: Double? = null,
+        val searchQuery: String = ""
+    )
+
+    private fun parseSharedDestinationIntent(intent: Intent): ParsedSharedPoi {
+        // 1. Handle geo:lat,lon?q=...
+        val geoUri = intent.data
+        if (intent.action == Intent.ACTION_VIEW && geoUri != null && geoUri.scheme.equals("geo", ignoreCase = true)) {
+            val ssp = geoUri.schemeSpecificPart.orEmpty()
+            val beforeQ = ssp.substringBefore("?").trim()
+            val queryPart = ssp.substringAfter("?", "")
+            val qParam = runCatching {
+                queryPart.split("&")
+                    .firstOrNull { it.startsWith("q=", ignoreCase = true) }
+                    ?.substringAfter("=")
+                    ?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+                    .orEmpty()
+            }.getOrDefault("")
+            val coords = beforeQ.split(",")
+            var lat = coords.getOrNull(0)?.trim()?.toDoubleOrNull()?.takeIf { it != 0.0 }
+            var lon = coords.getOrNull(1)?.trim()?.toDoubleOrNull()?.takeIf { it != 0.0 }
+            var label = ""
+            if (qParam.isNotBlank()) {
+                val parenMatch = Regex("""(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\(([^)]+)\)""").find(qParam)
+                if (parenMatch != null) {
+                    lat = lat ?: parenMatch.groupValues[1].toDoubleOrNull()
+                    lon = lon ?: parenMatch.groupValues[2].toDoubleOrNull()
+                    label = parenMatch.groupValues[3].trim()
+                } else {
+                    val pairMatch = Regex("""(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)""").find(qParam)
+                    if (pairMatch != null) {
+                        lat = lat ?: pairMatch.groupValues[1].toDoubleOrNull()
+                        lon = lon ?: pairMatch.groupValues[2].toDoubleOrNull()
+                    } else {
+                        label = qParam.trim()
+                    }
+                }
+            }
+            val resolvedLat = lat
+            val resolvedLon = lon
+            if (resolvedLat != null && resolvedLon != null) {
+                val resolvedName = label.ifBlank {
+                    httpClient.reverseGeocodeApproxAddress(resolvedLat, resolvedLon).orEmpty().ifBlank { "共享位置" }
+                }
+                return ParsedSharedPoi(name = resolvedName, address = resolvedName, lat = resolvedLat, lon = resolvedLon)
+            }
+            if (label.isNotBlank()) {
+                return ParsedSharedPoi(name = label, searchQuery = label)
+            }
+        }
+
+        // 2. Handle ACTION_SEND plain text (Amap / Baidu / WeChat / Meituan shared links or text)
+        val rawText = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().trim()
+        val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT).orEmpty().trim()
+        val urlMatch = Regex("""https?://[^\s\u4e00-\u9fa5]+""").find(rawText)
+        val resolvedUrl = urlMatch?.value?.let { httpClient.resolveSharedUrlRedirect(it) }.orEmpty()
+        val combined = "$rawText\n$resolvedUrl"
+
+        fun extractParam(vararg keys: String): String {
+            for (k in keys) {
+                val m = Regex("""[?&]$k=([^&\s]+)""", RegexOption.IGNORE_CASE).find(combined)
+                if (m != null) {
+                    val decoded = runCatching { java.net.URLDecoder.decode(m.groupValues[1], "UTF-8") }.getOrDefault(m.groupValues[1])
+                    if (decoded.isNotBlank()) return decoded.trim()
+                }
+            }
+            return ""
+        }
+
+        var lat = extractParam("lat", "dlat", "latitude").toDoubleOrNull()
+        var lon = extractParam("lon", "lng", "dlon", "longitude").toDoubleOrNull()
+        if (lat == null || lon == null) {
+            val locParam = extractParam("location", "position", "c", "center", "to")
+            val parts = locParam.split(",")
+            if (parts.size >= 2) {
+                val a = parts[0].trim().toDoubleOrNull()
+                val b = parts[1].trim().toDoubleOrNull()
+                if (a != null && b != null) {
+                    if (a > 70.0 && b < 60.0) { // China lon,lat order (Amap)
+                        lon = a
+                        lat = b
+                    } else if (a < 60.0 && b > 70.0) { // lat,lon order
+                        lat = a
+                        lon = b
+                    }
+                }
+            }
+        }
+        if (lat == null || lon == null) {
+            val atMatch = Regex("""@(-?\d+\.\d+),(-?\d+\.\d+)""").find(combined)
+            if (atMatch != null) {
+                lat = atMatch.groupValues[1].toDoubleOrNull()
+                lon = atMatch.groupValues[2].toDoubleOrNull()
+            }
+        }
+
+        val urlName = extractParam("name", "poiname", "title", "q", "word")
+        val textTitle = rawText
+            .replace(Regex("""https?://\S+"""), "")
+            .replace(Regex("""【[^】]*】"""), "")
+            .trim()
+            .lines()
+            .firstOrNull { it.trim().length >= 2 }
+            ?.trim()
+            .orEmpty()
+        val bestName = firstNonBlank(urlName, subject, textTitle)
+
+        if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
+            val finalName = bestName.ifBlank {
+                httpClient.reverseGeocodeApproxAddress(lat, lon).orEmpty().ifBlank { "共享位置" }
+            }
+            return ParsedSharedPoi(name = finalName, address = finalName, lat = lat, lon = lon)
+        }
+        return ParsedSharedPoi(
+            name = bestName,
+            searchQuery = bestName.ifBlank { rawText.take(40) }
+        )
     }
 
     private fun routePendingShortcutActionNow() {
@@ -529,6 +696,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             else -> showHomeScreen()
         }
         consumePendingShortcutActionIfReady()
+        consumePendingSharedPoiIfReady()
     }
 
     private fun consumePendingShortcutActionIfReady() {
@@ -4196,6 +4364,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             primaryStatus = primaryMotionState
         )
         consumePendingShortcutActionIfReady()
+        consumePendingSharedPoiIfReady()
     }
 
     private fun updateHomeFooter(telemetry: VehicleTelemetry?) {

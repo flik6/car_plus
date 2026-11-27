@@ -271,6 +271,13 @@ data class TravelScheduleSummary(
     val rawJson: String = ""
 )
 
+data class PoiSearchResult(
+    val name: String,
+    val address: String,
+    val lat: Double,
+    val lon: Double
+)
+
 enum class RemoteCommand {
     DOOR_UNLOCK,
     DOOR_LOCK,
@@ -2291,6 +2298,127 @@ class CheryHttpClient(
         dLat = (dLat * 180.0) / ((a * (1.0 - ee)) / (magic * sqrtMagic) * Math.PI)
         dLon = (dLon * 180.0) / (a / sqrtMagic * kotlin.math.cos(radLat) * Math.PI)
         return (lat - dLat) to (lon - dLon)
+    }
+
+    /** Approximate WGS-84 -> GCJ-02 conversion for China map tiles & Chery head-unit navigation (943). */
+    fun wgsToGcjApprox(lat: Double, lon: Double): Pair<Double, Double> {
+        if (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271) return lat to lon
+        val a = 6378245.0
+        val ee = 0.00669342162296594323
+        val x = lon - 105.0
+        val y = lat - 35.0
+        var dLat = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * kotlin.math.sqrt(kotlin.math.abs(x))
+        dLat += (20.0 * kotlin.math.sin(6.0 * x * Math.PI) + 20.0 * kotlin.math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0
+        dLat += (20.0 * kotlin.math.sin(y * Math.PI) + 40.0 * kotlin.math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0
+        dLat += (160.0 * kotlin.math.sin(y / 12.0 * Math.PI) + 320.0 * kotlin.math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0
+        var dLon = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * kotlin.math.sqrt(kotlin.math.abs(x))
+        dLon += (20.0 * kotlin.math.sin(6.0 * x * Math.PI) + 20.0 * kotlin.math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0
+        dLon += (20.0 * kotlin.math.sin(x * Math.PI) + 40.0 * kotlin.math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0
+        dLon += (150.0 * kotlin.math.sin(x / 12.0 * Math.PI) + 300.0 * kotlin.math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0
+        val radLat = lat / 180.0 * Math.PI
+        var magic = kotlin.math.sin(radLat)
+        magic = 1.0 - ee * magic * magic
+        val sqrtMagic = kotlin.math.sqrt(magic)
+        dLat = (dLat * 180.0) / ((a * (1.0 - ee)) / (magic * sqrtMagic) * Math.PI)
+        dLon = (dLon * 180.0) / (a / sqrtMagic * kotlin.math.cos(radLat) * Math.PI)
+        return (lat + dLat) to (lon + dLon)
+    }
+
+    /**
+     * Searches Chinese/global POIs via OpenStreetMap Nominatim and returns GCJ-02 coordinates
+     * directly compatible with Amap tiles and Chery head-unit navigation (`943`).
+     */
+    fun searchPoi(
+        query: String,
+        biasLat: Double? = null,
+        biasLon: Double? = null
+    ): List<PoiSearchResult> {
+        val clean = query.trim()
+        if (clean.isBlank()) return emptyList()
+        val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
+        val viewboxPart = if (biasLat != null && biasLon != null && (biasLat != 0.0 || biasLon != 0.0)) {
+            val (wLat, wLon) = gcjToWgsApprox(biasLat, biasLon)
+            String.format(
+                Locale.US,
+                "&viewbox=%.4f,%.4f,%.4f,%.4f",
+                wLon - 0.8,
+                wLat + 0.8,
+                wLon + 0.8,
+                wLat - 0.8
+            )
+        } else {
+            ""
+        }
+        return runCatching {
+            val url = URL(
+                "https://nominatim.openstreetmap.org/search?format=jsonv2&q=$encoded&limit=8&accept-language=zh-CN&addressdetails=1$viewboxPart"
+            )
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6_000
+                readTimeout = 6_000
+                setRequestProperty("User-Agent", "CarPlus/2.9 (Android)")
+                setRequestProperty("Accept", "application/json")
+            }
+            try {
+                if (conn.responseCode != HttpURLConnection.HTTP_OK) return@runCatching emptyList()
+                val body = conn.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                val arr = JSONArray(body)
+                buildList {
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val wLat = obj.optString("lat").toDoubleOrNull() ?: continue
+                        val wLon = obj.optString("lon").toDoubleOrNull() ?: continue
+                        val (gLat, gLon) = wgsToGcjApprox(wLat, wLon)
+                        val display = obj.optString("display_name").trim()
+                        val name = obj.optString("name").trim().ifBlank {
+                            display.substringBefore(",").trim().ifBlank { clean }
+                        }
+                        val address = display.ifBlank { name }
+                        add(PoiSearchResult(name = name, address = address, lat = gLat, lon = gLon))
+                    }
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Resolves a shared location text or map short-link (Amap / Baidu / WeChat / geo:) into
+     * coordinates + place name when possible. Follows HTTP redirects on short map links.
+     */
+    fun resolveSharedUrlRedirect(urlString: String): String {
+        val clean = urlString.trim()
+        if (!clean.startsWith("http://", true) && !clean.startsWith("https://", true)) return clean
+        return runCatching {
+            var current = clean
+            repeat(3) {
+                val conn = (URL(current).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    instanceFollowRedirects = false
+                    connectTimeout = 5_000
+                    readTimeout = 5_000
+                    setRequestProperty("User-Agent", "CarPlus/2.9 (Android)")
+                }
+                try {
+                    val code = conn.responseCode
+                    val loc = conn.getHeaderField("Location").orEmpty().trim()
+                    if (code in 300..399 && loc.isNotBlank()) {
+                        current = if (loc.startsWith("http://", true) || loc.startsWith("https://", true)) {
+                            loc
+                        } else {
+                            URL(URL(current), loc).toString()
+                        }
+                    } else {
+                        return@runCatching current
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            }
+            current
+        }.getOrDefault(clean)
     }
 
     fun fetchTripHistoryByDay(

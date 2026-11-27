@@ -122,6 +122,7 @@
       };
       var vehiclePos = null;       // { lat, lon }
       var userPos = null;          // { lat, lon }
+      var pickedPoi = null;        // { lat, lon, label }
       var liveLocationLabel = '当前车辆位置';
       var routePoints = [];        // [ { lat, lon }, ... ]
       var routeCumDist = [];       // normalized 0..1 cumulative distances along routePoints
@@ -434,6 +435,11 @@
           drawVehicleMarker(vp.x, vp.y);
         }
 
+        if (pickedPoi && !geofencePicker.active) {
+          var destP = project(pickedPoi.lat, pickedPoi.lon);
+          drawPin(destP.x, destP.y, '#10b981', '终');
+        }
+
         // Layer 3: Visual circle geofence picker centered on screen
         if (geofencePicker.active) {
           var mpp = Math.max(0.05, metersPerPixel(view.lat, view.zoom));
@@ -637,14 +643,15 @@
         requestDraw();
       }
 
-      // Pan & pinch interaction on top overlay canvas
-      var drag = { active: false, lx: 0, ly: 0, pinching: false, pdist: 0 };
+      // Pan, pinch & tap-to-pick interaction on top overlay canvas
+      var drag = { active: false, lx: 0, ly: 0, sx: 0, sy: 0, moved: 0, pinching: false, pdist: 0 };
       overlayCanvas.addEventListener('touchstart', function (e) {
         if (e.touches.length === 1) {
           drag.active = true; drag.pinching = false;
           drag.lx = e.touches[0].clientX; drag.ly = e.touches[0].clientY;
+          drag.sx = drag.lx; drag.sy = drag.ly; drag.moved = 0;
         } else if (e.touches.length === 2) {
-          drag.active = false; drag.pinching = true;
+          drag.active = false; drag.pinching = true; drag.moved = 999;
           var dx = e.touches[0].clientX - e.touches[1].clientX;
           var dy = e.touches[0].clientY - e.touches[1].clientY;
           drag.pdist = Math.sqrt(dx * dx + dy * dy);
@@ -655,6 +662,7 @@
         if (drag.active && e.touches.length === 1) {
           var cx = e.touches[0].clientX, cy = e.touches[0].clientY;
           var dx = cx - drag.lx, dy = cy - drag.ly;
+          drag.moved += Math.abs(dx) + Math.abs(dy);
           drag.lx = cx; drag.ly = cy;
           var wx = lonToWorldX(view.lon, view.zoom) - dx;
           var wy = latToWorldY(view.lat, view.zoom) - dy;
@@ -685,6 +693,27 @@
       }, { passive: true });
 
       overlayCanvas.addEventListener('touchend', function () {
+        if (drag.active && !drag.pinching && drag.moved < 10 && !geofencePicker.active) {
+          var rect = overlayCanvas.getBoundingClientRect();
+          var tx = drag.sx - rect.left;
+          var ty = drag.sy - rect.top;
+          var w = window.innerWidth || 340;
+          var h = window.innerHeight || 240;
+          var wx = lonToWorldX(view.lon, view.zoom) + (tx - w / 2);
+          var wy = latToWorldY(view.lat, view.zoom) + (ty - h / 2);
+          var tapLon = worldXToLon(wx, view.zoom);
+          var tapLat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
+          pickedPoi = { lat: tapLat, lon: tapLon, label: '已选目的地' };
+          badge.textContent = '已选目的地 · 点击发送到车';
+          requestDraw();
+          try {
+            if (window.CarMapBridge && typeof window.CarMapBridge.onMapTapped === 'function') {
+              window.CarMapBridge.onMapTapped(tapLat, tapLon);
+            }
+          } catch (err) {
+            // ignore
+          }
+        }
         drag.active = false; drag.pinching = false;
       }, { passive: true });
 
@@ -824,6 +853,21 @@
             window.innerHeight || 240
           );
           badge.textContent = formatRadiusBadge(r);
+          requestDraw();
+        },
+        setPickedDestination: function (lat, lon, label) {
+          if (typeof lat !== 'number' || typeof lon !== 'number' || (lat === 0 && lon === 0)) return;
+          geofencePicker.active = false;
+          pickedPoi = { lat: lat, lon: lon, label: label || '目的地' };
+          view.lat = lat;
+          view.lon = lon;
+          if (view.zoom < 14.5) view.zoom = 15.0;
+          badge.textContent = label || '已选目的地';
+          requestDraw();
+        },
+        clearPickedDestination: function () {
+          pickedPoi = null;
+          badge.textContent = liveLocationLabel || '当前车辆位置';
           requestDraw();
         }
       };
