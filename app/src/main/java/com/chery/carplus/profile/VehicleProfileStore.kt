@@ -189,13 +189,27 @@ class VehicleProfileStore(context: Context) {
         active
     }
 
-    /** MD5("0" + Settings.Secure.ANDROID_ID), matching the zyhl device ID. */
-    fun defaultDeviceId(): String {
+    /**
+     * MD5("0" + Settings.Secure.ANDROID_ID), matching the zyhl device ID.
+     * Falls back to a persisted random UUID when ANDROID_ID is unavailable,
+     * mirroring official zyhl k.getIdToReDevice() so login/108 never sends an
+     * empty deviceId.
+     */
+    fun defaultDeviceId(): String = synchronized(lock) {
         val androidId = Settings.Secure.getString(
             appContext.contentResolver,
             Settings.Secure.ANDROID_ID
-        ).orEmpty()
-        return if (androidId.isBlank()) "" else VckInfoParser.computeCheryDeviceId(androidId)
+        ).orEmpty().trim()
+        if (androidId.isNotBlank()) {
+            return@synchronized VckInfoParser.computeCheryDeviceId(androidId)
+        }
+        val persistedFallback = prefs.getString(KEY_FALLBACK_DEVICE_UUID, "").orEmpty().trim()
+        val seed = persistedFallback.ifBlank {
+            java.util.UUID.randomUUID().toString().also { generated ->
+                prefs.edit().putString(KEY_FALLBACK_DEVICE_UUID, generated).apply()
+            }
+        }
+        VckInfoParser.computeCheryDeviceId(seed)
     }
 
     fun setActiveVin(vin: String): VehicleProfile? {
@@ -423,6 +437,7 @@ class VehicleProfileStore(context: Context) {
         const val PREFS_NAME = "car_plus_profiles"
         private const val KEY_PROFILES = "profiles"
         private const val KEY_ACTIVE_VIN = "activeVin"
+        private const val KEY_FALLBACK_DEVICE_UUID = "fallbackDeviceUuid"
 
         // Kept as empty source-compatible defaults. Vehicle/account material is
         // never seeded into the app; profiles are created from login/provisioning.

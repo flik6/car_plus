@@ -254,6 +254,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private lateinit var avatarPickerLauncher: ActivityResultLauncher<String>
 
     // Login form views
+    private var loginMobileLabel: TextView? = null
     private var loginMobileInput: EditText? = null
     private var loginPasswordInput: EditText? = null
     private var loginSmsInput: EditText? = null
@@ -1004,12 +1005,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         page.addView(segmented, lp(top = dp(26)))
 
         // Borderless underline inputs matching Design System v2.6
-        page.addView(text("手机号", 12.5f, ThemeTokens.TEXT_SUB), lp(top = dp(28)))
+        val mobileLabelView = text(if (startWithSms) "手机号" else "手机号 / 账号", 12.5f, ThemeTokens.TEXT_SUB)
+        loginMobileLabel = mobileLabelView
+        page.addView(mobileLabelView, lp(top = dp(28)))
         val (mobileBox, mobileEdit) = AppComponents.createUnderlineInput(
             context = this,
-            hint = "请输入 11 位手机号",
-            inputType = InputType.TYPE_CLASS_PHONE,
-            maxLength = 11
+            hint = if (startWithSms) "请输入 11 位手机号" else "请输入手机号或账号",
+            inputType = if (startWithSms) {
+                InputType.TYPE_CLASS_PHONE
+            } else {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            },
+            maxLength = if (startWithSms) 11 else 64
         )
         mobileEdit.imeOptions = EditorInfo.IME_ACTION_NEXT
         loginMobileInput = mobileEdit
@@ -1120,6 +1127,22 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         loginPasswordBlock?.visibility = if (useSms) View.GONE else View.VISIBLE
         loginSmsBlock?.visibility = if (useSms) View.VISIBLE else View.GONE
+        loginMobileLabel?.text = if (useSms) "手机号" else "手机号 / 账号"
+        loginMobileInput?.apply {
+            val currentText = text?.toString().orEmpty()
+            hint = if (useSms) "请输入 11 位手机号" else "请输入手机号或账号"
+            inputType = if (useSms) {
+                InputType.TYPE_CLASS_PHONE
+            } else {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            }
+            filters = arrayOf(android.text.InputFilter.LengthFilter(if (useSms) 11 else 64))
+            val trimmed = if (useSms && currentText.length > 11) currentText.take(11) else currentText
+            if (trimmed != currentText) {
+                setText(trimmed)
+            }
+            setSelection(text?.length ?: 0)
+        }
         hideLoginError()
     }
 
@@ -1177,8 +1200,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun submitLogin() {
         if (loginBusy) return
         val mobile = loginMobileInput?.text?.toString()?.trim().orEmpty()
-        if (!isValidMobile(mobile)) {
-            showLoginError("请输入正确的 11 位手机号")
+        if (loginUsesSms) {
+            if (!isValidMobile(mobile)) {
+                showLoginError("请输入正确的 11 位手机号")
+                return
+            }
+        } else if (mobile.isBlank()) {
+            showLoginError("请输入手机号或账号")
             return
         }
         val secret = if (loginUsesSms) {
@@ -1193,13 +1221,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         performLogin(mobile, secret, loginUsesSms)
     }
 
-    private fun performLogin(mobile: String, secret: String, bySms: Boolean) {
+    private fun performLogin(
+        mobile: String,
+        secret: String,
+        bySms: Boolean,
+        overrideDeviceId: String = ""
+    ) {
         if (loginBusy) return
         setLoginBusy(true, "正在登录...")
         hideLoginError()
         lifecycleScope.launch {
             try {
-                val deviceId = profileStore.defaultDeviceId()
+                val deviceId = overrideDeviceId.trim().ifBlank { profileStore.defaultDeviceId() }
                 val login = withContext(Dispatchers.IO) {
                     if (bySms) {
                         httpClient.loginWithSms(
@@ -1299,60 +1332,120 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         } else {
             CheryHttpClient.LOGIN_METHOD_PASSWORD
         }
+        val boundDeviceId = binding.deviceId.trim().ifBlank { profileStore.defaultDeviceId() }
+        val targetDisplay = binding.telephone.ifBlank { maskMobile(mobile) }
         val promptMsg = binding.message.orEmpty().ifBlank {
-            "检测到新设备登录，已向 ${binding.telephone.ifBlank { maskMobile(mobile) }} 发送换机绑定验证码，请输入刚刚收到的短信验证码。"
+            if (binding.smsSent) {
+                "检测到新设备登录，已向 $targetDisplay 发送换机绑定验证码，请输入刚刚收到的短信验证码。"
+            } else {
+                "检测到新设备登录，当前未自动发送换机绑定短信，请点击下方按钮重新发送验证码。"
+            }
         }
         showBottomSheet("新设备短信验证") { sheet, dialog ->
+            var resendCountdownJob: Job? = null
+            var verifying = false
+
             sheet.addView(text(promptMsg, 13f, TEXT_SECONDARY).apply {
                 setLineSpacing(0f, 1.45f)
                 layoutParams = lp(top = dp(8))
             })
             val codeInput = styledInput("请输入换机绑定短信验证码", InputType.TYPE_CLASS_NUMBER).apply {
+                filters = arrayOf(android.text.InputFilter.LengthFilter(8))
                 imeOptions = EditorInfo.IME_ACTION_DONE
                 layoutParams = lp(top = dp(16), height = dp(50))
             }
             sheet.addView(codeInput)
 
-            val resendBtn = text("未收到？重新发送换机绑定短信", 13f, LINK_BLUE).apply {
+            val sheetErrorView = text("", 12.5f, ThemeTokens.DANGER).apply {
+                visibility = View.GONE
+                layoutParams = lp(top = dp(10))
+            }
+            sheet.addView(sheetErrorView)
+
+            fun showSheetError(msg: String) {
+                sheetErrorView.text = msg
+                sheetErrorView.visibility = View.VISIBLE
+                android.animation.ObjectAnimator.ofFloat(
+                    codeInput,
+                    View.TRANSLATION_X,
+                    0f, -12f, 12f, -8f, 8f, -4f, 4f, 0f
+                ).setDuration(260L).start()
+            }
+
+            lateinit var resendBtn: TextView
+            fun startResendCooldown() {
+                resendCountdownJob?.cancel()
+                resendCountdownJob = lifecycleScope.launch {
+                    for (remaining in 60 downTo 1) {
+                        resendBtn.isEnabled = false
+                        resendBtn.alpha = 0.55f
+                        resendBtn.text = "${remaining}s 后可重新发送换机绑定短信"
+                        delay(1_000L)
+                    }
+                    resendBtn.isEnabled = true
+                    resendBtn.alpha = 1f
+                    resendBtn.text = "未收到？重新发送换机绑定短信"
+                }
+            }
+
+            resendBtn = text("未收到？重新发送换机绑定短信", 13f, LINK_BLUE).apply {
                 gravity = Gravity.CENTER
                 setPadding(0, dp(12), 0, dp(4))
                 isClickable = true
                 isFocusable = true
                 setOnClickListener {
+                    if (verifying || resendCountdownJob?.isActive == true) return@setOnClickListener
                     isEnabled = false
                     alpha = 0.55f
                     text = "正在重新发送..."
+                    sheetErrorView.visibility = View.GONE
                     lifecycleScope.launch {
                         val res = runCatching {
                             withContext(Dispatchers.IO) {
                                 httpClient.requestDeviceBindSmsDetailed(mobile, method)
                             }
                         }.getOrNull()
-                        isEnabled = true
-                        alpha = 1f
-                        text = "未收到？重新发送换机绑定短信"
-                        Toast.makeText(
-                            this@MainActivity,
-                            if (res?.success == true) "换机绑定验证码已重新发送"
-                            else res?.message.orEmpty().ifBlank { "重新发送失败，请稍后重试" },
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        if (!dialog.isShowing) return@launch
+                        if (res?.success == true) {
+                            Toast.makeText(this@MainActivity, "换机绑定验证码已重新发送", Toast.LENGTH_SHORT).show()
+                            startResendCooldown()
+                        } else {
+                            isEnabled = true
+                            alpha = 1f
+                            text = "未收到？重新发送换机绑定短信"
+                            val errMsg = res?.message.orEmpty().ifBlank { "重新发送失败，请稍后重试" }
+                            showSheetError(errMsg)
+                        }
                     }
                 }
             }
             sheet.addView(resendBtn, lp(top = dp(4)))
+            if (binding.smsSent) {
+                startResendCooldown()
+            }
 
             val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             sheet.addView(buttons, lp(top = dp(14)))
-            buttons.addView(secondaryActionButton("取消") { dialog.dismiss() }, weightedLp(0, dp(46)))
-            buttons.addView(primaryActionButton("验证并登录") {
+            val cancelBtn = secondaryActionButton("取消") {
+                if (!verifying) dialog.dismiss()
+            }
+            lateinit var confirmBtn: TextView
+            confirmBtn = primaryActionButton(if (bySms) "验证设备" else "验证并登录") {
+                if (verifying) return@primaryActionButton
                 val code = codeInput.text.toString().trim()
                 if (code.isBlank()) {
-                    Toast.makeText(this, "请输入短信验证码", Toast.LENGTH_SHORT).show()
+                    showSheetError("请输入换机绑定短信验证码")
                     return@primaryActionButton
                 }
-                dialog.dismiss()
-                setLoginBusy(true, "正在绑定新设备...")
+                verifying = true
+                sheetErrorView.visibility = View.GONE
+                codeInput.isEnabled = false
+                cancelBtn.isEnabled = false
+                cancelBtn.alpha = 0.55f
+                confirmBtn.isEnabled = false
+                confirmBtn.alpha = 0.65f
+                confirmBtn.text = "正在验证..."
+
                 lifecycleScope.launch {
                     val result = runCatching {
                         withContext(Dispatchers.IO) {
@@ -1360,59 +1453,51 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 loginName = mobile,
                                 validateCode = code,
                                 loginMethod = method,
-                                deviceId = profileStore.defaultDeviceId()
+                                deviceId = boundDeviceId
                             )
                         }
                     }.getOrNull()
+                    if (!dialog.isShowing) return@launch
                     if (result?.success == true) {
-                        loginBusy = false
+                        resendCountdownJob?.cancel()
+                        dialog.dismiss()
                         if (bySms) {
-                            // 108 succeeded; try logging in with original login SMS or prompt fresh 920 code
-                            val originalSms = loginSmsInput?.text?.toString()?.trim().orEmpty()
-                            val attemptCode = originalSms.ifBlank { code }
-                            performLoginAfterDeviceBindSms(mobile, attemptCode)
+                            // Matches official zyhl LoginActivity: after 108 succeeds, original 920 login SMS
+                            // is already consumed; reset countdown and prompt user to request a fresh login SMS.
+                            smsCountdownJob?.cancel()
+                            smsCodeButton?.apply {
+                                isEnabled = true
+                                alpha = 1f
+                                text = "获取验证码"
+                            }
+                            loginSmsInput?.setText("")
+                            loginSmsInput?.requestFocus()
+                            showLoginInfo("换机绑定成功！请重新点击“获取验证码”完成登录")
+                            Toast.makeText(this@MainActivity, "更换设备成功，请重新获取验证码登录", Toast.LENGTH_LONG).show()
                         } else {
                             val password = loginPasswordInput?.text?.toString().orEmpty()
-                            performLogin(mobile, password, bySms = false)
+                            performLogin(mobile, password, bySms = false, overrideDeviceId = boundDeviceId)
                         }
                     } else {
-                        setLoginBusy(false)
-                        showLoginError(result?.message.orEmpty().ifBlank { "新设备验证失败，请核对验证码后重试" })
+                        verifying = false
+                        codeInput.isEnabled = true
+                        cancelBtn.isEnabled = true
+                        cancelBtn.alpha = 1f
+                        confirmBtn.isEnabled = true
+                        confirmBtn.alpha = 1f
+                        confirmBtn.text = if (bySms) "验证设备" else "验证并登录"
+                        showSheetError(result?.message.orEmpty().ifBlank { "换机验证码校验失败，请核对后重试" })
                     }
                 }
-            }, weightedLp(dp(10), dp(46)))
+            }
+            buttons.addView(cancelBtn, weightedLp(0, dp(46)))
+            buttons.addView(confirmBtn, weightedLp(dp(10), dp(46)))
 
+            dialog.setOnDismissListener {
+                resendCountdownJob?.cancel()
+            }
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             codeInput.requestFocus()
-        }
-    }
-
-    private fun performLoginAfterDeviceBindSms(mobile: String, smsCode: String) {
-        if (loginBusy) return
-        setLoginBusy(true, "设备已绑定，正在登录...")
-        hideLoginError()
-        lifecycleScope.launch {
-            try {
-                val deviceId = profileStore.defaultDeviceId()
-                val login = withContext(Dispatchers.IO) {
-                    httpClient.loginWithSms(
-                        mobileNo = mobile,
-                        smsCode = smsCode,
-                        deviceId = deviceId
-                    )
-                }
-                completeLogin(login, mobile, deviceId)
-            } catch (error: Throwable) {
-                setLoginBusy(false)
-                smsCountdownJob?.cancel()
-                smsCodeButton?.apply {
-                    isEnabled = true
-                    alpha = 1f
-                    text = "获取验证码"
-                }
-                loginSmsInput?.setText("")
-                showLoginError("新设备已绑定成功！请重新点击“获取验证码”并登录（${error.message.orEmpty().take(60)}）")
-            }
         }
     }
 
@@ -1433,6 +1518,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     private fun showLoginError(message: String) {
         loginErrorView?.apply {
+            setTextColor(ThemeTokens.DANGER)
+            text = message
+            visibility = View.VISIBLE
+        }
+    }
+
+    private fun showLoginInfo(message: String) {
+        loginErrorView?.apply {
+            setTextColor(ThemeTokens.ACCENT_LIGHT)
             text = message
             visibility = View.VISIBLE
         }

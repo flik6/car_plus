@@ -481,18 +481,21 @@ class CheryHttpClient(
         mobileNo: String,
         smsCode: String,
         type: String
-    ): Boolean {
-        val response = postEnvelope(
-            serviceType = SERVICE_VERIFY_SMS,
-            data = JSONObject().apply {
-                put("telephone", mobileNo.trim())
-                put("type", type.ifBlank { SMS_TYPE_LOGIN })
-                put("validateCode", smsCode.trim())
-            },
-            globalId = ""
-        )
-        return isSuccessCode(response.resultCode)
-    }
+    ): Boolean = isSuccessCode(verifySmsCodeZyhlResponse(mobileNo, smsCode, type).resultCode)
+
+    private fun verifySmsCodeZyhlResponse(
+        mobileNo: String,
+        smsCode: String,
+        type: String
+    ): ZyhlResponse = postEnvelope(
+        serviceType = SERVICE_VERIFY_SMS,
+        data = JSONObject().apply {
+            put("telephone", mobileNo.trim())
+            put("type", type.ifBlank { SMS_TYPE_LOGIN })
+            put("validateCode", smsCode.trim())
+        },
+        globalId = ""
+    )
 
     /** 107 request the device-binding SMS for password (1) or SMS (2) login. */
     fun requestDeviceBindSms(loginName: String, loginMethod: String = LOGIN_METHOD_PASSWORD): Boolean =
@@ -643,7 +646,7 @@ class CheryHttpClient(
         )
     }
 
-    /** zyhl 105 login with the required 108/107 new-device binding sequence. */
+    /** zyhl 105 login with the official 921 -> 105 -> (0843 -> 107) sequence. */
     private fun loginWithSmsZyhl(
         mobileNo: String,
         smsCode: String,
@@ -655,39 +658,38 @@ class CheryHttpClient(
         val resolvedDeviceId = resolveDeviceId(deviceId)
 
         if (verifySmsFirst) {
-            verifySmsCodeZyhl(mobileNo, smsCode, type = SMS_TYPE_LOGIN)
+            val verifyResp = verifySmsCodeZyhlResponse(mobileNo, smsCode, type = SMS_TYPE_LOGIN)
+            if (!isSuccessCode(verifyResp.resultCode)) {
+                error(
+                    verifyResp.message.ifBlank {
+                        "短信验证码校验失败[${verifyResp.resultCode.ifBlank { "921" }}]"
+                    }
+                )
+            }
         }
 
-        var response = loginSmsRequest(mobileNo, smsCode, resolvedDeviceId)
+        val response = loginSmsRequest(mobileNo, smsCode, resolvedDeviceId)
         if (response.resultCode == RESULT_DEVICE_BIND_REQUIRED) {
-            val autoBind = runCatching {
-                confirmDeviceBindSmsDetailed(
-                    mobileNo,
-                    smsCode,
-                    LOGIN_METHOD_SMS,
-                    resolvedDeviceId
-                )
+            val bindSms = runCatching {
+                requestDeviceBindSmsDetailed(mobileNo, LOGIN_METHOD_SMS)
             }.getOrNull()
-            if (autoBind?.confirmed == true) {
-                response = loginSmsRequest(mobileNo, smsCode, resolvedDeviceId)
-            }
-            if (response.resultCode == RESULT_DEVICE_BIND_REQUIRED) {
-                val bindSms = runCatching {
-                    requestDeviceBindSmsDetailed(mobileNo, LOGIN_METHOD_SMS)
-                }.getOrNull()
-                throw CheryDeviceBindingRequiredException(
-                    message = firstNonBlank(
-                        bindSms?.resultMsg,
-                        response.resultMsg,
-                        "当前为新设备登录，已向手机发送设备绑定验证码，请完成绑定验证"
-                    ),
-                    mobileNo = mobileNo.trim(),
-                    loginMethod = LOGIN_METHOD_SMS,
-                    deviceId = resolvedDeviceId,
-                    smsSent = bindSms?.sent == true,
-                    serverMessage = firstNonBlank(bindSms?.resultMsg, response.resultMsg)
-                )
-            }
+            val target = bindSms?.telephone.orEmpty().ifBlank { mobileNo.trim() }
+            val smsSent = bindSms?.sent == true
+            throw CheryDeviceBindingRequiredException(
+                message = if (smsSent) {
+                    "检测到新设备登录，已向 $target 发送换机绑定验证码，请输入刚刚收到的短信验证码。"
+                } else {
+                    "检测到新设备登录，但换机绑定短信发送未成功：" +
+                        bindSms?.message.orEmpty().ifBlank { response.message }.ifBlank { "请稍后点击重新发送" }
+                },
+                telephone = target,
+                resultCode = response.resultCode,
+                mobileNo = mobileNo.trim(),
+                loginMethod = LOGIN_METHOD_SMS,
+                deviceId = resolvedDeviceId,
+                smsSent = smsSent,
+                serverMessage = firstNonBlank(bindSms?.message, response.message)
+            )
         }
 
         requireSuccess(response, SERVICE_LOGIN_SMS)
@@ -932,7 +934,7 @@ class CheryHttpClient(
             serviceType = "931",
             data = JSONObject().apply {
                 put("openGesturePass", "0")
-                put("vehiclePass", sha256HexToBase64(pinPlain.trim()))
+                put("vehiclePass", hashPasswordOrPin(pinPlain.trim()))
                 put("vin", resolvedVin)
             },
             globalId = resolveAuthToken(accessToken)
@@ -964,7 +966,7 @@ class CheryHttpClient(
                 put("ownercertid", "")
                 put("ownercerttype", "")
                 put("reason", reason)
-                put("vehiclePass", sha256HexToBase64(pinPlain.trim()))
+                put("vehiclePass", hashPasswordOrPin(pinPlain.trim()))
                 put("vin", resolvedVin)
             },
             globalId = resolveAuthToken(accessToken)
@@ -995,7 +997,7 @@ class CheryHttpClient(
                 put("iccid", iccid.trim())
                 put("hostName", hostName.trim())
                 put("purchaseDate", purchaseDate.trim())
-                put("controlPass", sha256HexToBase64(pinPlain.trim()))
+                put("controlPass", hashPasswordOrPin(pinPlain.trim()))
                 put("isDefault", if (isDefault) "1" else "0")
             },
             globalId = resolveAuthToken(accessToken)
@@ -1053,7 +1055,8 @@ class CheryHttpClient(
                     serviceType = SERVICE_VERIFY_PIN,
                     data = JSONObject().apply {
                         put("vin", vin.trim().uppercase(Locale.US))
-                        put("pin", hashPasswordOrPin(pinPlain))
+                        put("vehiclePass", hashPasswordOrPin(pinPlain))
+                        put("openGesturePass", "0")
                     },
                     globalId = authToken
                 )
@@ -2382,9 +2385,9 @@ class CheryHttpClient(
         val envelope = executeZyhlService(
             serviceType = "942",
             data = JSONObject().apply {
-                put("vin", vin)
+                put("vin", vin.trim().uppercase(Locale.US))
                 put("name", name)
-                put("radius", radiusMeters)
+                put("radius", if (shape == "1") "" else radiusMeters)
                 put("shape", shape)
                 put("type", type)
                 put("length", 0)
@@ -2535,15 +2538,24 @@ class CheryHttpClient(
         smsCode: String,
         newPassword: String
     ): Boolean {
-        val envelope = executeZyhlService(
+        val cleanMobile = mobileNo.trim()
+        val cleanCode = smsCode.trim()
+        val verifyResp = verifySmsCodeZyhlResponse(
+            mobileNo = cleanMobile,
+            smsCode = cleanCode,
+            type = SMS_TYPE_FORGET_PASSWORD
+        )
+        if (!isSuccessCode(verifyResp.resultCode)) return false
+        val response = postEnvelope(
             serviceType = "123",
             data = JSONObject().apply {
-                put("telephone", mobileNo)
-                put("validateCode", smsCode)
+                put("telephone", cleanMobile)
+                put("validateCode", cleanCode)
                 put("newPassword", hashPasswordOrPin(newPassword))
-            }
+            },
+            globalId = ""
         )
-        return zyhlEnvelopeSucceeded(envelope)
+        return isSuccessCode(response.resultCode)
     }
 
     fun changeVehicleControlPin(
@@ -2555,7 +2567,7 @@ class CheryHttpClient(
         val envelope = executeZyhlService(
             serviceType = "122",
             data = JSONObject().apply {
-                put("vin", vin)
+                put("vin", vin.trim().uppercase(Locale.US))
                 put("oldVehiclePass", hashPasswordOrPin(oldPin))
                 put("newVehiclePass", hashPasswordOrPin(newPin))
                 put("openGesturePass", "0")
@@ -2565,16 +2577,17 @@ class CheryHttpClient(
         return zyhlEnvelopeSucceeded(envelope)
     }
 
+    /** Sets initial vehicle control PIN via zyhl service 126 (DataReq126). */
     fun setVehicleControlPin(
         vin: String,
         newPin: String,
         accessToken: String = ""
     ): Boolean {
         val envelope = executeZyhlService(
-            serviceType = "931",
+            serviceType = "126",
             data = JSONObject().apply {
-                put("vin", vin)
-                put("vehiclePass", hashPasswordOrPin(newPin))
+                put("vin", vin.trim().uppercase(Locale.US))
+                put("password", hashPasswordOrPin(newPin))
                 put("openGesturePass", "0")
             },
             accessToken = accessToken
@@ -2628,7 +2641,7 @@ class CheryHttpClient(
             serviceType = "902",
             data = JSONObject().apply {
                 put("receiverMobile", mobile.trim())
-                put("password", sha256HexToBase64(pinPlain.trim()))
+                put("password", hashPasswordOrPin(pinPlain.trim()))
                 put("starttime", startTime.trim())
                 put("endtime", endTime.trim())
                 put("levelFlag", levelFlag)
@@ -3449,6 +3462,7 @@ class CheryHttpClient(
         const val BUSINESS_ID = "100"
         const val APP_NAME = "0"
         const val APP_TYPE_ANDROID = "0"
+        const val SMS_TYPE_FORGET_PASSWORD = "2"
         const val SMS_TYPE_LOGIN = "7"
         const val LOGIN_METHOD_PASSWORD = "1"
         const val LOGIN_METHOD_SMS = "2"
@@ -3470,7 +3484,7 @@ class CheryHttpClient(
         const val SERVICE_REMOTE_COMMAND = "970"
 
         private val UNAUTHENTICATED_SERVICE_TYPES = setOf(
-            "101", "104", "105", "107", "108", "920", "921"
+            "101", "104", "105", "107", "108", "111", "123", "920", "921", "922", "923"
         )
 
         const val RESULT_SUCCESS = "0200"

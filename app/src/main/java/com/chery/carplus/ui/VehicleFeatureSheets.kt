@@ -1230,7 +1230,7 @@ internal class VehicleFeatureSheets(
                         withContext(Dispatchers.IO) {
                             httpClient.deleteOrToggleGeofence(
                                 keyId = fence.keyId,
-                                type = if (targetChecked) "1" else "2",
+                                type = if (targetChecked) "1" else "0",
                                 accessToken = profile.accessToken
                             )
                         }
@@ -1274,7 +1274,7 @@ internal class VehicleFeatureSheets(
                         withContext(Dispatchers.IO) {
                             httpClient.deleteOrToggleGeofence(
                                 keyId = fence.keyId,
-                                type = "3",
+                                type = "2",
                                 accessToken = profile.accessToken
                             )
                         }
@@ -3117,24 +3117,50 @@ internal class VehicleFeatureSheets(
 
     fun showResetPasswordBySmsModal(defaultMobile: String = "") {
         showModalDialog("短信重置登录密码") { box, dialog ->
+            var smsJob: kotlinx.coroutines.Job? = null
+            var submitting = false
             val mobileEt = modalInput("手机号", InputType.TYPE_CLASS_PHONE).apply {
                 if (defaultMobile.isNotBlank()) setText(defaultMobile)
             }
             val codeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
             val codeEt = modalInput("短信验证码", InputType.TYPE_CLASS_NUMBER)
-            val sendBtn = secondaryBtn("获取验证码") {
+            lateinit var sendBtn: TextView
+            sendBtn = secondaryBtn("获取验证码") {
+                if (smsJob?.isActive == true) return@secondaryBtn
                 val m = mobileEt.text.toString().trim()
                 if (m.length < 11) {
                     toast("请输入正确手机号")
                     return@secondaryBtn
                 }
+                sendBtn.isEnabled = false
+                sendBtn.alpha = 0.55f
+                sendBtn.text = "发送中..."
                 scope.launch {
                     val sent = runCatching {
                         withContext(Dispatchers.IO) {
-                            httpClient.sendSmsCode(m, CheryHttpClient.SMS_TYPE_LOGIN)
+                            httpClient.sendSmsCode(m, type = CheryHttpClient.SMS_TYPE_FORGET_PASSWORD)
                         }
                     }.getOrDefault(false)
-                    toast(if (sent) "验证码已发送" else "验证码发送失败")
+                    if (!dialog.isShowing) return@launch
+                    if (sent) {
+                        toast("验证码已发送")
+                        smsJob = scope.launch {
+                            for (sec in 60 downTo 1) {
+                                sendBtn.isEnabled = false
+                                sendBtn.alpha = 0.55f
+                                sendBtn.text = "${sec}s"
+                                kotlinx.coroutines.delay(1_000L)
+                            }
+                            sendBtn.isEnabled = true
+                            sendBtn.alpha = 1f
+                            sendBtn.text = "获取验证码"
+                        }
+                    } else {
+                        sendBtn.isEnabled = true
+                        sendBtn.alpha = 1f
+                        sendBtn.text = "获取验证码"
+                        toast("验证码发送失败")
+                    }
                 }
             }
             codeRow.addView(codeEt, LinearLayout.LayoutParams(0, dp(46), 1f))
@@ -3148,27 +3174,55 @@ internal class VehicleFeatureSheets(
             box.addView(codeRow, lp(top = dp(10)))
             box.addView(newPwdEt, lp(top = dp(10), height = dp(46)))
 
+            val errorText = text("", 12.5f, ThemeTokens.DANGER).apply {
+                visibility = View.GONE
+            }
+            box.addView(errorText, lp(top = dp(10)))
+
             val btns = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
             box.addView(btns, lp(top = dp(18)))
-            btns.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(44)))
-            btns.addView(primaryBtn("重置密码") {
+            btns.addView(secondaryBtn("取消") { if (!submitting) dialog.dismiss() }, weightLp(0, dp(44)))
+            lateinit var resetBtn: TextView
+            resetBtn = primaryBtn("重置密码") {
+                if (submitting) return@primaryBtn
                 val m = mobileEt.text.toString().trim()
                 val c = codeEt.text.toString().trim()
                 val p = newPwdEt.text.toString()
                 if (m.length < 11 || c.isBlank() || p.length < 6) {
-                    toast("请完整填写手机号、验证码与新密码")
+                    errorText.text = "请完整填写手机号、验证码与至少 6 位新密码"
+                    errorText.visibility = View.VISIBLE
                     return@primaryBtn
                 }
-                dialog.dismiss()
+                submitting = true
+                errorText.visibility = View.GONE
+                resetBtn.isEnabled = false
+                resetBtn.alpha = 0.65f
+                resetBtn.text = "提交中..."
                 scope.launch {
                     val ok = runCatching {
                         withContext(Dispatchers.IO) {
                             httpClient.resetLoginPasswordBySms(m, c, p)
                         }
                     }.getOrDefault(false)
-                    toast(if (ok) "密码已重置，请使用新密码登录" else "密码重置失败")
+                    if (!dialog.isShowing) return@launch
+                    if (ok) {
+                        smsJob?.cancel()
+                        dialog.dismiss()
+                        toast("密码已重置，请使用新密码登录")
+                    } else {
+                        submitting = false
+                        resetBtn.isEnabled = true
+                        resetBtn.alpha = 1f
+                        resetBtn.text = "重置密码"
+                        errorText.text = "验证码校验或密码重置失败，请核对后重试"
+                        errorText.visibility = View.VISIBLE
+                    }
                 }
-            }, weightLp(dp(10), dp(44)))
+            }
+            btns.addView(resetBtn, weightLp(dp(10), dp(44)))
+            dialog.setOnDismissListener {
+                smsJob?.cancel()
+            }
         }
     }
 
@@ -3194,14 +3248,18 @@ internal class VehicleFeatureSheets(
                         showError("原 PIN 码校验失败，请重试")
                     }
                 } else {
-                    runCatching {
+                    val ok = runCatching {
                         withContext(Dispatchers.IO) {
                             httpClient.setVehicleControlPin(profile.vin, newPin, profile.accessToken)
                         }
+                    }.getOrDefault(false)
+                    if (ok) {
+                        onPinUpdated(newPin)
+                        dismiss()
+                        toast("PIN 码已保存")
+                    } else {
+                        showError("云端 PIN 码设置失败，请重试")
                     }
-                    onPinUpdated(newPin)
-                    dismiss()
-                    toast("PIN 码已保存")
                 }
             }
         }
