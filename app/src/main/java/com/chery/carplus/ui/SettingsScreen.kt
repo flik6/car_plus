@@ -592,7 +592,7 @@ class SettingsScreen(
         val dialog = object : Dialog(activity, R.style.Theme_CarPlus_BottomSheetDialog) {
             override fun dismiss() {
                 val target = sheetRef
-                if (target == null || !isShowing) {
+                if (!isShowing || target == null || MotionSpec.isBypassingSheetDismiss(this)) {
                     runCatching { super.dismiss() }
                     return
                 }

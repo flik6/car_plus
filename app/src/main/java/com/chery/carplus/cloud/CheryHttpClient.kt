@@ -408,6 +408,24 @@ data class BindVehicleResult(
     val simStatus: String = ""
 )
 
+enum class VehicleUpgradeStatus {
+    NO_UPDATE,
+    AVAILABLE,
+    SCHEDULED,
+    PREPARING,
+    UPGRADING,
+    UNFINISHED,
+    FAILED,
+    RETRYABLE_FAILED
+}
+
+data class VehicleUpgradeActionResult(
+    val success: Boolean,
+    val resultCode: String = "",
+    val message: String = "",
+    val isPinError: Boolean = false
+)
+
 data class VehicleUpgradeInfo(
     val upgradeTaskId: String,
     val currentVersion: String,
@@ -419,8 +437,23 @@ data class VehicleUpgradeInfo(
     val percentage: Int = 0,
     val surplusTime: String = "",
     val hasUpgrade: Boolean = false,
-    val rawJson: String = ""
-)
+    val rawJson: String = "",
+    val upgradeStatus: VehicleUpgradeStatus = VehicleUpgradeStatus.NO_UPDATE,
+    val resultMessage: String = ""
+) {
+    val canStartNow: Boolean
+        get() = upgradeTaskId.isNotBlank() &&
+            (upgradeStatus == VehicleUpgradeStatus.AVAILABLE || upgradeStatus == VehicleUpgradeStatus.SCHEDULED)
+
+    val canRetry: Boolean
+        get() = upgradeTaskId.isNotBlank() && upgradeStatus == VehicleUpgradeStatus.RETRYABLE_FAILED
+
+    val isInProgress: Boolean
+        get() = upgradeStatus == VehicleUpgradeStatus.UPGRADING || upgradeStatus == VehicleUpgradeStatus.PREPARING
+
+    val shouldOpenSheet: Boolean
+        get() = upgradeStatus != VehicleUpgradeStatus.NO_UPDATE
+}
 
 data class VehicleAuthorizationItem(
     val keyId: String,
@@ -2912,25 +2945,87 @@ class CheryHttpClient(
         return zyhlDataObject(envelope)
     }
 
+    private fun classifyUpgradeStatus(
+        upgradeTaskId: String,
+        state: String,
+        upgradeStartTime: String
+    ): VehicleUpgradeStatus {
+        if (upgradeTaskId.isBlank()) return VehicleUpgradeStatus.NO_UPDATE
+        return when (state.trim()) {
+            // Official DataResp148 state machine:
+            // "1" = pending upgrade (with upgradeStartTime => scheduled), "2"/"3" = upgrading,
+            // "7" = triggered/preparing, "4" = upgrade succeeded, "8" = upgrade finished,
+            // "5" = unfinished (non-retryable), "6" = failed, "9" = unfinished (retryable via 152),
+            // "0"/""/other = no active upgrade.
+            "1" -> if (upgradeStartTime.isNotBlank()) {
+                VehicleUpgradeStatus.SCHEDULED
+            } else {
+                VehicleUpgradeStatus.AVAILABLE
+            }
+            "2", "3" -> VehicleUpgradeStatus.UPGRADING
+            "7" -> VehicleUpgradeStatus.PREPARING
+            "5" -> VehicleUpgradeStatus.UNFINISHED
+            "6" -> VehicleUpgradeStatus.FAILED
+            "9" -> VehicleUpgradeStatus.RETRYABLE_FAILED
+            else -> VehicleUpgradeStatus.NO_UPDATE
+        }
+    }
+
     fun checkVehicleUpgrade(vin: String, accessToken: String = ""): VehicleUpgradeInfo {
         val envelope = executeZyhlService(
             serviceType = "148",
             data = JSONObject().put("vin", vin),
             accessToken = accessToken
         )
+        val resultCode = jsonText(envelope, "resultCode")
+        val resultMessage = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
         val data = zyhlDataObject(envelope)
+        val currentVersion = jsonText(data, "whlVsn")
+        val releaseNote = jsonText(data, "rlsNt")
+        val descriptionText = jsonText(data, "text")
+        val upgradeTime = jsonText(data, "upgTm")
+        val upgradeStartTime = jsonText(data, "upgradeStartTime")
+
+        // Official protocol: resultCode "0204" means already on the latest version (no active task).
+        if (resultCode == "0204") {
+            return VehicleUpgradeInfo(
+                upgradeTaskId = "",
+                currentVersion = currentVersion,
+                state = "0",
+                releaseNote = releaseNote,
+                descriptionText = descriptionText,
+                upgradeTime = upgradeTime,
+                upgradeStartTime = "",
+                hasUpgrade = false,
+                rawJson = data.toString(),
+                upgradeStatus = VehicleUpgradeStatus.NO_UPDATE,
+                resultMessage = resultMessage
+            )
+        }
+        if (resultCode.isNotBlank() && resultCode != RESULT_SUCCESS) {
+            error(resultMessage.ifBlank { "检查车辆版本失败 ($resultCode)" })
+        }
+
         val upgradeTaskId = jsonText(data, "upgradeTaskId")
         val state = jsonText(data, "state")
+        val status = classifyUpgradeStatus(upgradeTaskId, state, upgradeStartTime)
+        val hasUpgrade = status == VehicleUpgradeStatus.AVAILABLE ||
+            status == VehicleUpgradeStatus.SCHEDULED ||
+            status == VehicleUpgradeStatus.PREPARING ||
+            status == VehicleUpgradeStatus.UPGRADING
+
         return VehicleUpgradeInfo(
             upgradeTaskId = upgradeTaskId,
-            currentVersion = jsonText(data, "whlVsn"),
+            currentVersion = currentVersion,
             state = state,
-            releaseNote = jsonText(data, "rlsNt"),
-            descriptionText = jsonText(data, "text"),
-            upgradeTime = jsonText(data, "upgTm"),
-            upgradeStartTime = jsonText(data, "upgradeStartTime"),
-            hasUpgrade = upgradeTaskId.isNotBlank() || (state.isNotBlank() && state != "0"),
-            rawJson = data.toString()
+            releaseNote = releaseNote,
+            descriptionText = descriptionText,
+            upgradeTime = upgradeTime,
+            upgradeStartTime = upgradeStartTime,
+            hasUpgrade = hasUpgrade,
+            rawJson = data.toString(),
+            upgradeStatus = status,
+            resultMessage = resultMessage
         )
     }
 
@@ -2947,9 +3042,15 @@ class CheryHttpClient(
             },
             accessToken = accessToken
         )
+        val resultCode = jsonText(envelope, "resultCode")
+        val resultMessage = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
+        if (resultCode.isNotBlank() && resultCode != RESULT_SUCCESS) {
+            error(resultMessage.ifBlank { "获取升级进度失败 ($resultCode)" })
+        }
         val data = zyhlDataObject(envelope)
         val state = jsonText(data, "state")
         val percentage = jsonInt(data, "percentage")
+        val status = classifyUpgradeStatus(upgradeTaskId, state, "")
         return VehicleUpgradeInfo(
             upgradeTaskId = upgradeTaskId,
             currentVersion = "",
@@ -2960,26 +3061,90 @@ class CheryHttpClient(
             upgradeStartTime = "",
             percentage = percentage,
             surplusTime = jsonText(data, "surplusTime"),
-            hasUpgrade = state.isNotBlank() || percentage > 0,
-            rawJson = data.toString()
+            hasUpgrade = status == VehicleUpgradeStatus.UPGRADING || status == VehicleUpgradeStatus.PREPARING,
+            rawJson = data.toString(),
+            upgradeStatus = status,
+            resultMessage = resultMessage
+        )
+    }
+
+    /**
+     * Triggers an immediate OTA vehicle upgrade using the official remote-control
+     * instruction (`serviceType = "970"`, `instruction = "1115"`, `paras["302F"] = upgradeTaskId`),
+     * automatically leveraging the hardened `125 -> 970` PIN verification flow.
+     */
+    fun startVehicleUpgrade(
+        vin: String,
+        upgradeTaskId: String,
+        vehiclePin: String = "",
+        accessToken: String = ""
+    ): VehicleUpgradeActionResult {
+        val normVin = vin.trim().uppercase(Locale.US)
+        val normTaskId = upgradeTaskId.trim()
+        if (normVin.isBlank() || normTaskId.isBlank()) {
+            return VehicleUpgradeActionResult(false, message = "升级任务参数缺失")
+        }
+        val pinHash = if (vehiclePin.trim().isNotBlank()) hashPasswordOrPin(vehiclePin.trim()) else ""
+        val commandData = JSONObject().apply {
+            put("vin", normVin)
+            put("instruction", "1115")
+            put("paras", JSONObject().put("302F", normTaskId))
+            put("passwordType", PASSWORD_TYPE_VEHICLE)
+            if (pinHash.isNotBlank()) put("safePasswd", pinHash)
+        }
+        val envelope = executeZyhlService(
+            serviceType = SERVICE_REMOTE_COMMAND,
+            data = commandData,
+            accessToken = accessToken
+        )
+        val code = jsonText(envelope, "resultCode")
+        val msg = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
+        val accepted = is970CommandAccepted(envelope)
+        val pinErr = !accepted && isPinRejection(code, msg)
+        return VehicleUpgradeActionResult(
+            success = accepted,
+            resultCode = code,
+            message = msg,
+            isPinError = pinErr
+        )
+    }
+
+    /**
+     * Retries an unfinished retryable OTA task (`state == "9"`) via official `serviceType = "152"`.
+     */
+    fun retryVehicleUpgrade(
+        vin: String,
+        upgradeTaskId: String,
+        accessToken: String = ""
+    ): VehicleUpgradeActionResult {
+        val envelope = executeZyhlService(
+            serviceType = "152",
+            data = JSONObject().apply {
+                put("vin", vin.trim().uppercase(Locale.US))
+                put("upgradeTaskId", upgradeTaskId.trim())
+            },
+            accessToken = accessToken
+        )
+        val code = jsonText(envelope, "resultCode")
+        val msg = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
+        return VehicleUpgradeActionResult(
+            success = zyhlEnvelopeSucceeded(envelope),
+            resultCode = code,
+            message = msg
         )
     }
 
     fun triggerVehicleUpgrade(
         vin: String,
         upgradeTaskId: String,
-        accessToken: String = ""
-    ): Boolean {
-        val envelope = executeZyhlService(
-            serviceType = "152",
-            data = JSONObject().apply {
-                put("vin", vin)
-                put("upgradeTaskId", upgradeTaskId)
-            },
-            accessToken = accessToken
-        )
-        return zyhlEnvelopeSucceeded(envelope)
-    }
+        accessToken: String = "",
+        vehiclePin: String = ""
+    ): Boolean = startVehicleUpgrade(
+        vin = vin,
+        upgradeTaskId = upgradeTaskId,
+        vehiclePin = vehiclePin,
+        accessToken = accessToken
+    ).success
 
     fun scheduleVehicleUpgrade(
         vin: String,

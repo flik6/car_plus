@@ -29,6 +29,7 @@ import com.chery.carplus.cloud.VehicleAuthorizationItem
 import com.chery.carplus.cloud.VehicleSummary
 import com.chery.carplus.cloud.VehicleTrafficInfo
 import com.chery.carplus.cloud.VehicleUpgradeInfo
+import com.chery.carplus.cloud.VehicleUpgradeStatus
 import com.chery.carplus.profile.VehicleProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -1333,6 +1334,7 @@ internal class VehicleManagementScreens(
         var trafficFetchedOnce = false
         var trafficFetching = false
         var applyTrafficToCurrentRow: ((VehicleTrafficInfo?) -> Unit)? = null
+        var refreshVersionCurrentRow: (() -> Unit)? = null
 
         fun renderDetail(vehicle: VehicleSummary) {
             currentVehicle = vehicle
@@ -1750,21 +1752,13 @@ internal class VehicleManagementScreens(
                 )
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
 
-                // 车机流量套餐 (zyhl 967)
+                // 车机流量套餐 & 流量有效期 (zyhl 967)
                 if (isCurrentActive) {
-                    var trafficDueDate = ""
                     val trafficRow = LinearLayout(context).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         minimumHeight = dp(52)
                         setPadding(dp(20), dp(10), dp(20), dp(10))
-                        isClickable = true
-                        isFocusable = true
-                        setOnClickListener {
-                            if (trafficDueDate.isNotBlank()) {
-                                toast("套餐有效期至 $trafficDueDate")
-                            }
-                        }
                     }
                     trafficRow.addView(
                         text("车机流量", 14.5f, ThemeTokens.TEXT_SUB),
@@ -1778,6 +1772,26 @@ internal class VehicleManagementScreens(
                     }
                     trafficRow.addView(trafficValueTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
                     body.addView(trafficRow, lp())
+                    body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+                    val trafficExpiryRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        minimumHeight = dp(52)
+                        setPadding(dp(20), dp(10), dp(20), dp(10))
+                    }
+                    trafficExpiryRow.addView(
+                        text("流量有效期", 14.5f, ThemeTokens.TEXT_SUB),
+                        LinearLayout.LayoutParams(dp(96), WRAP_CONTENT)
+                    )
+                    trafficExpiryRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+                    val trafficExpiryValueTv = text("查询中...", 14.5f, ThemeTokens.TEXT_SUB).apply {
+                        gravity = Gravity.END
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    }
+                    trafficExpiryRow.addView(trafficExpiryValueTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+                    body.addView(trafficExpiryRow, lp())
                     body.addView(AppComponents.createHairline(context, startInsetDp = 20))
 
                     fun formatTrafficMb(raw: String): String {
@@ -1801,9 +1815,10 @@ internal class VehicleManagementScreens(
                         if (traffic == null) {
                             trafficValueTv.text = "暂不可用"
                             trafficValueTv.setTextColor(ThemeTokens.TEXT_SUB)
+                            trafficExpiryValueTv.text = "—"
+                            trafficExpiryValueTv.setTextColor(ThemeTokens.TEXT_SUB)
                             return
                         }
-                        trafficDueDate = traffic.dueDate.trim().take(10)
                         val formatted = when {
                             traffic.unlimited -> "无限流量"
                             traffic.totalTraffic.isNotBlank() -> {
@@ -1816,6 +1831,15 @@ internal class VehicleManagementScreens(
                         }
                         trafficValueTv.text = formatted
                         trafficValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
+
+                        val dueDate = traffic.dueDate.trim().take(10)
+                        if (dueDate.isNotBlank()) {
+                            trafficExpiryValueTv.text = dueDate
+                            trafficExpiryValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
+                        } else {
+                            trafficExpiryValueTv.text = "—"
+                            trafficExpiryValueTv.setTextColor(ThemeTokens.TEXT_SUB)
+                        }
                     }
 
                     applyTrafficToCurrentRow = ::applyTrafficToRow
@@ -1890,7 +1914,7 @@ internal class VehicleManagementScreens(
 
                     fun refreshVersionRowUi() {
                         val info = cachedUpgradeInfo
-                        val hasNew = info != null && (info.hasUpgrade || info.upgradeTaskId.isNotBlank())
+                        val dotDrawable = versionDot.background as? GradientDrawable
                         when {
                             upgradeChecking -> {
                                 versionDot.visibility = View.GONE
@@ -1899,18 +1923,55 @@ internal class VehicleManagementScreens(
                                 versionValueTv.setTextColor(ThemeTokens.TEXT_SUB)
                                 versionValueTv.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
                             }
-                            hasNew -> {
+                            info != null && info.upgradeStatus == VehicleUpgradeStatus.AVAILABLE -> {
+                                dotDrawable?.setColor(ThemeTokens.ACCENT_LIGHT)
                                 versionDot.visibility = View.VISIBLE
                                 versionChevron.visibility = View.VISIBLE
-                                val verPrefix = info!!.currentVersion.takeIf { it.isNotBlank() }?.let { "$it · " }.orEmpty()
-                                versionValueTv.text = "${verPrefix}可升级"
+                                val verPrefix = info.currentVersion.takeIf { it.isNotBlank() }?.let { "$it · " }.orEmpty()
+                                versionValueTv.text = "${verPrefix}有新版本"
                                 versionValueTv.setTextColor(ThemeTokens.ACCENT_LIGHT)
                                 versionValueTv.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                            }
+                            info != null && info.upgradeStatus == VehicleUpgradeStatus.SCHEDULED -> {
+                                dotDrawable?.setColor(ThemeTokens.ACCENT_LIGHT)
+                                versionDot.visibility = View.VISIBLE
+                                versionChevron.visibility = View.VISIBLE
+                                val verPrefix = info.currentVersion.takeIf { it.isNotBlank() }?.let { "$it · " }.orEmpty()
+                                versionValueTv.text = "${verPrefix}已预约升级"
+                                versionValueTv.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                            }
+                            info != null && info.upgradeStatus == VehicleUpgradeStatus.UPGRADING -> {
+                                dotDrawable?.setColor(ThemeTokens.ACCENT_LIGHT)
+                                versionDot.visibility = View.VISIBLE
+                                versionChevron.visibility = View.VISIBLE
+                                versionValueTv.text = "升级中"
+                                versionValueTv.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                            }
+                            info != null && info.upgradeStatus == VehicleUpgradeStatus.PREPARING -> {
+                                dotDrawable?.setColor(ThemeTokens.ACCENT_LIGHT)
+                                versionDot.visibility = View.VISIBLE
+                                versionChevron.visibility = View.VISIBLE
+                                versionValueTv.text = "等待升级中"
+                                versionValueTv.setTextColor(ThemeTokens.ACCENT_LIGHT)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                            }
+                            info != null && (info.upgradeStatus == VehicleUpgradeStatus.RETRYABLE_FAILED ||
+                                info.upgradeStatus == VehicleUpgradeStatus.UNFINISHED ||
+                                info.upgradeStatus == VehicleUpgradeStatus.FAILED) -> {
+                                dotDrawable?.setColor(ThemeTokens.DANGER)
+                                versionDot.visibility = View.VISIBLE
+                                versionChevron.visibility = View.VISIBLE
+                                versionValueTv.text = if (info.upgradeStatus == VehicleUpgradeStatus.FAILED) "升级失败" else "升级未完成"
+                                versionValueTv.setTextColor(ThemeTokens.DANGER)
+                                versionValueTv.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
                             }
                             info != null -> {
                                 versionDot.visibility = View.GONE
                                 versionChevron.visibility = View.GONE
-                                versionValueTv.text = info.currentVersion.ifBlank { "已是最新" }
+                                val ver = info.currentVersion.trim()
+                                versionValueTv.text = if (ver.isNotBlank()) "$ver · 已是最新" else "已是最新"
                                 versionValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
                                 versionValueTv.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
                             }
@@ -1924,11 +1985,13 @@ internal class VehicleManagementScreens(
                             else -> {
                                 versionDot.visibility = View.GONE
                                 versionChevron.visibility = View.GONE
-                                versionValueTv.text = "--"
+                                versionValueTv.text = "—"
                                 versionValueTv.setTextColor(ThemeTokens.TEXT_SUB)
                             }
                         }
                     }
+
+                    refreshVersionCurrentRow = ::refreshVersionRowUi
 
                     fun fetchVehicleVersion(openOrToastOnComplete: Boolean) {
                         if (upgradeChecking) return
@@ -1936,7 +1999,7 @@ internal class VehicleManagementScreens(
                         if (active.accessToken.isBlank()) return
                         upgradeChecking = true
                         upgradeCheckFailed = false
-                        refreshVersionRowUi()
+                        refreshVersionCurrentRow?.invoke()
                         scope.launch {
                             val res = runCatching {
                                 withContext(Dispatchers.IO) {
@@ -1948,10 +2011,9 @@ internal class VehicleManagementScreens(
                             res.onSuccess { info ->
                                 cachedUpgradeInfo = info
                                 upgradeCheckFailed = false
-                                refreshVersionRowUi()
+                                refreshVersionCurrentRow?.invoke()
                                 if (openOrToastOnComplete) {
-                                    val hasNew = info.hasUpgrade || info.upgradeTaskId.isNotBlank()
-                                    if (hasNew) {
+                                    if (info.shouldOpenSheet) {
                                         onOpenVehicleUpgrade(info)
                                     } else {
                                         toast("当前车辆系统已是最新版本")
@@ -1959,7 +2021,7 @@ internal class VehicleManagementScreens(
                                 }
                             }.onFailure { err ->
                                 upgradeCheckFailed = true
-                                refreshVersionRowUi()
+                                refreshVersionCurrentRow?.invoke()
                                 if (openOrToastOnComplete && err !is CherySessionExpiredException) {
                                     toast("检查车辆版本失败，请稍后重试")
                                 }
@@ -1971,8 +2033,7 @@ internal class VehicleManagementScreens(
                         if (upgradeChecking) return@setOnClickListener
                         val info = cachedUpgradeInfo
                         if (info != null) {
-                            val hasNew = info.hasUpgrade || info.upgradeTaskId.isNotBlank()
-                            if (hasNew) {
+                            if (info.shouldOpenSheet) {
                                 onOpenVehicleUpgrade(info)
                             } else {
                                 toast("当前车辆系统已是最新版本")
@@ -2029,6 +2090,9 @@ internal class VehicleManagementScreens(
 
         val refreshHook: () -> Unit = {
             if (!isEditing) {
+                if (cachedUpgradeInfo?.shouldOpenSheet == true && !upgradeChecking) {
+                    upgradeCheckedOnce = false
+                }
                 val updated = cachedVehicleSummary(targetVin) ?: currentVehicle
                 if (updated != null) {
                     renderDetail(updated)

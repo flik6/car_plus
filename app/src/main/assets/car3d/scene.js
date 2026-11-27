@@ -34,6 +34,23 @@
   var ENTRANCE_STYLES = ['right_drive', 'left_drive', 'reverse_park', 'bay_exit'];
   var preferredEntranceStyle = 'auto';
   var lastPlayedEntranceStyle = '';
+  var reverseParkSide = 1; // Alternates between +1 (right-to-left) and -1 (left-to-right)
+  var activeRestTheta = DEFAULT_THETA;
+  var activeRestPhi = DEFAULT_PHI;
+
+  function wrapAngleDelta(fromRad, toRad) {
+    var twoPi = Math.PI * 2;
+    var diff = ((toRad - fromRad) % twoPi + twoPi) % twoPi;
+    if (diff > Math.PI) diff -= twoPi;
+    return diff;
+  }
+
+  // Dynamic entrance camera framing offset (smoothly returns to 0 on settle and resets in finishEntranceImmediately)
+  var entranceCam = {
+    offsetX: 0,
+    offsetZ: 0,
+    radiusBoost: 0
+  };
 
   function normalizeEntranceStyle(raw) {
     if (typeof raw !== 'string') return 'auto';
@@ -182,7 +199,8 @@
     elapsed: 0,
     totalDuration: 2.0,
     segments: [],
-    bayPose: null, // { x, z, yaw, fadeOutStart, fadeOutEnd } or null
+    bayPose: null, // { x, z, yaw, fadeInEnd, fadeOutStart, fadeOutEnd } or null
+    camProfile: null, // { startTheta, startPhi, restTheta, restPhi, orbitStart, orbitEnd, offsetX, offsetZ, radiusBoost, fadeInEnd, returnStart, returnEnd } or null
     prevX: 0,
     prevZ: 0,
     prevSpeed: 0,
@@ -235,35 +253,60 @@
     return x * x * (3.0 - 2.0 * x);
   }
 
-  function buildEntranceChoreography(styleKey) {
-    // Screen-right unit vector in world XZ plane for DEFAULT_THETA camera
+  function buildEntranceChoreography(styleKey, revSideOverride) {
+    // Camera-aligned ground-plane basis for DEFAULT_THETA (+0.76):
+    // (rx, rz) = screen-right unit vector; (awayX, awayZ) = deep-background unit vector
     var rx = Math.cos(DEFAULT_THETA);
     var rz = -Math.sin(DEFAULT_THETA);
+    var awayX = -Math.sin(DEFAULT_THETA);
+    var awayZ = -Math.cos(DEFAULT_THETA);
 
     if (styleKey === 'left_drive') {
+      // Exact mirror of right_drive using mirrored Front-Right 3/4 showcase camera (-DEFAULT_THETA):
+      // car emerges far away from the distant screen-left horizon (-10.2m left, +8.6m deep)
+      // and settles into the mirrored passenger-side Front-Right 3/4 angle (-0.76, 1.36).
+      var leftTheta = -DEFAULT_THETA;
+      var lRx = Math.cos(leftTheta);
+      var lRz = -Math.sin(leftTheta);
+      var lAwayX = -Math.sin(leftTheta);
+      var lAwayZ = -Math.cos(leftTheta);
       return {
         bayPose: null,
+        camProfile: {
+          startTheta: leftTheta,
+          startPhi: 1.36,
+          restTheta: leftTheta,
+          restPhi: 1.36,
+          orbitStart: 0.0,
+          orbitEnd: 0.0,
+          offsetX: 0,
+          offsetZ: 0,
+          radiusBoost: 0,
+          fadeInEnd: 0,
+          returnStart: 0,
+          returnEnd: 0.01
+        },
         segments: [
           {
             type: 'drive',
             dir: 1,
-            duration: 1.74,
+            duration: 2.28,
             ease: 'decel',
-            p0: { x: -8.8, z: -2.4 },
-            p1: { x: -3.9, z: -2.8 },
-            p2: { x: 0.0, z: -2.55 },
+            p0: { x: -lRx * 10.2 + lAwayX * 8.6, z: -lRz * 10.2 + lAwayZ * 8.6 },
+            p1: { x: -lRx * 5.6 + lAwayX * 3.2, z: -lRz * 5.6 + lAwayZ * 3.2 },
+            p2: { x: 0.0, z: -2.85 },
             p3: { x: 0.0, z: 0.0 },
-            straightFadeStart: 0.76,
-            headStart: 0.65,
+            straightFadeStart: 0.78,
+            headStart: 0.72,
             headEnd: 0.36,
-            brakeStartT: 0.18,
-            brakePeakT: 0.45,
+            brakeStartT: 0.28,
+            brakePeakT: 0.56,
             stopImpulse: [-0.085, 0.0, 0.012],
             stopFired: false
           },
           {
             type: 'hold',
-            duration: 0.28,
+            duration: 0.30,
             x: 0.0,
             z: 0.0,
             yaw: 0.0,
@@ -280,72 +323,90 @@
     }
 
     if (styleKey === 'reverse_park') {
-      // Pull past the showcase bay from screen-right, brake to standstill, shift into R,
-      // and reverse along a strictly convex C1-continuous J-curve into the ground bay at (0, 0, 0) facing +Z.
-      var stopX = -1.45;
-      var stopZ = 2.45;
-      var stopYaw = -0.78;
+      // Approach along a foreground lane in front of a visibly deeper background parking bay,
+      // brake & shift into R (white reverse lights + front counter-steer), then reverse >6m
+      // along a strictly convex C1 J-curve deep into the bay at (0, 0, 0) facing +Z while
+      // the camera smoothly orbits to a Rear 3/4 showcase angle (±2.38, 1.24) highlighting the taillights!
+      var side = (revSideOverride === -1 || revSideOverride === 1) ? revSideOverride : reverseParkSide;
+      var stopX = -3.20 * side;
+      var stopZ = 4.95;
+      var stopYaw = -0.86 * side;
       var sinY = Math.sin(stopYaw);
       var cosY = Math.cos(stopYaw);
-      var revAlpha = -stopX / (-sinY); // intersection with x = 0 at Q = (0, +0.985)
-      var fwdP2 = { x: stopX - sinY * 1.10, z: stopZ - cosY * 1.10 };
+      var revAlpha = Math.abs(stopX) / Math.abs(sinY); // intersection with x = 0 at Q = (0, +2.195)
+      var qZ = stopZ - cosY * revAlpha;
+      var fwdP2 = { x: stopX - sinY * 1.65, z: stopZ - cosY * 1.65 };
       var revP1 = { x: stopX - sinY * (0.62 * revAlpha), z: stopZ - cosY * (0.62 * revAlpha) };
       return {
-        bayPose: { x: 0.0, z: 0.0, yaw: 0.0, fadeInEnd: 0.45, fadeOutStart: 2.86, fadeOutEnd: 3.30 },
+        bayPose: { x: 0.0, z: 0.0, yaw: 0.0, fadeInEnd: 0.40, fadeOutStart: 3.58, fadeOutEnd: 4.06 },
+        camProfile: {
+          startTheta: DEFAULT_THETA * side,
+          startPhi: 1.34,
+          restTheta: 2.38 * side,
+          restPhi: 1.24,
+          orbitStart: 1.45,
+          orbitEnd: 3.56,
+          offsetX: -0.75 * side,
+          offsetZ: 1.95,
+          radiusBoost: 3.2,
+          fadeInEnd: 0.0,
+          returnStart: 1.50,
+          returnEnd: 3.52
+        },
         segments: [
           {
             type: 'drive',
             dir: 1,
-            duration: 0.96,
+            duration: 1.15,
             ease: 'decel',
-            p0: { x: 4.8, z: -2.0 },
-            p1: { x: 1.4, z: 0.40 },
+            p0: { x: 6.8 * side, z: 1.2 },
+            p1: { x: 2.2 * side, z: 2.6 },
             p2: fwdP2,
             p3: { x: stopX, z: stopZ },
             straightFadeStart: 0.96,
-            headStart: 0.62,
+            headStart: 0.65,
             headEnd: 0.48,
-            brakeStartT: 0.48,
-            brakePeakT: 0.85,
+            brakeStartT: 0.50,
+            brakePeakT: 0.86,
             stopImpulse: [-0.055, 0.0, 0.008],
             stopFired: false
           },
           {
             type: 'hold',
-            duration: 0.30,
+            duration: 0.36,
             x: stopX,
             z: stopZ,
             yaw: stopYaw,
-            steerTarget: -0.24,
+            steerTarget: -0.25 * side,
             brakeStart: 0.88,
             brakeEnd: 0.25,
             headStart: 0.48,
             headEnd: 0.44,
             reverseStart: 0.0,
             reverseEnd: 1.0,
-            reverseSwitchT: 0.42
+            reverseSwitchT: 0.40
           },
           {
             type: 'drive',
             dir: -1,
-            duration: 1.56,
+            duration: 2.05,
             ease: 'start_stop',
             p0: { x: stopX, z: stopZ },
             p1: revP1,
-            p2: { x: 0.0, z: 0.68 },
+            p2: { x: 0.0, z: 0.68 * qZ },
             p3: { x: 0.0, z: 0.0 },
-            straightFadeStart: 0.78,
+            straightFadeStart: 0.80,
             headStart: 0.44,
             headEnd: 0.34,
-            brakeStartT: 0.68,
-            brakePeakT: 0.92,
+            brakeStartT: 0.72,
+            brakePeakT: 0.94,
             reverseActive: true,
             stopImpulse: [0.068, 0.0, 0.010],
             stopFired: false
           },
           {
             type: 'hold',
-            duration: 0.48,
+            duration: 0.50,
             x: 0.0,
             z: 0.0,
             yaw: 0.0,
@@ -363,22 +424,38 @@
     }
 
     if (styleKey === 'bay_exit') {
-      // Start parked inside an offset studio bay behind center, wake up DRLs with ignition ripple,
-      // pull smoothly out along a strictly convex C1-continuous forward arc into showcase pose (0, 0, 0) facing +Z.
-      var bayX = -1.35;
-      var bayZ = -2.60;
-      var bayYaw = 0.68;
-      var exitAlpha = -bayX / Math.sin(bayYaw); // intersection with x = 0 at Q = (0, -0.93)
+      // Start parked inside a deeper rear studio bay (~5.4m back in the distance),
+      // wake up DRLs with ignition ripple, pull smoothly forward into (0, 0, 0) facing +Z
+      // while camera sweeps smoothly into an elevated executive Side-Front Profile (+1.18, 1.22).
+      var bayX = -2.45;
+      var bayZ = -4.85;
+      var bayYaw = 0.62;
+      var exitAlpha = -bayX / Math.sin(bayYaw); // intersection with x = 0 at Q = (0, -1.418)
+      var exitQZ = bayZ + Math.cos(bayYaw) * exitAlpha;
       var exitP1 = {
         x: bayX + Math.sin(bayYaw) * (0.62 * exitAlpha),
         z: bayZ + Math.cos(bayYaw) * (0.62 * exitAlpha)
       };
       return {
-        bayPose: { x: bayX, z: bayZ, yaw: bayYaw, fadeInEnd: 0.24, fadeOutStart: 1.60, fadeOutEnd: 2.18 },
+        bayPose: { x: bayX, z: bayZ, yaw: bayYaw, fadeInEnd: 0.24, fadeOutStart: 2.00, fadeOutEnd: 2.62 },
+        camProfile: {
+          startTheta: DEFAULT_THETA,
+          startPhi: 1.34,
+          restTheta: 1.18,
+          restPhi: 1.22,
+          orbitStart: 0.42,
+          orbitEnd: 2.24,
+          offsetX: -0.45,
+          offsetZ: -0.95,
+          radiusBoost: 1.15,
+          fadeInEnd: 0.0,
+          returnStart: 0.42,
+          returnEnd: 2.20
+        },
         segments: [
           {
             type: 'hold',
-            duration: 0.34,
+            duration: 0.38,
             x: bayX,
             z: bayZ,
             yaw: bayYaw,
@@ -395,23 +472,23 @@
           {
             type: 'drive',
             dir: 1,
-            duration: 1.52,
+            duration: 1.86,
             ease: 'start_stop',
             p0: { x: bayX, z: bayZ },
             p1: exitP1,
-            p2: { x: 0.0, z: -0.64 },
+            p2: { x: 0.0, z: 0.68 * exitQZ },
             p3: { x: 0.0, z: 0.0 },
-            straightFadeStart: 0.76,
+            straightFadeStart: 0.78,
             headStart: 0.92,
             headEnd: 0.42,
-            brakeStartT: 0.64,
-            brakePeakT: 0.90,
+            brakeStartT: 0.66,
+            brakePeakT: 0.92,
             stopImpulse: [-0.080, 0.0, 0.011],
             stopFired: false
           },
           {
             type: 'hold',
-            duration: 0.32,
+            duration: 0.38,
             x: 0.0,
             z: 0.0,
             yaw: 0.0,
@@ -427,30 +504,45 @@
       };
     }
 
-    // Default: 'right_drive' — classic right curved showroom drive-in
+    // Default: 'right_drive' — emerges far away from the distant screen-right horizon
+    // (+rx * 10.2 + away * 8.6) and settles into classic Front-Left 3/4 (+0.76, 1.38).
     return {
       bayPose: null,
+      camProfile: {
+        startTheta: DEFAULT_THETA,
+        startPhi: DEFAULT_PHI,
+        restTheta: DEFAULT_THETA,
+        restPhi: DEFAULT_PHI,
+        orbitStart: 0.0,
+        orbitEnd: 0.0,
+        offsetX: 0,
+        offsetZ: 0,
+        radiusBoost: 0,
+        fadeInEnd: 0,
+        returnStart: 0,
+        returnEnd: 0.01
+      },
       segments: [
         {
           type: 'drive',
           dir: 1,
-          duration: 1.72,
+          duration: 2.28,
           ease: 'decel',
-          p0: { x: rx * 7.8, z: rz * 7.8 - 1.2 },
-          p1: { x: rx * 3.8, z: rz * 3.8 - 1.8 },
-          p2: { x: 0.0, z: -2.45 },
+          p0: { x: rx * 10.2 + awayX * 8.6, z: rz * 10.2 + awayZ * 8.6 },
+          p1: { x: rx * 5.6 + awayX * 3.2, z: rz * 5.6 + awayZ * 3.2 },
+          p2: { x: 0.0, z: -2.85 },
           p3: { x: 0.0, z: 0.0 },
-          straightFadeStart: 0.76,
-          headStart: 0.65,
+          straightFadeStart: 0.78,
+          headStart: 0.72,
           headEnd: 0.36,
-          brakeStartT: 0.18,
-          brakePeakT: 0.45,
+          brakeStartT: 0.28,
+          brakePeakT: 0.56,
           stopImpulse: [-0.085, 0.0, 0.012],
           stopFired: false
         },
         {
           type: 'hold',
-          duration: 0.28,
+          duration: 0.30,
           x: 0.0,
           z: 0.0,
           yaw: 0.0,
@@ -466,21 +558,61 @@
     };
   }
 
+  function applyEntranceCameraEnvelope(elapsedSec) {
+    var cp = entrance.camProfile;
+    if (!entrance.active || !cp) {
+      entranceCam.offsetX = 0;
+      entranceCam.offsetZ = 0;
+      entranceCam.radiusBoost = 0;
+      return;
+    }
+    var wIn = cp.fadeInEnd > 0 ? smoothstep(0, cp.fadeInEnd, elapsedSec) : 1.0;
+    var wOut = cp.returnEnd > cp.returnStart
+      ? (1.0 - smoothstep(cp.returnStart, cp.returnEnd, elapsedSec))
+      : 0.0;
+    var w = wIn * wOut;
+    entranceCam.offsetX = (cp.offsetX || 0) * w;
+    entranceCam.offsetZ = (cp.offsetZ || 0) * w;
+    entranceCam.radiusBoost = (cp.radiusBoost || 0) * w;
+
+    // Smoothly glide camera orbit angle along shortest arc into this choreography's showcase perspective
+    if (typeof cp.startTheta === 'number' && typeof cp.restTheta === 'number' && !orbit.dragging && orbit.deckProgress <= 0.001) {
+      var orbitT = (cp.orbitEnd > cp.orbitStart)
+        ? smoothstep(cp.orbitStart, cp.orbitEnd, elapsedSec)
+        : 1.0;
+      var dTheta = wrapAngleDelta(cp.startTheta, cp.restTheta);
+      var nextTheta = cp.startTheta + dTheta * orbitT;
+      var nextPhi = lerp(cp.startPhi, cp.restPhi, orbitT);
+      orbit.theta = nextTheta;
+      orbit.targetTheta = nextTheta;
+      orbit.phi = nextPhi;
+      orbit.targetPhi = nextPhi;
+    }
+  }
+
   function startEntranceAnimation(styleOverride) {
     if (!currentContainer || hasCustomDemoAngle) return;
     var chosenStyle = resolveEntranceStyle(styleOverride);
-    var choreo = buildEntranceChoreography(chosenStyle);
+    var sideForReverse = reverseParkSide;
+    if (chosenStyle === 'reverse_park') {
+      reverseParkSide = -reverseParkSide;
+    }
+    var choreo = buildEntranceChoreography(chosenStyle, sideForReverse);
+    var cp = choreo.camProfile || null;
+    var initTheta = (cp && typeof cp.startTheta === 'number') ? cp.startTheta : DEFAULT_THETA;
+    var initPhi = (cp && typeof cp.startPhi === 'number') ? cp.startPhi : DEFAULT_PHI;
+    activeRestTheta = (cp && typeof cp.restTheta === 'number') ? cp.restTheta : DEFAULT_THETA;
+    activeRestPhi = (cp && typeof cp.restPhi === 'number') ? cp.restPhi : DEFAULT_PHI;
 
     orbit.deckProgress = 0;
     orbit.topDownLocked = false;
     orbit.dragging = false;
     orbit.velTheta = 0;
     orbit.velPhi = 0;
-    orbit.theta = DEFAULT_THETA;
-    orbit.targetTheta = DEFAULT_THETA;
-    orbit.phi = DEFAULT_PHI;
-    orbit.targetPhi = DEFAULT_PHI;
-    updateCameraPosition();
+    orbit.theta = initTheta;
+    orbit.targetTheta = initTheta;
+    orbit.phi = initPhi;
+    orbit.targetPhi = initPhi;
 
     var totalDur = 0;
     for (var s = 0; s < choreo.segments.length; s++) {
@@ -493,6 +625,7 @@
     entrance.totalDuration = totalDur;
     entrance.segments = choreo.segments;
     entrance.bayPose = choreo.bayPose;
+    entrance.camProfile = cp;
     entrance.prevSegIdx = -1;
     entrance.wheelSpin = 0;
     entrance.steerAngle = 0;
@@ -500,6 +633,9 @@
     entrance.brakeGlow = 0;
     entrance.reverseGlow = 0;
     entrance.bayAlpha = 0;
+
+    applyEntranceCameraEnvelope(0);
+    updateCameraPosition();
 
     if (parkingBay) {
       if (choreo.bayPose) {
@@ -542,7 +678,10 @@
   }
 
   function finishEntranceImmediately() {
-    if (!entrance.active && entrance.bayAlpha <= 0.001 && entrance.reverseGlow <= 0.001) return;
+    var hasCamOffset = Math.abs(entranceCam.offsetX) > 1e-4 ||
+      Math.abs(entranceCam.offsetZ) > 1e-4 ||
+      Math.abs(entranceCam.radiusBoost) > 1e-4;
+    if (!entrance.active && entrance.bayAlpha <= 0.001 && entrance.reverseGlow <= 0.001 && !hasCamOffset) return;
     entrance.active = false;
     entrance.headGlow = 0;
     entrance.brakeGlow = 0;
@@ -550,6 +689,10 @@
     entrance.bayAlpha = 0;
     entrance.steerAngle = 0;
     entrance.bayPose = null;
+    entrance.camProfile = null;
+    entranceCam.offsetX = 0;
+    entranceCam.offsetZ = 0;
+    entranceCam.radiusBoost = 0;
     if (parkingBay) {
       parkingBay.setAlpha(0);
     }
@@ -559,6 +702,9 @@
     }
     if (currentRig) {
       currentRig.setSteering(0);
+    }
+    if (camera) {
+      updateCameraPosition();
     }
   }
 
@@ -1715,12 +1861,16 @@
 
   function updateCameraPosition() {
     var sinPhi = Math.sin(orbit.phi);
+    var effRadius = orbit.radius + entranceCam.radiusBoost;
+    var cx = orbit.targetCenter.x + entranceCam.offsetX;
+    var cy = orbit.targetCenter.y;
+    var cz = orbit.targetCenter.z + entranceCam.offsetZ;
     camera.position.set(
-      orbit.targetCenter.x + orbit.radius * sinPhi * Math.sin(orbit.theta),
-      orbit.targetCenter.y + orbit.radius * Math.cos(orbit.phi),
-      orbit.targetCenter.z + orbit.radius * sinPhi * Math.cos(orbit.theta)
+      cx + effRadius * sinPhi * Math.sin(orbit.theta),
+      cy + effRadius * Math.cos(orbit.phi),
+      cz + effRadius * sinPhi * Math.cos(orbit.theta)
     );
-    camera.lookAt(orbit.targetCenter);
+    camera.lookAt(cx, cy, cz);
   }
 
   function notifyAndroidTap() {
@@ -2049,6 +2199,10 @@
     // Physically grounded multi-segment entrance choreography
     if (entrance.active && currentContainer && entrance.segments.length > 0) {
       entrance.elapsed += dt;
+      applyEntranceCameraEnvelope(entrance.elapsed);
+      if (camera) {
+        updateCameraPosition();
+      }
 
       // Update minimalist ground parking bay fade envelope if active for this style
       if (parkingBay) {
@@ -2353,12 +2507,13 @@
       }
     },
     resetCamera: function () {
+      finishEntranceImmediately();
       orbit.deckProgress = 0;
       orbit.topDownLocked = false;
       orbit.velTheta = 0;
       orbit.velPhi = 0;
-      orbit.targetTheta = DEFAULT_THETA;
-      orbit.targetPhi = DEFAULT_PHI;
+      orbit.targetTheta = activeRestTheta;
+      orbit.targetPhi = activeRestPhi;
     },
     setCollapsedVisibleRatio: function (ratio) {
       if (typeof ratio === 'number' && isFinite(ratio)) {
@@ -2402,11 +2557,7 @@
       if (prev <= 0.001 && p > 0.001) {
         orbit.deckStartTheta = orbit.theta;
         orbit.deckStartPhi = orbit.phi;
-        var currentMod = ((orbit.theta % twoPi) + twoPi) % twoPi;
-        var delta = Math.PI - currentMod;
-        if (delta > Math.PI) delta -= twoPi;
-        if (delta < -Math.PI) delta += twoPi;
-        orbit.deckEndTheta = orbit.theta + delta;
+        orbit.deckEndTheta = orbit.theta + wrapAngleDelta(orbit.theta, Math.PI);
       }
 
       orbit.deckProgress = p;

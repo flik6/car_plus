@@ -2,8 +2,11 @@ package com.chery.carplus.ui
 
 import android.Manifest
 import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.content.ClipData
+import android.content.ClipDescription
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -24,6 +27,7 @@ import android.text.InputType
 import android.text.TextUtils
 import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
+import android.view.DragEvent
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -146,6 +150,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         context: Context,
         private val getDeckProgress: () -> Float,
         private val isTouchInsideScrollArea: (rawX: Float, rawY: Float) -> Boolean,
+        private val isTouchBlockedForEditDrag: (rawX: Float, rawY: Float) -> Boolean,
         private val canScrollAreaPullDown: () -> Boolean,
         private val onDragStart: (direction: Int) -> Unit,
         private val onDragMove: (dy: Float, velocityY: Float, direction: Int) -> Unit,
@@ -158,6 +163,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private var velocityTracker: android.view.VelocityTracker? = null
         private var dragDirection = 0 // +1 = pull down to expand, -1 = pull up to collapse
         private var touchInScrollArea = false
+        private var touchBlockedForEditDrag = false
 
         private fun recycleVelocityTracker() {
             velocityTracker?.recycle()
@@ -210,6 +216,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
         private fun tryStartDrag(rawX: Float, rawY: Float): Boolean {
+            if (touchBlockedForEditDrag) return false
             val dx = rawX - downX
             val dy = rawY - downY
             val progress = getDeckProgress()
@@ -242,12 +249,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     downY = ev.rawY
                     dragDirection = 0
                     touchInScrollArea = isTouchInsideScrollArea(ev.rawX, ev.rawY)
+                    touchBlockedForEditDrag = isTouchBlockedForEditDrag(ev.rawX, ev.rawY)
                     addMovementRaw(ev)
                 }
                 MotionEvent.ACTION_POINTER_UP -> {
                     handlePointerUp(ev)
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    if (touchBlockedForEditDrag) return false
                     addMovementRaw(ev)
                     val (rx, ry) = activeRawCoords(ev)
                     if (tryStartDrag(rx, ry)) {
@@ -257,6 +266,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     dragDirection = 0
                     touchInScrollArea = false
+                    touchBlockedForEditDrag = false
                     activePointerId = MotionEvent.INVALID_POINTER_ID
                     recycleVelocityTracker()
                 }
@@ -292,6 +302,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     val dir = dragDirection
                     dragDirection = 0
                     touchInScrollArea = false
+                    touchBlockedForEditDrag = false
                     activePointerId = MotionEvent.INVALID_POINTER_ID
                     recycleVelocityTracker()
                     if (dir != 0) {
@@ -405,15 +416,26 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var carHeroContainerView: FrameLayout? = null
     private var homeMenuSectionView: View? = null
     private var carVisual: VehicleVisualView? = null
+    private data class TpmsCornerViews(
+        val pill: LinearLayout,
+        val pressureTv: TextView,
+        val unitTv: TextView,
+        val metaRow: LinearLayout,
+        val statusDot: View,
+        val subTv: TextView
+    )
+
+    private data class QuickActionDragPayload(
+        val action: QuickActionId,
+        val fromTopRow: Boolean,
+        val sourceViewRef: java.lang.ref.WeakReference<View>
+    )
+
     private var tpmsOverlayContainer: FrameLayout? = null
-    private var tpmsFlPressure: TextView? = null
-    private var tpmsFlTemp: TextView? = null
-    private var tpmsFrPressure: TextView? = null
-    private var tpmsFrTemp: TextView? = null
-    private var tpmsRlPressure: TextView? = null
-    private var tpmsRlTemp: TextView? = null
-    private var tpmsRrPressure: TextView? = null
-    private var tpmsRrTemp: TextView? = null
+    private var tpmsFlCorner: TpmsCornerViews? = null
+    private var tpmsFrCorner: TpmsCornerViews? = null
+    private var tpmsRlCorner: TpmsCornerViews? = null
+    private var tpmsRrCorner: TpmsCornerViews? = null
     private var quickActionRow: LinearLayout? = null
     private val quickActionIcons = mutableMapOf<QuickActionId, AppIconView>()
     private var quickDeckClipContainer: FrameLayout? = null
@@ -2399,6 +2421,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             context = this,
             getDeckProgress = { deckExpandProgress },
             isTouchInsideScrollArea = { rx, ry -> isPointInsideView(lowerScroll, rx, ry) },
+            isTouchBlockedForEditDrag = { rx, ry ->
+                quickDeckEditMode && (
+                    isPointInsideView(quickActionRow, rx, ry) ||
+                        isPointInsideView(quickDeckClipContainer, rx, ry)
+                    )
+            },
             canScrollAreaPullDown = { lowerScroll.scrollY == 0 },
             onDragStart = { dir ->
                 cancelPendingEntrancePreview()
@@ -4083,54 +4111,100 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         tpmsOverlayContainer = overlay
 
-        fun makeMinimalTpmsCorner(
+        val dotSize = dpF(5.5f).roundToInt().coerceAtLeast(dp(5))
+
+        fun makeTpmsHudPill(
             gravity: Int,
             alignEnd: Boolean,
             startM: Int,
             topM: Int,
             endM: Int,
             bottomM: Int
-        ): Pair<TextView, TextView> {
-            val box = LinearLayout(this).apply {
+        ): TpmsCornerViews {
+            val pill = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 this.gravity = if (alignEnd) Gravity.END else Gravity.START
-                minimumWidth = dp(64)
+                minimumWidth = dp(76)
+                background = rounded(
+                    fillColor = Color.argb(208, 26, 28, 34),
+                    radiusDp = 11f,
+                    strokeColor = Color.parseColor("#323846"),
+                    strokeWidthDp = 0.8f
+                )
+                setPadding(dp(10), dp(7), dp(10), dp(7))
+                elevation = dpF(2f)
                 clipChildren = false
                 clipToPadding = false
             }
-            val pressureTv = text("--", 17f, Color.rgb(242, 244, 248), Typeface.BOLD).apply {
+
+            val pressureRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                this.gravity = Gravity.BOTTOM or (if (alignEnd) Gravity.END else Gravity.START)
+            }
+            val pressureTv = text("--", 16f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 maxLines = 1
                 isSingleLine = true
                 ellipsize = null
+                includeFontPadding = false
                 fontFeatureSettings = "tnum"
-                setPadding(dp(2), 0, dp(2), 0)
-                setShadowLayer(4f, 0f, 1f, Color.argb(190, 0, 0, 0))
             }
-            val accentTick = View(this).apply {
-                background = rounded(Color.argb(110, 255, 255, 255), 1f)
-            }
-            val tempTv = text("", 11f, TEXT_SECONDARY).apply {
+            val unitTv = text("bar", 10.5f, ThemeTokens.TEXT_SUB).apply {
                 maxLines = 1
                 isSingleLine = true
                 ellipsize = null
+                includeFontPadding = false
                 visibility = View.GONE
-                setShadowLayer(4f, 0f, 1f, Color.argb(190, 0, 0, 0))
+                setPadding(0, 0, 0, dp(1))
             }
-            box.addView(pressureTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            box.addView(
-                accentTick,
-                LinearLayout.LayoutParams(dp(12), dpF(1.5f).roundToInt().coerceAtLeast(1)).apply {
-                    topMargin = dp(3)
+            pressureRow.addView(pressureTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            pressureRow.addView(
+                unitTv,
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    marginStart = dp(3)
                 }
             )
-            box.addView(
-                tempTv,
+
+            val metaRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                this.gravity = Gravity.CENTER_VERTICAL or (if (alignEnd) Gravity.END else Gravity.START)
+                visibility = View.GONE
+            }
+            val statusDot = View(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#5A606E"))
+                }
+            }
+            val subTv = text("", 11f, ThemeTokens.TEXT_SUB).apply {
+                maxLines = 1
+                isSingleLine = true
+                ellipsize = null
+                includeFontPadding = false
+                fontFeatureSettings = "tnum"
+            }
+            if (alignEnd) {
+                metaRow.addView(subTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+                metaRow.addView(
+                    statusDot,
+                    LinearLayout.LayoutParams(dotSize, dotSize).apply { marginStart = dp(5) }
+                )
+            } else {
+                metaRow.addView(
+                    statusDot,
+                    LinearLayout.LayoutParams(dotSize, dotSize).apply { marginEnd = dp(5) }
+                )
+                metaRow.addView(subTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            }
+
+            pill.addView(pressureRow, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            pill.addView(
+                metaRow,
                 LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                    topMargin = dp(3)
+                    topMargin = dp(4)
                 }
             )
             overlay.addView(
-                box,
+                pill,
                 FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, gravity).apply {
                     marginStart = startM
                     topMargin = topM
@@ -4138,21 +4212,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     bottomMargin = bottomM
                 }
             )
-            return pressureTv to tempTv
+            return TpmsCornerViews(
+                pill = pill,
+                pressureTv = pressureTv,
+                unitTv = unitTv,
+                metaRow = metaRow,
+                statusDot = statusDot,
+                subTv = subTv
+            )
         }
 
-        val fl = makeMinimalTpmsCorner(Gravity.TOP or Gravity.START, false, dp(20), dp(14), 0, 0)
-        tpmsFlPressure = fl.first
-        tpmsFlTemp = fl.second
-        val fr = makeMinimalTpmsCorner(Gravity.TOP or Gravity.END, true, 0, dp(14), dp(20), 0)
-        tpmsFrPressure = fr.first
-        tpmsFrTemp = fr.second
-        val rl = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.START, false, dp(20), 0, 0, dp(14))
-        tpmsRlPressure = rl.first
-        tpmsRlTemp = rl.second
-        val rr = makeMinimalTpmsCorner(Gravity.BOTTOM or Gravity.END, true, 0, 0, dp(20), dp(14))
-        tpmsRrPressure = rr.first
-        tpmsRrTemp = rr.second
+        tpmsFlCorner = makeTpmsHudPill(Gravity.TOP or Gravity.START, false, dp(16), dp(14), 0, 0)
+        tpmsFrCorner = makeTpmsHudPill(Gravity.TOP or Gravity.END, true, 0, dp(14), dp(16), 0)
+        tpmsRlCorner = makeTpmsHudPill(Gravity.BOTTOM or Gravity.START, false, dp(16), 0, 0, dp(14))
+        tpmsRrCorner = makeTpmsHudPill(Gravity.BOTTOM or Gravity.END, true, 0, 0, dp(16), dp(14))
         heroContainer.addView(
             overlay,
             FrameLayout.LayoutParams(
@@ -4163,28 +4236,28 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
     }
 
-    private fun formatCornerTyrePressure(pressureRaw: String): String {
+    private fun parseCornerTyrePressureBar(pressureRaw: String): Double? {
         val raw = pressureRaw.trim()
-        if (raw.isBlank() || raw == "0" || raw.equals("FFFF", ignoreCase = true) || raw == "65535") return "--"
-        val match = NUMBER_EXTRACT_REGEX.find(raw) ?: return "--"
-        val num = match.value.toDoubleOrNull() ?: return "--"
+        if (raw.isBlank() || raw == "0" || raw.equals("FFFF", ignoreCase = true) || raw == "65535") return null
+        val match = NUMBER_EXTRACT_REGEX.find(raw) ?: return null
+        val num = match.value.toDoubleOrNull() ?: return null
         val unit = activeTelemetry?.tyreUnit.orEmpty().trim().lowercase(Locale.US)
         val rawLower = raw.lowercase(Locale.US)
         val bar = when {
             rawLower.contains("psi") || unit.contains("psi") -> {
-                if (num <= 0.0 || num > 100.0) return "--"
+                if (num <= 0.0 || num > 100.0) return null
                 num * 0.0689476
             }
             rawLower.contains("kpa") || unit.contains("kpa") -> {
-                if (num <= 0.0 || num > 500.0) return "--"
+                if (num <= 0.0 || num > 500.0) return null
                 num / 100.0
             }
             rawLower.contains("bar") || unit.contains("bar") -> {
-                if (num <= 0.0 || num > 10.0) return "--"
+                if (num <= 0.0 || num > 10.0) return null
                 num
             }
             else -> {
-                if (num <= 0.0 || num > 500.0) return "--"
+                if (num <= 0.0 || num > 500.0) return null
                 when {
                     num >= 100.0 -> num / 100.0
                     num >= 10.0 -> num / 10.0
@@ -4192,41 +4265,97 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
         }
-        if (bar <= 0.0 || bar > 6.0) return "--"
+        return if (bar > 0.0 && bar <= 6.0) bar else null
+    }
+
+    private fun formatCornerTyrePressure(pressureRaw: String): String {
+        val bar = parseCornerTyrePressureBar(pressureRaw) ?: return "--"
         return String.format(Locale.US, "%.2f", bar)
     }
 
     private fun updateTpmsBadges(telemetry: VehicleTelemetry?) {
+        val normalDotColor = Color.parseColor("#34D399")
+        val warnColor = Color.parseColor("#F59E0B")
+        val dangerColor = Color.parseColor("#F87171")
+        val mutedDotColor = Color.parseColor("#5A606E")
+        val defaultStroke = Color.parseColor("#323846")
+        val pillFill = Color.argb(208, 26, 28, 34)
+
         fun isValidTemp(s: String): Boolean {
             if (s.isBlank() || s == "255" || s == "65535" || s.equals("FFFF", ignoreCase = true)) return false
             val n = s.toDoubleOrNull() ?: return false
             return n in -40.0..150.0
         }
+
         fun applyCorner(
-            pressureTv: TextView?,
-            tempTv: TextView?,
+            corner: TpmsCornerViews?,
             pressureRaw: String,
             vararg tempKeys: String
         ) {
-            pressureTv?.text = formatCornerTyrePressure(pressureRaw)
-
-            val temp = tempKeys.firstNotNullOfOrNull { key ->
+            if (corner == null) return
+            val bar = parseCornerTyrePressureBar(pressureRaw)
+            val tempRaw = tempKeys.firstNotNullOfOrNull { key ->
                 telemetry?.conditionFields?.get(key)?.trim()?.takeIf(::isValidTemp)
                     ?: telemetry?.conditionFields?.get(key.uppercase(Locale.US))?.trim()?.takeIf(::isValidTemp)
             }
-            if (temp != null) {
-                tempTv?.text = "${temp}°C"
-                tempTv?.visibility = View.VISIBLE
+            val tempNum = tempRaw?.toDoubleOrNull()
+
+            val (pressureTextColor, dotColor, strokeColor, fallbackSub) = when {
+                bar == null -> Quad(ThemeTokens.TEXT_SUB, mutedDotColor, defaultStroke, "")
+                bar < 1.7 || bar > 3.2 -> Quad(
+                    dangerColor,
+                    dangerColor,
+                    Color.argb(115, 248, 113, 113),
+                    if (bar < 1.7) "胎压过低" else "胎压过高"
+                )
+                bar < 2.0 || bar > 2.9 -> Quad(
+                    warnColor,
+                    warnColor,
+                    Color.argb(110, 245, 158, 11),
+                    if (bar < 2.0) "胎压偏低" else "胎压偏高"
+                )
+                else -> Quad(ThemeTokens.TEXT_PRIMARY, normalDotColor, defaultStroke, "胎压正常")
+            }
+
+            if (bar != null) {
+                corner.pressureTv.text = String.format(Locale.US, "%.2f", bar)
+                corner.unitTv.visibility = View.VISIBLE
             } else {
-                tempTv?.visibility = View.GONE
+                corner.pressureTv.text = "--"
+                corner.unitTv.visibility = View.GONE
+            }
+            corner.pressureTv.setTextColor(pressureTextColor)
+            corner.pill.background = rounded(
+                fillColor = pillFill,
+                radiusDp = 11f,
+                strokeColor = strokeColor,
+                strokeWidthDp = 0.8f
+            )
+            (corner.statusDot.background as? GradientDrawable)?.setColor(dotColor)
+
+            val subLabel = when {
+                tempRaw != null -> "${tempRaw}°C"
+                fallbackSub.isNotBlank() -> fallbackSub
+                else -> ""
+            }
+            if (subLabel.isNotBlank()) {
+                corner.subTv.text = subLabel
+                corner.subTv.setTextColor(
+                    if (tempNum != null && tempNum >= 65.0) warnColor else ThemeTokens.TEXT_SUB
+                )
+                corner.metaRow.visibility = View.VISIBLE
+            } else {
+                corner.metaRow.visibility = View.GONE
             }
         }
 
-        applyCorner(tpmsFlPressure, tpmsFlTemp, telemetry?.lFrontTyre.orEmpty(), "lFrontTyreTemp", "flTyreTemp", "tyreTempFL", "leftFrontTyreTemp")
-        applyCorner(tpmsFrPressure, tpmsFrTemp, telemetry?.rFrontTyre.orEmpty(), "rFrontTyreTemp", "frTyreTemp", "tyreTempFR", "rightFrontTyreTemp")
-        applyCorner(tpmsRlPressure, tpmsRlTemp, telemetry?.lRearTyre.orEmpty(), "lRearTyreTemp", "rlTyreTemp", "tyreTempRL", "leftRearTyreTemp")
-        applyCorner(tpmsRrPressure, tpmsRrTemp, telemetry?.rRearTyre.orEmpty(), "rRearTyreTemp", "rrTyreTemp", "tyreTempRR", "rightRearTyreTemp")
+        applyCorner(tpmsFlCorner, telemetry?.lFrontTyre.orEmpty(), "lFrontTyreTemp", "flTyreTemp", "tyreTempFL", "leftFrontTyreTemp")
+        applyCorner(tpmsFrCorner, telemetry?.rFrontTyre.orEmpty(), "rFrontTyreTemp", "frTyreTemp", "tyreTempFR", "rightFrontTyreTemp")
+        applyCorner(tpmsRlCorner, telemetry?.lRearTyre.orEmpty(), "lRearTyreTemp", "rlTyreTemp", "tyreTempRL", "leftRearTyreTemp")
+        applyCorner(tpmsRrCorner, telemetry?.rRearTyre.orEmpty(), "rRearTyreTemp", "rrTyreTemp", "tyreTempRR", "rightRearTyreTemp")
     }
+
+    private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun buildIconQuickActionRow(page: LinearLayout) {
         val row = LinearLayout(this).apply {
@@ -4288,9 +4417,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             setPadding(dp(4), dp(2), dp(4), dp(10))
         }
         quickDeckEditHeader = editHeader
-        val editTitle = text("", 12.5f, TEXT_SECONDARY, Typeface.BOLD)
+        val editTitle = text("", 12f, TEXT_SECONDARY).apply {
+            maxLines = 2
+            setLineSpacing(0f, 1.2f)
+        }
         quickDeckEditTitle = editTitle
-        editHeader.addView(editTitle, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        editHeader.addView(
+            editTitle,
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(10)
+            }
+        )
 
         val doneBtn = text("完成", 12.5f, Color.WHITE, Typeface.BOLD).apply {
             gravity = Gravity.CENTER
@@ -4495,6 +4632,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             if (!targetExpanded) {
                 quickDeckEditMode = false
                 rebuildQuickActionRow()
+                renderQuickDeckGrid(animateLabels = false)
             }
             return
         }
@@ -4518,6 +4656,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     if (!cancelled && !targetExpanded) {
                         quickDeckEditMode = false
                         rebuildQuickActionRow()
+                        renderQuickDeckGrid(animateLabels = false)
                     }
                 }
             })
@@ -4595,35 +4734,240 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         showHomeStatus("正在高灵敏度扫描并连接附近蓝牙钥匙...")
     }
 
+    private fun enterQuickDeckEditMode(source: View? = null) {
+        if (quickDeckEditMode) return
+        AppHaptics.perform(source ?: homeStageFrame, HapticLevel.LONG_PRESS_MODE)
+        quickDeckEditMode = true
+        rebuildQuickActionRow()
+        if (quickDeckExpanded) {
+            renderQuickDeckGrid(animateLabels = true)
+            syncExpandedClipHeightAnimated()
+        } else {
+            animateDeckTo(true)
+        }
+    }
+
+    private fun extractDraggedQuickAction(event: DragEvent): QuickActionDragPayload? {
+        (event.localState as? QuickActionDragPayload)?.let { return it }
+        val text = event.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString().orEmpty()
+        if (!text.startsWith(DRAG_PREFIX_QUICK_ACTION)) return null
+        val id = text.removePrefix(DRAG_PREFIX_QUICK_ACTION)
+        val action = QuickActionId.fromId(id) ?: return null
+        val fromTop = action in loadQuickActions()
+        return QuickActionDragPayload(action, fromTop, java.lang.ref.WeakReference(null))
+    }
+
+    private fun startQuickActionDrag(tile: View, action: QuickActionId, fromTopRow: Boolean): Boolean {
+        AppHaptics.perform(tile, HapticLevel.LIGHT_TICK)
+        val clip = ClipData.newPlainText("quick_action", "$DRAG_PREFIX_QUICK_ACTION${action.id}")
+        val payload = QuickActionDragPayload(
+            action = action,
+            fromTopRow = fromTopRow,
+            sourceViewRef = java.lang.ref.WeakReference(tile)
+        )
+        val shadow = View.DragShadowBuilder(tile)
+        val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            tile.startDragAndDrop(clip, shadow, payload, 0)
+        } else {
+            @Suppress("DEPRECATION")
+            tile.startDrag(clip, shadow, payload, 0)
+        }
+        if (started) {
+            tile.alpha = 0.35f
+        }
+        return started
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun attachEditModeDragTouchListener(
+        tile: View,
+        action: QuickActionId,
+        fromTopRow: Boolean
+    ) {
+        val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var dragStarted = false
+        tile.setOnTouchListener { v, ev ->
+            if (!quickDeckEditMode) return@setOnTouchListener false
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX
+                    downY = ev.rawY
+                    dragStarted = false
+                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                    v.animate().cancel()
+                    v.animate().scaleX(0.93f).scaleY(0.93f).setDuration(80L).start()
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!dragStarted) {
+                        val dx = ev.rawX - downX
+                        val dy = ev.rawY - downY
+                        if (dx * dx + dy * dy > touchSlop * touchSlop) {
+                            dragStarted = true
+                            v.animate().cancel()
+                            v.scaleX = 1f
+                            v.scaleY = 1f
+                            startQuickActionDrag(v, action, fromTopRow)
+                            return@setOnTouchListener true
+                        }
+                    }
+                    dragStarted
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.animate().cancel()
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120L).start()
+                    val consumed = dragStarted
+                    dragStarted = false
+                    consumed
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun editSlotDrawable(highlighted: Boolean, empty: Boolean = false): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dpF(12f)
+            when {
+                highlighted -> {
+                    setColor(Color.argb(56, 61, 155, 255))
+                    setStroke(dpF(1.4f).roundToInt().coerceAtLeast(1), ACCENT_BLUE)
+                }
+                empty -> {
+                    setColor(Color.argb(18, 255, 255, 255))
+                    setStroke(
+                        dpF(1f).roundToInt().coerceAtLeast(1),
+                        Color.argb(72, 160, 172, 192),
+                        dpF(4f),
+                        dpF(3f)
+                    )
+                }
+                else -> {
+                    setColor(Color.argb(30, 255, 255, 255))
+                    setStroke(
+                        dpF(0.9f).roundToInt().coerceAtLeast(1),
+                        Color.argb(72, 160, 172, 192)
+                    )
+                }
+            }
+        }
+
+    private fun applyQuickActionDropOnTopSlot(targetSlotIndex: Int, payload: QuickActionDragPayload, anchor: View) {
+        val mutable = loadQuickActions().toMutableList()
+        val dragged = payload.action
+        val existingIdx = mutable.indexOf(dragged)
+
+        if (existingIdx >= 0) {
+            // Reordering within the top pinned bar
+            val clampedTarget = targetSlotIndex.coerceIn(0, mutable.lastIndex)
+            if (existingIdx == clampedTarget) return
+            mutable.removeAt(existingIdx)
+            mutable.add(clampedTarget.coerceIn(0, mutable.size), dragged)
+        } else {
+            // Dragged from bottom deck into top bar
+            if (targetSlotIndex < mutable.size) {
+                if (mutable.size < MAX_QUICK_ACTIONS) {
+                    mutable.add(targetSlotIndex, dragged)
+                } else {
+                    mutable[targetSlotIndex] = dragged
+                }
+            } else if (mutable.size < MAX_QUICK_ACTIONS) {
+                mutable.add(dragged)
+            } else {
+                mutable[mutable.lastIndex] = dragged
+            }
+        }
+
+        saveQuickActions(mutable)
+        AppHaptics.perform(anchor, HapticLevel.MEDIUM_CONFIRM)
+        rebuildQuickActionRow()
+        renderQuickDeckGrid(animateLabels = false)
+        syncExpandedClipHeightAnimated()
+    }
+
     private fun renderQuickDeckGrid(animateLabels: Boolean = false) {
         val gridHost = quickDeckGridHost ?: return
         val selectedList = loadQuickActions()
         val selectedSet = selectedList.toSet()
 
         quickDeckEditHeader?.visibility = if (quickDeckEditMode) View.VISIBLE else View.GONE
-        quickDeckEditTitle?.text = "自定义快捷栏 (已选 ${selectedList.size}/6)"
+        quickDeckEditTitle?.text = "拖动下方按钮到上方替换，拖动上方可排序 (${selectedList.size}/$MAX_QUICK_ACTIONS)"
+
+        // In edit mode, allow dragging a pinned top button onto the bottom deck to unpin it (if > 1 pinned)
+        quickDeckContainer?.let { deck ->
+            deck.setBackgroundColor(BG_HOME)
+            if (quickDeckEditMode) {
+                deck.setOnDragListener { v, event ->
+                    when (event.action) {
+                        DragEvent.ACTION_DRAG_STARTED -> {
+                            event.localState is QuickActionDragPayload ||
+                                event.clipDescription?.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) == true
+                        }
+                        DragEvent.ACTION_DRAG_ENTERED -> {
+                            val payload = extractDraggedQuickAction(event)
+                            if (payload?.fromTopRow == true && loadQuickActions().size > 1) {
+                                v.background = rounded(
+                                    Color.argb(26, 61, 155, 255),
+                                    12f,
+                                    Color.argb(95, 61, 155, 255),
+                                    1f
+                                )
+                                AppHaptics.perform(v, HapticLevel.LIGHT_TICK)
+                            }
+                            true
+                        }
+                        DragEvent.ACTION_DRAG_EXITED -> {
+                            v.setBackgroundColor(BG_HOME)
+                            true
+                        }
+                        DragEvent.ACTION_DROP -> {
+                            v.setBackgroundColor(BG_HOME)
+                            val payload = extractDraggedQuickAction(event) ?: return@setOnDragListener false
+                            if (!payload.fromTopRow) return@setOnDragListener false
+                            val mutable = loadQuickActions().toMutableList()
+                            if (mutable.size <= 1) {
+                                showHomeStatus("至少保留 1 项快捷控制")
+                                return@setOnDragListener true
+                            }
+                            if (mutable.remove(payload.action)) {
+                                saveQuickActions(mutable)
+                                AppHaptics.perform(v, HapticLevel.MEDIUM_CONFIRM)
+                                rebuildQuickActionRow()
+                                renderQuickDeckGrid(animateLabels = false)
+                                syncExpandedClipHeightAnimated()
+                            }
+                            true
+                        }
+                        DragEvent.ACTION_DRAG_ENDED -> {
+                            v.setBackgroundColor(BG_HOME)
+                            (event.localState as? QuickActionDragPayload)?.sourceViewRef?.get()?.alpha = 1f
+                            true
+                        }
+                        else -> true
+                    }
+                }
+            } else {
+                deck.setOnDragListener(null)
+            }
+        }
 
         gridHost.removeAllViews()
         quickDeckRowViews.clear()
         quickDeckTileViews.clear()
-        val displayActions = if (quickDeckEditMode) {
-            QuickActionId.values().toList()
-        } else {
-            QuickActionId.values().filter { it !in selectedSet }.ifEmpty { QuickActionId.values().toList() }
-        }
-        val columns = if (!quickDeckEditMode && displayActions.size <= 4) {
-            displayActions.size.coerceAtLeast(1)
-        } else {
-            3
-        }
+
+        // Always show unpinned actions in a strict 4-column grid matching the 4 top quick buttons
+        val displayActions = QuickActionId.values().filter { it !in selectedSet }
+        val columns = MAX_QUICK_ACTIONS
         val tileHeight = dp(74)
         displayActions.chunked(columns).forEachIndexed { rowIdx, chunk ->
             val rowView = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
             }
             quickDeckRowViews.add(rowView)
-            chunk.forEachIndexed { colIdx, action ->
-                val isPinned = action in selectedSet
+            chunk.forEachIndexed { _, action ->
                 val isStateActive = isQuickActionActive(action)
                 val iconType = if (quickDeckEditMode) action.icon else resolveQuickActionIcon(action, isStateActive)
                 val tileLabel = resolveQuickActionLabel(action, isStateActive, quickDeckEditMode)
@@ -4631,51 +4975,49 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 val btn = AppComponents.createControlIconButton(
                     context = this,
                     iconType = iconType,
-                    sizeDp = 26,
+                    sizeDp = 25,
                     active = !quickDeckEditMode && isStateActive,
                     label = tileLabel,
-                    showCheckDot = quickDeckEditMode && isPinned,
-                    dimmed = quickDeckEditMode && !isPinned
+                    showCheckDot = false,
+                    dimmed = false
                 ).apply {
                     isClickable = true
                     isFocusable = true
-                    isLongClickable = true
+                    isLongClickable = !quickDeckEditMode
                     contentDescription = action.label
-                    MotionSpec.attachPressPhysics(this, pressedScale = 0.88f)
+                    if (quickDeckEditMode) {
+                        background = rounded(
+                            fillColor = Color.argb(20, 255, 255, 255),
+                            radiusDp = 12f,
+                            strokeColor = Color.argb(42, 160, 172, 192),
+                            strokeWidthDp = 0.7f
+                        )
+                        attachEditModeDragTouchListener(this, action, fromTopRow = false)
+                    } else {
+                        MotionSpec.attachPressPhysics(this, pressedScale = 0.88f)
+                    }
                     setOnClickListener {
                         if (quickDeckEditMode) {
                             val mutable = loadQuickActions().toMutableList()
-                            if (action in mutable) {
-                                if (mutable.size <= 1) {
-                                    Toast.makeText(this@MainActivity, "至少保留 1 项快捷控制", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    mutable.remove(action)
-                                    saveQuickActions(mutable)
-                                    rebuildQuickActionRow()
-                                    renderQuickDeckGrid(animateLabels = false)
-                                }
+                            if (mutable.size < MAX_QUICK_ACTIONS && action !in mutable) {
+                                mutable.add(action)
+                                saveQuickActions(mutable)
+                                AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
+                                rebuildQuickActionRow()
+                                renderQuickDeckGrid(animateLabels = false)
+                                syncExpandedClipHeightAnimated()
                             } else {
-                                if (mutable.size >= 6) {
-                                    Toast.makeText(this@MainActivity, "最多选择 6 项快捷控制，请先取消一项", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    mutable.add(action)
-                                    saveQuickActions(mutable)
-                                    rebuildQuickActionRow()
-                                    renderQuickDeckGrid(animateLabels = false)
-                                }
+                                showHomeStatus("已满 4 项，请拖动到上方目标位置替换")
                             }
                         } else {
                             triggerQuickAction(action)
                         }
                     }
-                    setOnLongClickListener {
-                        if (!quickDeckEditMode) {
-                            AppHaptics.perform(this, HapticLevel.LONG_PRESS_MODE)
-                            quickDeckEditMode = true
-                            renderQuickDeckGrid(animateLabels = true)
-                            syncExpandedClipHeightAnimated()
+                    if (!quickDeckEditMode) {
+                        setOnLongClickListener {
+                            enterQuickDeckEditMode(this)
+                            true
                         }
-                        true
                     }
                 }
 
@@ -4695,12 +5037,28 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     }
                 }
 
-                rowView.addView(btn, weightedLp(if (colIdx == 0) 0 else dp(8), tileHeight))
+                rowView.addView(
+                    btn,
+                    LinearLayout.LayoutParams(0, tileHeight, 1f).apply {
+                        if (quickDeckEditMode) {
+                            marginStart = dp(3)
+                            marginEnd = dp(3)
+                        }
+                    }
+                )
             }
-            // Pad incomplete trailing row so icons align cleanly to the grid columns
+            // Pad incomplete trailing row so all 4 columns align identically with the 4 top buttons
             val remainingSlots = columns - chunk.size
             for (s in 0 until remainingSlots) {
-                rowView.addView(View(this), weightedLp(dp(8), tileHeight))
+                rowView.addView(
+                    View(this),
+                    LinearLayout.LayoutParams(0, tileHeight, 1f).apply {
+                        if (quickDeckEditMode) {
+                            marginStart = dp(3)
+                            marginEnd = dp(3)
+                        }
+                    }
+                )
             }
             gridHost.addView(rowView, lp(top = if (rowIdx == 0) 0 else dp(6)))
         }
@@ -4736,12 +5094,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val parsed = raw.split(",")
             .mapNotNull { QuickActionId.fromId(it) }
             .distinct()
-            .take(6)
+            .take(MAX_QUICK_ACTIONS)
         return parsed.ifEmpty { QuickActionId.DEFAULT_LIST }
     }
 
     private fun saveQuickActions(actions: List<QuickActionId>) {
-        val normalized = actions.distinct().take(6).ifEmpty { QuickActionId.DEFAULT_LIST }
+        val normalized = actions.distinct().take(MAX_QUICK_ACTIONS).ifEmpty { QuickActionId.DEFAULT_LIST }
         uiPrefs.edit()
             .putString(KEY_QUICK_ACTIONS, normalized.joinToString(",") { it.id })
             .apply()
@@ -4753,42 +5111,152 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         quickActionIcons.clear()
 
         val actions = loadQuickActions()
-        val iconSizeDp = if (actions.size >= 5) 24 else 26
-        val hPad = if (actions.size >= 5) dp(12) else dp(18)
-        row.setPadding(hPad, dp(10), hPad, dp(4))
+        row.setPadding(dp(18), dp(10), dp(18), dp(4))
 
-        actions.forEach { action ->
-            val btn = AppComponents.createControlIconButton(
-                context = this,
-                iconType = action.icon,
-                sizeDp = iconSizeDp,
-                active = false,
-                label = null
-            ).apply {
-                isClickable = true
-                isFocusable = true
-                isLongClickable = true
-                contentDescription = action.label
-                MotionSpec.attachPressPhysics(this, pressedScale = 0.88f)
-                setOnClickListener { triggerQuickAction(action) }
-                setOnLongClickListener {
-                    AppHaptics.perform(this, HapticLevel.LONG_PRESS_MODE)
-                    quickDeckEditMode = true
-                    if (quickDeckExpanded) {
-                        renderQuickDeckGrid(animateLabels = true)
-                        syncExpandedClipHeightAnimated()
+        val slotCount = if (quickDeckEditMode) MAX_QUICK_ACTIONS else actions.size
+        for (slotIdx in 0 until slotCount) {
+            val action = actions.getOrNull(slotIdx)
+            if (action != null) {
+                val btn = AppComponents.createControlIconButton(
+                    context = this,
+                    iconType = action.icon,
+                    sizeDp = if (quickDeckEditMode) 22 else 26,
+                    active = false,
+                    label = if (quickDeckEditMode) action.label else null
+                ).apply {
+                    isClickable = true
+                    isFocusable = true
+                    isLongClickable = !quickDeckEditMode
+                    contentDescription = action.label
+                    if (quickDeckEditMode) {
+                        background = editSlotDrawable(highlighted = false, empty = false)
+                        attachEditModeDragTouchListener(this, action, fromTopRow = true)
+                        setOnDragListener { v, event ->
+                            when (event.action) {
+                                DragEvent.ACTION_DRAG_STARTED -> {
+                                    event.localState is QuickActionDragPayload ||
+                                        event.clipDescription?.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) == true
+                                }
+                                DragEvent.ACTION_DRAG_ENTERED -> {
+                                    v.background = editSlotDrawable(highlighted = true, empty = false)
+                                    v.animate().cancel()
+                                    v.animate().scaleX(1.04f).scaleY(1.04f).setDuration(90L).start()
+                                    AppHaptics.perform(v, HapticLevel.LIGHT_TICK)
+                                    true
+                                }
+                                DragEvent.ACTION_DRAG_EXITED -> {
+                                    v.background = editSlotDrawable(highlighted = false, empty = false)
+                                    v.animate().cancel()
+                                    v.animate().scaleX(1f).scaleY(1f).setDuration(90L).start()
+                                    true
+                                }
+                                DragEvent.ACTION_DROP -> {
+                                    v.background = editSlotDrawable(highlighted = false, empty = false)
+                                    v.scaleX = 1f
+                                    v.scaleY = 1f
+                                    val payload = extractDraggedQuickAction(event) ?: return@setOnDragListener false
+                                    applyQuickActionDropOnTopSlot(slotIdx, payload, v)
+                                    true
+                                }
+                                DragEvent.ACTION_DRAG_ENDED -> {
+                                    v.background = editSlotDrawable(highlighted = false, empty = false)
+                                    v.scaleX = 1f
+                                    v.scaleY = 1f
+                                    (event.localState as? QuickActionDragPayload)?.sourceViewRef?.get()?.alpha = 1f
+                                    true
+                                }
+                                else -> true
+                            }
+                        }
                     } else {
-                        animateDeckTo(true)
+                        MotionSpec.attachPressPhysics(this, pressedScale = 0.88f)
+                        setOnDragListener(null)
                     }
-                    true
+                    setOnClickListener {
+                        if (quickDeckEditMode) {
+                            showHomeStatus("拖动可调整顺序，或拖至下方移除")
+                        } else {
+                            triggerQuickAction(action)
+                        }
+                    }
+                    if (!quickDeckEditMode) {
+                        setOnLongClickListener {
+                            enterQuickDeckEditMode(this)
+                            true
+                        }
+                    }
                 }
+                btn.findViewWithTag<AppIconView>("control_icon")?.let { iconView ->
+                    quickActionIcons[action] = iconView
+                }
+                row.addView(
+                    btn,
+                    LinearLayout.LayoutParams(0, dp(if (quickDeckEditMode) 58 else 54), 1f).apply {
+                        if (quickDeckEditMode) {
+                            marginStart = dp(3)
+                            marginEnd = dp(3)
+                        }
+                    }
+                )
+            } else {
+                // Empty drop slot in Edit Mode when fewer than 4 buttons are pinned
+                val emptySlot = FrameLayout(this).apply {
+                    background = editSlotDrawable(highlighted = false, empty = true)
+                    contentDescription = "空快捷槽位，可拖入按钮"
+                    addView(
+                        text("+", 18f, TEXT_SECONDARY),
+                        FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER)
+                    )
+                    setOnDragListener { v, event ->
+                        when (event.action) {
+                            DragEvent.ACTION_DRAG_STARTED -> {
+                                event.localState is QuickActionDragPayload ||
+                                    event.clipDescription?.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) == true
+                            }
+                            DragEvent.ACTION_DRAG_ENTERED -> {
+                                v.background = editSlotDrawable(highlighted = true, empty = true)
+                                v.animate().cancel()
+                                v.animate().scaleX(1.04f).scaleY(1.04f).setDuration(90L).start()
+                                AppHaptics.perform(v, HapticLevel.LIGHT_TICK)
+                                true
+                            }
+                            DragEvent.ACTION_DRAG_EXITED -> {
+                                v.background = editSlotDrawable(highlighted = false, empty = true)
+                                v.animate().cancel()
+                                v.animate().scaleX(1f).scaleY(1f).setDuration(90L).start()
+                                true
+                            }
+                            DragEvent.ACTION_DROP -> {
+                                v.background = editSlotDrawable(highlighted = false, empty = true)
+                                v.scaleX = 1f
+                                v.scaleY = 1f
+                                val payload = extractDraggedQuickAction(event) ?: return@setOnDragListener false
+                                applyQuickActionDropOnTopSlot(slotIdx, payload, v)
+                                true
+                            }
+                            DragEvent.ACTION_DRAG_ENDED -> {
+                                v.background = editSlotDrawable(highlighted = false, empty = true)
+                                v.scaleX = 1f
+                                v.scaleY = 1f
+                                (event.localState as? QuickActionDragPayload)?.sourceViewRef?.get()?.alpha = 1f
+                                true
+                            }
+                            else -> true
+                        }
+                    }
+                }
+                row.addView(
+                    emptySlot,
+                    LinearLayout.LayoutParams(0, dp(58), 1f).apply {
+                        marginStart = dp(3)
+                        marginEnd = dp(3)
+                    }
+                )
             }
-            btn.findViewWithTag<AppIconView>("control_icon")?.let { iconView ->
-                quickActionIcons[action] = iconView
-            }
-            row.addView(btn, LinearLayout.LayoutParams(0, dp(54), 1f))
         }
-        updateQuickActionIconStates()
+        if (!quickDeckEditMode) {
+            updateQuickActionIconStates()
+        }
     }
 
     private fun triggerQuickAction(action: QuickActionId) {
@@ -5673,7 +6141,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun showQuickActionsCustomizeSheet() {
         val draft = loadQuickActions().toMutableList()
         showBottomSheet("自定义快捷控制") { sheet, dialog ->
-            sheet.addView(text("支持 1 至 6 项首页快捷控制，点击上方已选图标可移除", 12.5f, TEXT_SECONDARY).apply {
+            sheet.addView(text("支持 1 至 4 项首页快捷控制，点击上方已选图标可移除", 12.5f, TEXT_SECONDARY).apply {
                 layoutParams = lp(top = dp(6), bottom = dp(14))
             })
 
@@ -5697,7 +6165,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
             var renderState: () -> Unit = {}
             renderState = {
-                countLabel.text = "已选 ${draft.size}/6"
+                countLabel.text = "已选 ${draft.size}/$MAX_QUICK_ACTIONS"
                 previewCard.removeAllViews()
                 draft.forEach { action ->
                     val itemBox = LinearLayout(this).apply {
@@ -5730,7 +6198,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
                 gridHost.removeAllViews()
                 val allActions = QuickActionId.values().toList()
-                allActions.chunked(4).forEachIndexed { rowIdx, chunk ->
+                allActions.chunked(MAX_QUICK_ACTIONS).forEachIndexed { rowIdx, chunk ->
                     val rowView = LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                     }
@@ -5757,8 +6225,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                         renderState()
                                     }
                                 } else {
-                                    if (draft.size >= 6) {
-                                        Toast.makeText(this@MainActivity, "最多选择 6 项快捷控制，请先移除一项", Toast.LENGTH_SHORT).show()
+                                    if (draft.size >= MAX_QUICK_ACTIONS) {
+                                        Toast.makeText(this@MainActivity, "最多选择 4 项快捷控制，请先移除一项", Toast.LENGTH_SHORT).show()
                                     } else {
                                         draft.add(action)
                                         renderState()
@@ -5787,6 +6255,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         }
                         tile.addView(tileLabel)
                         rowView.addView(tile, weightedLp(if (colIdx == 0) 0 else dp(8), dp(76)))
+                    }
+                    for (pad in 0 until (MAX_QUICK_ACTIONS - chunk.size)) {
+                        rowView.addView(View(this), weightedLp(dp(8), dp(76)))
                     }
                     gridHost.addView(rowView, lp(top = if (rowIdx == 0) 0 else dp(8)))
                 }
@@ -7258,6 +7729,11 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         quickDeckClipContainer = null
         quickDeckContainer = null
         quickDeckPullHintStrip = null
+        tpmsOverlayContainer = null
+        tpmsFlCorner = null
+        tpmsFrCorner = null
+        tpmsRlCorner = null
+        tpmsRrCorner = null
         lastSentExpandedVisibleRatio = 1.0f
         sessionVehiclePin = ""
         bleConnected = false
@@ -8421,6 +8897,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private const val KEY_VEHICLE_ICCID = "vehicleIccid"
         private const val KEY_QUICK_ACTIONS = "quick_actions"
         private const val DEFAULT_QUICK_ACTIONS = "LOCK,CLIMATE,FLASH,TRUNK"
+        private const val MAX_QUICK_ACTIONS = 4
+        private const val DRAG_PREFIX_QUICK_ACTION = "quick_action:"
         private const val KEY_REQUIRE_PIN_EVERY_TIME = "require_pin_every_time"
         private const val KEY_LOCATION_PERM_PROMPTED = "location_perm_prompted"
         private const val KEY_ENTRANCE_STYLE = "car3d_entrance_style"

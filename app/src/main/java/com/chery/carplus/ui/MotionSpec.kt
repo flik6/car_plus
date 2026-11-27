@@ -377,9 +377,12 @@ object MotionSpec {
             maxOf(lpHeight, screenH).toFloat()
         }
         var finalized = false
+        var fallbackRunnable: Runnable? = null
         val finalizeDismiss = {
             if (!finalized) {
                 finalized = true
+                fallbackRunnable?.let(sheetView::removeCallbacks)
+                fallbackRunnable = null
                 bypassDismissDialogs[dialog] = true
                 try {
                     if (dialog.isShowing) {
@@ -391,12 +394,20 @@ object MotionSpec {
                 }
             }
         }
+        val watchdog = Runnable { finalizeDismiss() }
+        fallbackRunnable = watchdog
+        sheetView.postDelayed(watchdog, 320L)
         sheetView.animate()
             .translationY(offscreenY)
             .setDuration(200L)
             .setInterpolator(EASE_STANDARD)
             .setListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    sheetView.animate().setListener(null)
+                    finalizeDismiss()
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
                     sheetView.animate().setListener(null)
                     finalizeDismiss()
                 }

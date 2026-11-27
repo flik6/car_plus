@@ -52,6 +52,7 @@ import com.chery.carplus.cloud.VehiclePowertrain
 import com.chery.carplus.cloud.VehicleSummary
 import com.chery.carplus.cloud.VehicleTelemetry
 import com.chery.carplus.cloud.VehicleUpgradeInfo
+import com.chery.carplus.cloud.VehicleUpgradeStatus
 import com.chery.carplus.cloud.ZyhlMessageItem
 import com.chery.carplus.profile.VehicleProfile
 import kotlinx.coroutines.Dispatchers
@@ -3223,23 +3224,46 @@ internal class VehicleFeatureSheets(
             body.addView(host, lp(top = dp(10)))
 
             fun renderUpgradeResult(res: Result<VehicleUpgradeInfo>, retryAction: () -> Unit) {
+                pollJob?.cancel()
+                pollJob = null
                 host.removeAllViews()
                 res.onSuccess { info: VehicleUpgradeInfo ->
-                    val hasNewVersion = info.hasUpgrade || info.upgradeTaskId.isNotBlank()
+                    val status = info.upgradeStatus
                     val card = cardBox()
-                    card.addView(kvRow("当前版本", info.currentVersion.ifBlank { "--" }))
-                    val statusText = when {
-                        hasNewVersion -> "发现新版本"
-                        else -> "已是最新版本"
+                    card.addView(kvRow("当前版本", info.currentVersion.ifBlank { "—" }))
+                    val statusText = when (status) {
+                        VehicleUpgradeStatus.NO_UPDATE -> "已是最新版本"
+                        VehicleUpgradeStatus.AVAILABLE -> "有新版本"
+                        VehicleUpgradeStatus.SCHEDULED -> "已预约升级"
+                        VehicleUpgradeStatus.PREPARING -> "等待升级启动中"
+                        VehicleUpgradeStatus.UPGRADING -> "升级中"
+                        VehicleUpgradeStatus.UNFINISHED -> "升级未完成"
+                        VehicleUpgradeStatus.FAILED -> "升级失败"
+                        VehicleUpgradeStatus.RETRYABLE_FAILED -> "升级未完成"
                     }
                     card.addView(kvRow("固件状态", statusText))
-                    if (info.upgradeTime.isNotBlank()) {
+                    if (status == VehicleUpgradeStatus.SCHEDULED && info.upgradeStartTime.isNotBlank()) {
+                        card.addView(kvRow("预约时间", info.upgradeStartTime))
+                    }
+                    if (info.upgradeTime.isNotBlank() && status != VehicleUpgradeStatus.NO_UPDATE) {
                         card.addView(kvRow("预计耗时", info.upgradeTime))
                     }
 
-                    val notes = info.releaseNote.ifBlank { info.descriptionText }
+                    val notes = when (status) {
+                        VehicleUpgradeStatus.UNFINISHED,
+                        VehicleUpgradeStatus.FAILED,
+                        VehicleUpgradeStatus.RETRYABLE_FAILED ->
+                            info.descriptionText.ifBlank { info.releaseNote }
+                        else -> info.releaseNote.ifBlank { info.descriptionText }
+                    }
                     if (notes.isNotBlank()) {
-                        card.addView(text("更新说明", 12.5f, TEXT_SUB, Typeface.BOLD), lp(top = dp(10), bottom = dp(4)))
+                        val notesTitle = when (status) {
+                            VehicleUpgradeStatus.UNFINISHED,
+                            VehicleUpgradeStatus.FAILED,
+                            VehicleUpgradeStatus.RETRYABLE_FAILED -> "状态说明"
+                            else -> "更新说明"
+                        }
+                        card.addView(text(notesTitle, 12.5f, TEXT_SUB, Typeface.BOLD), lp(top = dp(10), bottom = dp(4)))
                         card.addView(
                             text(notes, 13f, TEXT_BODY).apply { setLineSpacing(0f, 1.45f) },
                             lp()
@@ -3247,7 +3271,7 @@ internal class VehicleFeatureSheets(
                     }
                     host.addView(card)
 
-                    // Inline silent-polling linear progress indicator (shown while upgrading)
+                    // Inline silent-polling linear progress indicator (shown while upgrading/preparing)
                     val progressBox = LinearLayout(context).apply {
                         orientation = LinearLayout.VERTICAL
                         visibility = View.GONE
@@ -3294,65 +3318,218 @@ internal class VehicleFeatureSheets(
                                 }.getOrNull()
                                 if (!sheetActive) break
                                 if (st != null) {
+                                    val stillUpgrading = st.state == "2" || st.state == "3"
                                     val label = if (st.surplusTime.isNotBlank()) {
                                         "正在升级 · 剩余 ${st.surplusTime}"
                                     } else {
                                         "正在升级中..."
                                     }
                                     updateProgressUi(st.percentage, label)
-                                    if (st.percentage >= 100) break
+                                    if (!stillUpgrading || st.percentage >= 100) {
+                                        // Official protocol: state left 2/3 -> re-fetch 148 for terminal state
+                                        onVehiclesChanged()
+                                        retryAction()
+                                        break
+                                    }
                                 }
-                                delay(3_000L)
+                                delay(5_000L)
                             }
                         }
                     }
 
-                    // Strict CTA: New version -> "立即升级" + "取消"; Already up to date -> ONLY "取消"
-                    if (hasNewVersion && info.upgradeTaskId.isNotBlank()) {
-                        val ctaRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                        ctaRow.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(46)))
-                        lateinit var upgradeBtn: TextView
-                        upgradeBtn = primaryBtn("立即升级") {
-                            AppComponents.showConfirmDialog(
-                                context = context,
-                                title = "确认开始车辆升级",
-                                message = "升级期间请确保车辆处于驻车状态且电量充足，过程中请勿操作车辆。",
-                                confirmText = "立即升级",
-                                cancelText = "取消"
+                    fun startPreparingPoll() {
+                        pollJob?.cancel()
+                        pollJob = scope.launch {
+                            while (isActive && sheetActive) {
+                                delay(5_000L)
+                                if (!sheetActive) break
+                                val next = runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        httpClient.checkVehicleUpgrade(profile.vin, profile.accessToken)
+                                    }
+                                }.getOrNull()
+                                if (!sheetActive) break
+                                if (next != null && next.upgradeStatus != VehicleUpgradeStatus.PREPARING) {
+                                    onVehiclesChanged()
+                                    renderUpgradeResult(Result.success(next), retryAction)
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    when {
+                        info.canStartNow -> {
+                            val ctaRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                            ctaRow.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(46)))
+                            lateinit var upgradeBtn: TextView
+                            fun executeStartUpgrade(
+                                pin: String,
+                                onPinError: ((String) -> Unit)? = null,
+                                onDismissPin: (() -> Unit)? = null
                             ) {
-                                AppHaptics.perform(upgradeBtn, HapticLevel.MEDIUM_CONFIRM)
                                 upgradeBtn.isEnabled = false
                                 upgradeBtn.alpha = 0.55f
-                                upgradeBtn.text = "升级中..."
-                                updateProgressUi(1, "正在下发升级指令...")
+                                upgradeBtn.text = "下发中..."
+                                updateProgressUi(2, "正在向车辆下发升级指令...")
                                 scope.launch {
-                                    val ok = runCatching {
+                                    val outcome = runCatching {
                                         withContext(Dispatchers.IO) {
-                                            httpClient.triggerVehicleUpgrade(profile.vin, info.upgradeTaskId, profile.accessToken)
+                                            httpClient.startVehicleUpgrade(
+                                                vin = profile.vin,
+                                                upgradeTaskId = info.upgradeTaskId,
+                                                vehiclePin = pin,
+                                                accessToken = profile.accessToken
+                                            )
                                         }
-                                    }.getOrDefault(false)
+                                    }
                                     if (!sheetActive) return@launch
-                                    if (ok) {
-                                        startSilentProgressPoll(info.upgradeTaskId)
-                                    } else {
+                                    outcome.onSuccess { res ->
+                                        if (res.success) {
+                                            if (pin.length == 6 && pin.all { it.isDigit() }) {
+                                                onPinUpdated(profile.vin, pin)
+                                            }
+                                            onDismissPin?.invoke()
+                                            upgradeBtn.text = "升级中..."
+                                            updateProgressUi(5, "升级指令已下发，正在同步车辆状态...")
+                                            onVehiclesChanged()
+                                            delay(1_500L)
+                                            if (sheetActive) retryAction()
+                                        } else if (res.isPinError) {
+                                            progressBox.visibility = View.GONE
+                                            upgradeBtn.isEnabled = true
+                                            upgradeBtn.alpha = 1f
+                                            upgradeBtn.text = "立即升级"
+                                            if (onPinError != null) {
+                                                onPinError(res.message.ifBlank { "车控安全密码校验失败，请重新输入" })
+                                            } else {
+                                                secondaryDialog = SixDigitPinSheet.showVerifyPinSheet(
+                                                    context = context,
+                                                    title = "验证安全密码",
+                                                    subtitle = "请输入 6 位车控安全密码以开始车辆升级"
+                                                ) { enteredPin, showErr, dismissPin ->
+                                                    executeStartUpgrade(enteredPin, showErr, dismissPin)
+                                                }
+                                            }
+                                        } else {
+                                            onDismissPin?.invoke()
+                                            progressBox.visibility = View.GONE
+                                            upgradeBtn.isEnabled = true
+                                            upgradeBtn.alpha = 1f
+                                            upgradeBtn.text = "立即升级"
+                                            toast(res.message.ifBlank { "触发车辆升级失败，请确认车辆已驻车熄火且电量充足" })
+                                        }
+                                    }.onFailure { err ->
+                                        onDismissPin?.invoke()
                                         progressBox.visibility = View.GONE
                                         upgradeBtn.isEnabled = true
                                         upgradeBtn.alpha = 1f
                                         upgradeBtn.text = "立即升级"
-                                        toast("触发车辆升级失败，请稍后重试")
+                                        if (err !is CherySessionExpiredException) {
+                                            toast(friendlyErrorMessage(err, "触发车辆升级失败，请稍后重试"))
+                                        }
                                     }
                                 }
                             }
-                        }
-                        ctaRow.addView(upgradeBtn, weightLp(dp(10), dp(46)))
-                        host.addView(ctaRow, lp(top = dp(16)))
 
-                        if (info.percentage in 1..99) {
-                            updateProgressUi(info.percentage, "正在升级中...")
-                            startSilentProgressPoll(info.upgradeTaskId)
+                            upgradeBtn = primaryBtn("立即升级") {
+                                val confirmMsg = if (status == VehicleUpgradeStatus.SCHEDULED) {
+                                    "当前已预约 ${info.upgradeStartTime} 升级。确认取消预约并立即开始升级吗？升级期间请确保车辆处于驻车熄火状态且电量充足。"
+                                } else {
+                                    "升级期间请确保车辆处于驻车熄火状态且电量充足，过程中请勿操作车辆。"
+                                }
+                                AppComponents.showConfirmDialog(
+                                    context = context,
+                                    title = "确认开始车辆升级",
+                                    message = confirmMsg,
+                                    confirmText = "立即升级",
+                                    cancelText = "取消"
+                                ) {
+                                    AppHaptics.perform(upgradeBtn, HapticLevel.MEDIUM_CONFIRM)
+                                    val cachedPin = cachedPinProvider().ifBlank { profile.controlPin }.trim()
+                                    val mustPromptPin = requirePinEveryTimeProvider() ||
+                                        cachedPin.length != 6 || !cachedPin.all { it.isDigit() }
+                                    if (mustPromptPin) {
+                                        secondaryDialog = SixDigitPinSheet.showVerifyPinSheet(
+                                            context = context,
+                                            title = "验证安全密码",
+                                            subtitle = "请输入 6 位车控安全密码以开始车辆升级"
+                                        ) { enteredPin, showErr, dismissPin ->
+                                            executeStartUpgrade(enteredPin, showErr, dismissPin)
+                                        }
+                                    } else {
+                                        executeStartUpgrade(cachedPin)
+                                    }
+                                }
+                            }
+                            ctaRow.addView(upgradeBtn, weightLp(dp(10), dp(46)))
+                            host.addView(ctaRow, lp(top = dp(16)))
                         }
-                    } else {
-                        host.addView(secondaryBtn("取消") { dialog.dismiss() }, lp(top = dp(16), height = dp(46)))
+                        status == VehicleUpgradeStatus.UPGRADING -> {
+                            updateProgressUi(info.percentage.coerceAtLeast(1), "正在升级中...")
+                            host.addView(secondaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(16), height = dp(46)))
+                            if (info.upgradeTaskId.isNotBlank()) {
+                                startSilentProgressPoll(info.upgradeTaskId)
+                            }
+                        }
+                        status == VehicleUpgradeStatus.PREPARING -> {
+                            updateProgressUi(5, "升级任务已下发，等待车辆开始安装...")
+                            host.addView(secondaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(16), height = dp(46)))
+                            startPreparingPoll()
+                        }
+                        info.canRetry -> {
+                            val ctaRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                            ctaRow.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(46)))
+                            lateinit var retryBtn: TextView
+                            retryBtn = primaryBtn("重试升级") {
+                                AppHaptics.perform(retryBtn, HapticLevel.MEDIUM_CONFIRM)
+                                retryBtn.isEnabled = false
+                                retryBtn.alpha = 0.55f
+                                retryBtn.text = "提交中..."
+                                scope.launch {
+                                    val outcome = runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            httpClient.retryVehicleUpgrade(
+                                                vin = profile.vin,
+                                                upgradeTaskId = info.upgradeTaskId,
+                                                accessToken = profile.accessToken
+                                            )
+                                        }
+                                    }
+                                    if (!sheetActive) return@launch
+                                    outcome.onSuccess { res ->
+                                        if (res.success) {
+                                            toast("已重新提交升级请求")
+                                            onVehiclesChanged()
+                                            retryAction()
+                                        } else {
+                                            retryBtn.isEnabled = true
+                                            retryBtn.alpha = 1f
+                                            retryBtn.text = "重试升级"
+                                            toast(res.message.ifBlank { "重试升级失败，请稍后重试" })
+                                        }
+                                    }.onFailure { err ->
+                                        retryBtn.isEnabled = true
+                                        retryBtn.alpha = 1f
+                                        retryBtn.text = "重试升级"
+                                        if (err !is CherySessionExpiredException) {
+                                            toast(friendlyErrorMessage(err, "重试升级失败，请稍后重试"))
+                                        }
+                                    }
+                                }
+                            }
+                            ctaRow.addView(retryBtn, weightLp(dp(10), dp(46)))
+                            host.addView(ctaRow, lp(top = dp(16)))
+                        }
+                        status == VehicleUpgradeStatus.UNFINISHED || status == VehicleUpgradeStatus.FAILED -> {
+                            val ctaRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                            ctaRow.addView(secondaryBtn("关闭") { dialog.dismiss() }, weightLp(0, dp(46)))
+                            ctaRow.addView(primaryBtn("重新检查") { retryAction() }, weightLp(dp(10), dp(46)))
+                            host.addView(ctaRow, lp(top = dp(16)))
+                        }
+                        else -> {
+                            host.addView(secondaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(16), height = dp(46)))
+                        }
                     }
                 }.onFailure { err ->
                     host.addView(errorHint("检查升级失败：${err.message.orEmpty().take(100)}"))
