@@ -1725,11 +1725,19 @@ internal class VehicleManagementScreens(
 
                 // 车机流量套餐 (zyhl 967)
                 if (isCurrentActive) {
+                    var trafficDueDate = ""
                     val trafficRow = LinearLayout(context).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         minimumHeight = dp(52)
                         setPadding(dp(20), dp(10), dp(20), dp(10))
+                        isClickable = true
+                        isFocusable = true
+                        setOnClickListener {
+                            if (trafficDueDate.isNotBlank()) {
+                                toast("套餐有效期至 $trafficDueDate")
+                            }
+                        }
                     }
                     trafficRow.addView(
                         text("车机流量", 14.5f, ThemeTokens.TEXT_SUB),
@@ -1744,6 +1752,23 @@ internal class VehicleManagementScreens(
                     trafficRow.addView(trafficValueTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
                     body.addView(trafficRow, lp())
                     body.addView(AppComponents.createHairline(context, startInsetDp = 20))
+
+                    fun formatTrafficMb(raw: String): String {
+                        val mb = raw.trim().toDoubleOrNull() ?: return raw.trim()
+                        if (mb >= 1024.0) {
+                            val gb = mb / 1024.0
+                            return if (kotlin.math.abs(gb - gb.roundToInt()) < 0.05) {
+                                "${gb.roundToInt()} GB"
+                            } else {
+                                String.format(Locale.US, "%.1f GB", gb)
+                            }
+                        }
+                        return if (kotlin.math.abs(mb - mb.roundToInt()) < 0.05) {
+                            "${mb.roundToInt()} MB"
+                        } else {
+                            String.format(Locale.US, "%.1f MB", mb)
+                        }
+                    }
 
                     scope.launch {
                         val active = profileProvider()
@@ -1760,20 +1785,18 @@ internal class VehicleManagementScreens(
                             trafficValueTv.text = "暂不可用"
                             return@launch
                         }
+                        trafficDueDate = traffic.dueDate.trim().take(10)
                         val formatted = when {
-                            traffic.unlimited -> {
-                                val used = traffic.usedTraffic.takeIf { it.isNotBlank() }?.let { "已用 ${it}MB · " }.orEmpty()
-                                "${used}无限流量"
-                            }
+                            traffic.unlimited -> "无限流量"
                             traffic.totalTraffic.isNotBlank() -> {
-                                val used = traffic.usedTraffic.ifBlank { "0" }
-                                "${used} / ${traffic.totalTraffic} MB"
+                                val usedStr = formatTrafficMb(traffic.usedTraffic.ifBlank { "0" })
+                                val totalStr = formatTrafficMb(traffic.totalTraffic)
+                                "$usedStr / $totalStr"
                             }
-                            traffic.usedTraffic.isNotBlank() -> "已用 ${traffic.usedTraffic} MB"
-                            else -> "未开通套餐"
+                            traffic.usedTraffic.isNotBlank() -> "已用 ${formatTrafficMb(traffic.usedTraffic)}"
+                            else -> "未开通"
                         }
-                        val dueSuffix = traffic.dueDate.takeIf { it.isNotBlank() }?.let { " · 至 ${it.take(10)}" }.orEmpty()
-                        trafficValueTv.text = formatted + dueSuffix
+                        trafficValueTv.text = formatted
                         trafficValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
                     }
                 }

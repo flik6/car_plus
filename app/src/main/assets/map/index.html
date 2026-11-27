@@ -704,7 +704,7 @@
           var tapLon = worldXToLon(wx, view.zoom);
           var tapLat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
           pickedPoi = { lat: tapLat, lon: tapLon, label: '已选目的地' };
-          badge.textContent = '已选目的地 · 点击发送到车';
+          badge.textContent = '已选目的地';
           requestDraw();
           try {
             if (window.CarMapBridge && typeof window.CarMapBridge.onMapTapped === 'function') {

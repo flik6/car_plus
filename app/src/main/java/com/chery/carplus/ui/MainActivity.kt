@@ -42,6 +42,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -49,6 +50,13 @@ import androidx.lifecycle.lifecycleScope
 import com.chery.carplus.R
 import com.chery.carplus.ble.CheryBleController
 import com.chery.carplus.ble.ParsedTBoxResponse
+import com.chery.carplus.ble.PassiveEntryConfig
+import com.chery.carplus.ble.PassiveEntryPrerequisiteChecker
+import com.chery.carplus.ble.PassiveEntryRuntime
+import com.chery.carplus.ble.PassiveEntrySnapshot
+import com.chery.carplus.ble.PassiveEntryStore
+import com.chery.carplus.ble.PassiveEntryWakeManager
+import com.chery.carplus.ble.PrerequisiteId
 import com.chery.carplus.ble.SessionSnapshot
 import com.chery.carplus.cloud.CheryDeviceBindingRequiredException
 import com.chery.carplus.cloud.CheryHttpClient
@@ -253,6 +261,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var settingsScreen: SettingsScreen? = null
     private var pendingAvatarPickCallback: ((Uri) -> Unit)? = null
     private lateinit var avatarPickerLauncher: ActivityResultLauncher<String>
+    private lateinit var passiveEntrySheets: PassiveEntrySheets
+    private lateinit var passivePermissionLauncher: ActivityResultLauncher<Array<String>>
+    private lateinit var companionAssocLauncher: ActivityResultLauncher<IntentSenderRequest>
+    private var securityPassiveRefreshCallback: (() -> Unit)? = null
+    private val passiveRuntimeUiListener: (PassiveEntrySnapshot) -> Unit = {
+        runOnUiThread {
+            securityPassiveRefreshCallback?.invoke()
+            if (::passiveEntrySheets.isInitialized) {
+                passiveEntrySheets.refreshIfOpen()
+            }
+        }
+    }
 
     // Login form views
     private var loginMobileLabel: TextView? = null
@@ -428,6 +448,61 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 cb?.invoke(uri)
             }
         }
+
+        passivePermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) {
+            securityPassiveRefreshCallback?.invoke()
+            if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
+        }
+
+        companionAssocLauncher = registerForActivityResult(
+            ActivityResultContracts.StartIntentSenderForResult()
+        ) { result ->
+            val profile = profileStore.getActiveProfile()
+            val mac = PassiveEntryPrerequisiteChecker.normalizeMac(profile.bleMac).orEmpty()
+            if (result.resultCode == RESULT_OK ||
+                (mac.isNotBlank() && PassiveEntryPrerequisiteChecker.isCompanionAssociated(this, mac))
+            ) {
+                if (profile.vin.isNotBlank() && mac.isNotBlank()) {
+                    val cfg = PassiveEntryStore.load(this, profile.vin)
+                    PassiveEntryStore.save(this, cfg.copy(cdmAssociatedMac = mac))
+                    if (cfg.enabled) {
+                        PassiveEntryWakeManager.enableForVehicle(this, profile)
+                    }
+                }
+                Toast.makeText(this, "已完成系统伴随设备关联", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "已取消伴随设备关联，将继续使用 PendingIntent 后台扫描", Toast.LENGTH_SHORT).show()
+            }
+            securityPassiveRefreshCallback?.invoke()
+            if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
+        }
+
+        passiveEntrySheets = PassiveEntrySheets(
+            context = this,
+            profileProvider = { profileStore.getActiveProfile() },
+            liveBleConnectedProvider = { bleConnected || bleController.isSessionReady() },
+            liveBleRssiProvider = { bleController.lastProximityRssi },
+            onRequestLiveRssi = { bleController.requestRemoteRssi() },
+            onFixPrerequisite = { id, profile -> handleFixPassivePrerequisite(id, profile) },
+            onProceedEnableAfterPrerequisites = { profile, onDone ->
+                verifyPinAndEnablePassiveEntry(profile, onDone)
+            },
+            onConfigUpdated = {
+                securityPassiveRefreshCallback?.invoke()
+            }
+        )
+
+        PassiveEntryRuntime.onAutoActionExecuted = { actionKey, _ ->
+            runOnUiThread {
+                val label = if (actionKey == "unlock") "靠近自动解锁" else "离车自动上锁"
+                showHomeStatus("蓝牙无感已执行：$label")
+                scheduleTelemetryRefresh()
+            }
+        }
+        PassiveEntryRuntime.addListener(passiveRuntimeUiListener)
+        PassiveEntryWakeManager.restoreIfEnabled(this)
 
         AppSystemInsets.applyEdgeToEdge(window, BG_HOME)
         contentFrame = FrameLayout(this).apply {
@@ -770,6 +845,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     override fun onResume() {
         super.onResume()
+        PassiveEntryRuntime.setForegroundAppActive(this, true)
         carVisual?.onHostResume()
         if (currentScreen == Screen.HOME) {
             if (wasBackgrounded && !quickDeckExpanded) {
@@ -779,6 +855,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             startProximityWhenPermitted()
             startPeriodicHomeRefresh()
             refreshTelemetry(silent = true)
+        }
+        securityPassiveRefreshCallback?.invoke()
+        if (::passiveEntrySheets.isInitialized) {
+            passiveEntrySheets.refreshIfOpen()
         }
     }
 
@@ -791,6 +871,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     override fun onStop() {
         super.onStop()
         wasBackgrounded = true
+        PassiveEntryRuntime.setForegroundAppActive(this, false)
     }
 
     override fun onDestroy() {
@@ -816,6 +897,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         settingsScreen = null
         if (::featureSheets.isInitialized) featureSheets.dismissAll()
         if (::managementScreens.isInitialized) managementScreens.dismissAll()
+        if (::passiveEntrySheets.isInitialized) passiveEntrySheets.dismiss()
+        PassiveEntryRuntime.removeListener(passiveRuntimeUiListener)
+        PassiveEntryRuntime.onAutoActionExecuted = null
+        securityPassiveRefreshCallback = null
         bleController.close()
         super.onDestroy()
     }
@@ -2603,13 +2688,105 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 context = this,
                 icon = AppIconType.LOCK_CLOSED,
                 title = "PIN 码",
-                subtitle = "开启后蓝牙直连与远程控车均需验证 6 位 PIN 码",
+                subtitle = "控车时验证 6 位 PIN 码",
                 trailingView = pinSwitch,
                 showChevron = false,
                 onClick = null
             ),
             lp()
         )
+        content.addView(AppComponents.createHairline(this, startInsetDp = 58))
+
+        // Row 1b: 蓝牙无感解锁/上锁 (PendingIntent + CompanionDeviceManager; prerequisite-gated before enable)
+        val passiveSwitch = ToggleSwitch(this)
+        val passiveRow = AppComponents.createListRow(
+            context = this,
+            icon = AppIconType.RADAR,
+            title = "蓝牙无感解锁/上锁",
+            subtitle = "检查前置条件中...",
+            trailingView = passiveSwitch,
+            showChevron = false
+        ) {
+            val profile = profileStore.getActiveProfile()
+            val cfg = PassiveEntryStore.load(this, profile.vin)
+            if (cfg.enabled) {
+                passiveEntrySheets.showPassiveEntryConfigSheet()
+            } else {
+                passiveEntrySheets.showPrerequisiteGateSheet(inspectOnly = false) {
+                    securityPassiveRefreshCallback?.invoke()
+                }
+            }
+        }
+        val passiveSubtitleTv = (passiveRow as? LinearLayout)
+            ?.getChildAt(1)
+            ?.let { it as? LinearLayout }
+            ?.getChildAt(1) as? TextView
+        val passiveIconView = (passiveRow as? LinearLayout)?.getChildAt(0) as? AppIconView
+
+        fun refreshPassiveEntrySecurityRow() {
+            val profile = profileStore.getActiveProfile()
+            val cfg = PassiveEntryStore.load(this, profile.vin)
+            val report = PassiveEntryPrerequisiteChecker.evaluate(this, profile)
+            val snap = PassiveEntryRuntime.currentSnapshot()
+            passiveSwitch.setChecked(cfg.enabled, animate = false)
+            passiveIconView?.tintColor = if (cfg.enabled) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_PRIMARY
+            passiveSubtitleTv?.text = when {
+                cfg.enabled && !report.allRequiredSatisfied ->
+                    "已开启 · 缺少 ${report.missingRequiredCount} 项必备条件（点此修复）"
+                cfg.enabled -> {
+                    val modeBits = buildList {
+                        if (cfg.autoUnlockEnabled) add("解锁")
+                        if (cfg.autoLockEnabled) add("上锁")
+                    }.joinToString("/").ifBlank { "仅监听" }
+                    "已开启（$modeBits）· ${snap.state.label} · 点此调灵敏度"
+                }
+                report.allRequiredSatisfied ->
+                    "前置条件已满足 · 靠近自动解锁与离车自动上锁"
+                else ->
+                    "开启前需先完成 ${report.missingRequiredCount} 项前置条件（点此查看）"
+            }
+        }
+        securityPassiveRefreshCallback = { refreshPassiveEntrySecurityRow() }
+        refreshPassiveEntrySecurityRow()
+
+        passiveSwitch.onToggleAttempt = { targetEnabled ->
+            val profile = profileStore.getActiveProfile()
+            if (profile.vin.isBlank()) {
+                passiveSwitch.setChecked(false, animate = true)
+                Toast.makeText(this@MainActivity, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
+            } else if (targetEnabled) {
+                val report = PassiveEntryPrerequisiteChecker.evaluate(this@MainActivity, profile)
+                if (!report.allRequiredSatisfied) {
+                    passiveSwitch.setChecked(false, animate = true)
+                    passiveEntrySheets.showPrerequisiteGateSheet(inspectOnly = false) {
+                        refreshPassiveEntrySecurityRow()
+                    }
+                } else {
+                    passiveSwitch.setChecked(false, animate = false)
+                    verifyPinAndEnablePassiveEntry(profile) { enabled ->
+                        passiveSwitch.setChecked(enabled, animate = true)
+                        refreshPassiveEntrySecurityRow()
+                    }
+                }
+            } else {
+                AppComponents.showConfirmDialog(
+                    context = this@MainActivity,
+                    title = "关闭蓝牙无感解锁/上锁",
+                    message = "关闭后将停止后台蓝牙扫描监听，不再自动执行靠近解锁与离车上锁。",
+                    confirmText = "确认关闭",
+                    cancelText = "取消",
+                    dangerConfirm = true
+                ) {
+                    val currentCfg = PassiveEntryStore.load(this@MainActivity, profile.vin)
+                    PassiveEntryStore.save(this@MainActivity, currentCfg.copy(enabled = false))
+                    PassiveEntryWakeManager.disable(this@MainActivity, profile.bleMac)
+                    passiveSwitch.setChecked(false, animate = true)
+                    refreshPassiveEntrySecurityRow()
+                    Toast.makeText(this@MainActivity, "已关闭蓝牙无感解锁/上锁", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        content.addView(passiveRow, lp())
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
 
         // Row 2: 修改 PIN 码 (6-digit stepped wizard)
@@ -2630,7 +2807,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 context = this,
                 icon = AppIconType.INFO_CIRCLE,
                 title = "忘记 PIN 码",
-                subtitle = "通过 VIN / SN / ICCID 与短信验证码重置云端 PIN 码",
+                subtitle = "验证车辆信息重置",
                 showChevron = true
             ) {
                 featureSheets.showResetPinByVehicleSheet(
@@ -2765,7 +2942,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 context = this,
                 icon = AppIconType.SHIELD_CHECK,
                 title = "防盗提醒",
-                subtitle = "车辆异常移动或触发防盗时推送提醒",
+                subtitle = "异常移动与防盗告警",
                 trailingView = theftTrailing,
                 showChevron = false,
                 onClick = null
@@ -2783,7 +2960,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 context = this,
                 icon = AppIconType.CLOCK,
                 title = "限速提醒",
-                subtitle = "车速超过设定值时推送超速提醒",
+                subtitle = "超速时推送提醒",
                 trailingView = speedLimitValueTv,
                 showChevron = true
             ) {
@@ -2918,7 +3095,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 context = this,
                 icon = AppIconType.LOCATION_ARROW,
                 title = "行程轨迹记录",
-                subtitle = "记录当前车辆行驶路线与历史行程",
+                subtitle = "自动记录行驶路线",
                 trailingView = tripTrailing,
                 showChevron = false,
                 onClick = null
@@ -3166,6 +3343,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val overlay = securityOverlayView
         securityOverlayView = null
         securitySubpageStatusText = null
+        securityPassiveRefreshCallback = null
         if (overlay != null) {
             val endX = contentFrame.width.takeIf { it > 0 }?.toFloat()
                 ?: resources.displayMetrics.widthPixels.toFloat()
@@ -5317,6 +5495,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun refreshSecuritySheetIfOpen() {
+        securityPassiveRefreshCallback?.invoke()
+        if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
         val statusTv = sheetKeyStatusView ?: return
         val profile = profileStore.getActiveProfile()
         val ready = hasCompleteKeyMaterial(profile)
@@ -5728,6 +5908,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             result.onSuccess {
                 activeTelemetry = it
+                syncPassiveEntrySafetyHint(profile.vin, it)
                 val resolvedPlate = firstNonBlank(
                     it.licensePlate,
                     it.conditionFields["licensePlate"].orEmpty(),
@@ -5857,6 +6038,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         geocodeJob?.cancel()
         smsCountdownJob?.cancel()
         stopStatusAutoHide()
+        PassiveEntryWakeManager.disable(this)
         bleController.stopAutoProximityWatch()
         bleController.disconnect()
         httpClient.clearSession()
@@ -6063,6 +6245,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 dismissTopPairingPinDrawer()
                 showHomeStatus("手机钥匙已连接 (BLE 直连)")
             }
+            PassiveEntryRuntime.reportForegroundBleRssi(rssi, isBleConnected)
+            securityPassiveRefreshCallback?.invoke()
+        }
+    }
+
+    override fun onRssiUpdated(rssi: Int) {
+        runOnUiThread {
+            PassiveEntryRuntime.reportForegroundBleRssi(rssi, bleConnected || bleController.isSessionReady())
+            if (::passiveEntrySheets.isInitialized) {
+                passiveEntrySheets.refreshIfOpen()
+            }
         }
     }
 
@@ -6086,6 +6279,174 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             dismissTopPairingPinDrawer()
             if (success) {
                 showHomeStatus("蓝牙配对已完成，正在建立安全连接...")
+            }
+            securityPassiveRefreshCallback?.invoke()
+            if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
+        }
+    }
+
+    private fun syncPassiveEntrySafetyHint(vin: String, telemetry: VehicleTelemetry) {
+        if (vin.isBlank()) return
+        val doorVals = listOf(
+            telemetry.frontLeftDoor,
+            telemetry.frontRightDoor,
+            telemetry.backLeftDoor,
+            telemetry.backRightDoor
+        ).map { it.trim().lowercase(Locale.US) }.filter { it.isNotBlank() }
+        val anyDoorOpen = doorVals.any { it == "1" || it == "open" || it == "true" } || telemetry.trunkOpen == true
+        val allDoorsClosed = if (anyDoorOpen) {
+            false
+        } else if (doorVals.isNotEmpty() && doorVals.all { it == "0" || it == "closed" || it == "close" || it == "false" }) {
+            true
+        } else {
+            null
+        }
+        val engineStopped = telemetry.engineRunning?.let { !it }
+        PassiveEntryStore.updateVehicleSafetyHint(
+            context = this,
+            vin = vin,
+            doorsClosed = allDoorsClosed,
+            engineStopped = engineStopped,
+            locked = telemetry.doorLocked
+        )
+    }
+
+    private fun handleFixPassivePrerequisite(id: PrerequisiteId, profile: VehicleProfile) {
+        when (id) {
+            PrerequisiteId.KEY_MATERIAL -> {
+                if (profile.userId.isBlank() || profile.mobileNo.isBlank()) {
+                    Toast.makeText(this, "账号信息不完整，请重新登录后同步数字钥匙", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "正在从云端同步蓝牙数字钥匙...", Toast.LENGTH_SHORT).show()
+                    launchCloudProvision(profile, automatic = false)
+                }
+            }
+            PrerequisiteId.BLUETOOTH_ON -> {
+                requestBluetoothEnable()
+            }
+            PrerequisiteId.BLE_PERMISSIONS -> {
+                val missing = PassiveEntryPrerequisiteChecker.missingBlePermissions(this)
+                if (missing.isEmpty()) {
+                    passiveEntrySheets.refreshIfOpen()
+                    return
+                }
+                // On Android 10-11, ACCESS_BACKGROUND_LOCATION must be requested after FINE_LOCATION.
+                val foregroundFirst = missing.filter { it != Manifest.permission.ACCESS_BACKGROUND_LOCATION }
+                val toAsk = if (foregroundFirst.isNotEmpty()) foregroundFirst else missing
+                passivePermissionLauncher.launch(toAsk.toTypedArray())
+            }
+            PrerequisiteId.DEVICE_BONDED -> {
+                if (!ensureBlePermissions()) {
+                    Toast.makeText(this, "请先授予蓝牙权限", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                Toast.makeText(this, "正在靠近扫描车辆，请在车旁完成首次蓝牙配对", Toast.LENGTH_LONG).show()
+                bleController.startAutoProximityWatch(
+                    profileProvider = { profileStore.getActiveProfile() }
+                ) { requestBluetoothEnable() }
+            }
+            PrerequisiteId.NOTIFICATIONS -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    passivePermissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                } else {
+                    runCatching {
+                        startActivity(PassiveEntryPrerequisiteChecker.buildAppNotificationSettingsIntent(this))
+                    }
+                }
+            }
+            PrerequisiteId.BATTERY_UNRESTRICTED -> {
+                runCatching {
+                    startActivity(PassiveEntryPrerequisiteChecker.buildIgnoreBatteryOptimizationIntent(this))
+                }.onFailure {
+                    Toast.makeText(this, "请在系统应用信息中将电池策略设为「无限制」", Toast.LENGTH_LONG).show()
+                }
+            }
+            PrerequisiteId.BACKGROUND_WAKE_CHANNEL -> {
+                PassiveEntryPrerequisiteChecker.requestCompanionAssociation(
+                    activity = this,
+                    bleMac = profile.bleMac,
+                    bleName = profile.bleName,
+                    onIntentSenderReady = { sender ->
+                        runCatching {
+                            companionAssocLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                        }.onFailure {
+                            Toast.makeText(this, "拉起系统伴随设备关联失败", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onAlreadyAssociated = {
+                        val mac = PassiveEntryPrerequisiteChecker.normalizeMac(profile.bleMac).orEmpty()
+                        if (profile.vin.isNotBlank() && mac.isNotBlank()) {
+                            val cfg = PassiveEntryStore.load(this, profile.vin)
+                            PassiveEntryStore.save(this, cfg.copy(cdmAssociatedMac = mac))
+                        }
+                        Toast.makeText(this, "已完成系统伴随设备关联", Toast.LENGTH_SHORT).show()
+                        passiveEntrySheets.refreshIfOpen()
+                        securityPassiveRefreshCallback?.invoke()
+                    },
+                    onError = { msg ->
+                        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+        }
+    }
+
+    private fun verifyPinAndEnablePassiveEntry(
+        profile: VehicleProfile,
+        onCompleted: (Boolean) -> Unit
+    ) {
+        val report = PassiveEntryPrerequisiteChecker.evaluate(this, profile)
+        if (!report.allRequiredSatisfied) {
+            Toast.makeText(this, report.summaryText, Toast.LENGTH_SHORT).show()
+            onCompleted(false)
+            return
+        }
+        if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+            Toast.makeText(this, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
+            onCompleted(false)
+            return
+        }
+        appDialog?.dismiss()
+        appDialog = SixDigitPinSheet.showVerifyPinSheet(
+            context = this,
+            title = "验证 PIN 码",
+            subtitle = "验证 6 位云端 PIN 码后开启蓝牙无感解锁/上锁（后续自动触发无需再输 PIN 码）"
+        ) { pin, showError, dismiss ->
+            lifecycleScope.launch {
+                val verified = runCatching {
+                    withContext(Dispatchers.IO) {
+                        httpClient.verifyVehiclePin(profile.vin, pin, profile.accessToken)
+                    }
+                }.getOrDefault(false)
+                if (!verified) {
+                    showError("云端 PIN 码错误，请重试")
+                    return@launch
+                }
+                sessionVehiclePin = pin
+                val savedProfile = withContext(Dispatchers.IO) {
+                    profileStore.saveProfile(profile.copy(controlPin = pin), activate = true)
+                }
+                currentProfile = savedProfile
+                dismiss()
+                val wakeResult = PassiveEntryWakeManager.enableForVehicle(this@MainActivity, savedProfile)
+                if (wakeResult.ok) {
+                    val prevCfg = PassiveEntryStore.load(this@MainActivity, savedProfile.vin)
+                    val updated = prevCfg.copy(
+                        enabled = true,
+                        cdmAssociatedMac = if (wakeResult.companionPresenceActive) {
+                            PassiveEntryPrerequisiteChecker.normalizeMac(savedProfile.bleMac).orEmpty()
+                        } else {
+                            prevCfg.cdmAssociatedMac
+                        }
+                    )
+                    PassiveEntryStore.save(this@MainActivity, updated)
+                    PassiveEntryRuntime.setForegroundAppActive(this@MainActivity, true)
+                    Toast.makeText(this@MainActivity, "已开启蓝牙无感（${wakeResult.channelLabel}）", Toast.LENGTH_SHORT).show()
+                    onCompleted(true)
+                } else {
+                    Toast.makeText(this@MainActivity, "后台唤醒注册失败：${wakeResult.message}", Toast.LENGTH_LONG).show()
+                    onCompleted(false)
+                }
             }
         }
     }

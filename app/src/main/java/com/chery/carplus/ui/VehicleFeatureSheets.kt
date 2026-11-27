@@ -1671,6 +1671,7 @@ internal class VehicleFeatureSheets(
         var pickedBannerView: LinearLayout? = null
         var pickedTitleView: TextView? = null
         var pickedSubView: TextView? = null
+        var searchDestPillView: View? = null
 
         val wv = object : WebView(context) {
             @SuppressLint("ClickableViewAccessibility")
@@ -1714,12 +1715,14 @@ internal class VehicleFeatureSheets(
                             if (mapDestroyed) return@post
                             pickedPoiLat = lat
                             pickedPoiLon = lon
-                            val coordStr = String.format(Locale.US, "%.5f, %.5f", lat, lon)
+                            val coordStr = String.format(Locale.US, "%.4f, %.4f", lat, lon)
                             pickedPoiName = "地图选点"
                             pickedPoiAddress = coordStr
-                            pickedTitleView?.text = "已选目的地 · 正在解析地址..."
+                            pickedTitleView?.text = "定位解析中..."
                             pickedSubView?.text = coordStr
+                            pickedSubView?.visibility = View.VISIBLE
                             pickedBannerView?.visibility = View.VISIBLE
+                            searchDestPillView?.visibility = View.GONE
                             scope.launch {
                                 val resolved = runCatching {
                                     withContext(Dispatchers.IO) {
@@ -1731,7 +1734,7 @@ internal class VehicleFeatureSheets(
                                     pickedPoiName = resolved
                                     pickedPoiAddress = resolved
                                     pickedTitleView?.text = resolved
-                                    pickedSubView?.text = coordStr
+                                    pickedSubView?.visibility = View.GONE
                                 } else {
                                     pickedTitleView?.text = "地图选点"
                                 }
@@ -1814,16 +1817,16 @@ internal class VehicleFeatureSheets(
             }
         )
 
-        // Embedded "Send to Car (943)" pill inside the map overlay (bottom-left)
-        val sendToCarBtn = LinearLayout(context).apply {
+        // Subtle destination search pill on map bottom-left (auto-hides when a map point is picked)
+        val searchDestBtn = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = rounded(Color.argb(232, 24, 26, 32), 18f, Color.argb(110, 16, 185, 129), 0.9f)
+            background = rounded(Color.argb(232, 24, 26, 32), 18f, Color.argb(55, 255, 255, 255), 0.9f)
             setPadding(dp(12), 0, dp(14), 0)
             isClickable = true
             isFocusable = true
             elevation = dpF(4f)
-            contentDescription = "发送目的地到车机导航"
+            contentDescription = "搜索目的地发送到车"
             MotionSpec.attachPressPhysics(this, pressedScale = 0.94f)
             setOnClickListener {
                 AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
@@ -1837,17 +1840,22 @@ internal class VehicleFeatureSheets(
                     pickedPoiLon = lon
                     pickedPoiName = label
                     pickedPoiAddress = label
+                    pickedTitleView?.text = label
+                    pickedSubView?.visibility = View.GONE
+                    pickedBannerView?.visibility = View.VISIBLE
+                    visibility = View.GONE
                     runMapJs("window.CarMap && window.CarMap.setPickedDestination($lat, $lon, ${JSONObject.quote(label)});")
                 }
             }
         }
-        sendToCarBtn.addView(
-            AppIconView(context, AppIconType.MAP_PIN, Color.parseColor("#10B981")),
+        searchDestBtn.addView(
+            AppIconView(context, AppIconType.CROSSHAIR, ThemeTokens.TEXT_PRIMARY),
             LinearLayout.LayoutParams(dp(15), dp(15)).apply { marginEnd = dp(5) }
         )
-        sendToCarBtn.addView(text("发送到车", 13f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD))
+        searchDestBtn.addView(text("搜目的地", 13f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD))
+        searchDestPillView = searchDestBtn
         mapContainer.addView(
-            sendToCarBtn,
+            searchDestBtn,
             FrameLayout.LayoutParams(WRAP_CONTENT, dp(36), Gravity.BOTTOM or Gravity.START).apply {
                 marginStart = dp(12)
                 bottomMargin = dp(12)
@@ -1864,16 +1872,36 @@ internal class VehicleFeatureSheets(
             }
         )
 
-        // Inline picked-destination quick-send bar (visible after user taps on the map)
+        // Single Send-to-Car confirmation bar shown right under the map when a point is selected
         val pickedBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = rounded(CARD_INNER, 12f, Color.argb(95, 16, 185, 129), 0.9f)
+            background = rounded(CARD_INNER, 12f, Color.argb(80, 16, 185, 129), 0.9f)
             setPadding(dp(14), dp(10), dp(10), dp(10))
             visibility = View.GONE
         }
-        val pickedTextCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        val pTitle = text("", 13.5f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 }
+        val pickedTextCol = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                showSendPoiToCarSheet(
+                    initialName = pickedPoiName,
+                    initialAddress = pickedPoiAddress,
+                    initialLat = pickedPoiLat,
+                    initialLon = pickedPoiLon
+                ) { lat, lon, label ->
+                    pickedPoiLat = lat
+                    pickedPoiLon = lon
+                    pickedPoiName = label
+                    pickedPoiAddress = label
+                    pickedTitleView?.text = label
+                    pickedSubView?.visibility = View.GONE
+                    runMapJs("window.CarMap && window.CarMap.setPickedDestination($lat, $lon, ${JSONObject.quote(label)});")
+                }
+            }
+        }
+        val pTitle = text("", 14f, TEXT_PRIMARY, Typeface.BOLD).apply { maxLines = 1 }
         val pSub = text("", 11.5f, TEXT_SUB).apply { maxLines = 1 }
         pickedTitleView = pTitle
         pickedSubView = pSub
@@ -1917,7 +1945,7 @@ internal class VehicleFeatureSheets(
                     isEnabled = true
                     alpha = 1f
                     text = "发送到车"
-                    toast(if (ok) "已发送「$destName」到车机导航" else "发送到车失败，请稍后重试")
+                    toast(if (ok) "已发送「$destName」到车机" else "发送失败，请重试")
                 }
             }
         }
@@ -1933,6 +1961,7 @@ internal class VehicleFeatureSheets(
                 pickedPoiName = ""
                 pickedPoiAddress = ""
                 pickedBar.visibility = View.GONE
+                searchDestPillView?.visibility = View.VISIBLE
                 runMapJs("window.CarMap && window.CarMap.clearPickedDestination();")
             }
         }
@@ -3491,7 +3520,7 @@ internal class VehicleFeatureSheets(
             var smsJob: Job? = null
             var submitting = false
             box.addView(
-                text("核验车辆识别码（VIN / SN / ICCID）与手机短信后，可重新设置 6 位云端控车 PIN 码。", 12.5f, TEXT_SUB).apply {
+                text("校验车辆识别码与短信后重置 6 位 PIN 码", 12.5f, TEXT_SUB).apply {
                     setLineSpacing(0f, 1.35f)
                 },
                 lp(top = dp(4))
@@ -3646,7 +3675,7 @@ internal class VehicleFeatureSheets(
         var selectedSpeed = currentSpeedKmh.coerceIn(minSpeed, maxSpeed)
         showSheet("限速提醒") { sheet, dialog ->
             sheet.addView(
-                text("开启后当车辆行驶速度超过设定阈值时，系统将主动推送超速提醒（60–120 km/h）。", 13f, TEXT_SUB).apply {
+                text("车速超过阈值时推送提醒（60–120 km/h）", 13f, TEXT_SUB).apply {
                     setLineSpacing(0f, 1.4f)
                 },
                 lp(top = dp(6))
@@ -3898,7 +3927,7 @@ internal class VehicleFeatureSheets(
                 scheduleHost.addView(masterRow)
 
                 if (currentSchedules.isEmpty()) {
-                    scheduleHost.addView(text("暂无预约充电计划，点击下方新增低谷电定时计划", 12.5f, TEXT_SUB).apply {
+                    scheduleHost.addView(text("暂无预约充电计划", 12.5f, TEXT_SUB).apply {
                         gravity = Gravity.CENTER
                         setPadding(0, dp(14), 0, dp(14))
                     })
@@ -3970,7 +3999,7 @@ internal class VehicleFeatureSheets(
     ) {
         showSheet("预约出行") { sheet, dialog ->
             sheet.addView(
-                text("设定出发时刻后，车辆将在出行前自动提前调节座舱温度（油/混/电车型均支持）。", 13f, TEXT_SUB).apply {
+                text("出发前自动提前调节座舱温度", 13f, TEXT_SUB).apply {
                     setLineSpacing(0f, 1.4f)
                 },
                 lp(top = dp(6))
@@ -4075,7 +4104,7 @@ internal class VehicleFeatureSheets(
 
         showSheet("发送目的地到车") { sheet, dialog ->
             sheet.addView(
-                text("搜索目的地或轻触地图选点，一键推送至车机导航（也可在高德/百度/微信分享位置给 CarPlus）。", 12.5f, TEXT_SUB).apply {
+                text("搜索或分享位置，一键推送至车机导航", 12.5f, TEXT_SUB).apply {
                     setLineSpacing(0f, 1.38f)
                 },
                 lp(top = dp(4))
