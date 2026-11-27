@@ -31,6 +31,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.chery.carplus.R
 import java.util.Calendar
 import java.util.Locale
 import kotlin.math.max
@@ -38,16 +39,33 @@ import kotlin.math.roundToInt
 
 /**
  * Modern Android Edge-to-Edge & System Insets utility (gesture navigation pill "小白条",
- * display cutouts, IME keyboard lift, and immersive dark bottom sheets).
+ * HyperOS/MIUI/Pixel transparent nav bar, display cutouts, IME keyboard lift, and full-bleed bottom sheets).
  */
 object AppSystemInsets {
 
+    @Volatile
+    var latestBottomNavInsetPx: Int = 0
+        private set
+
+    fun updateBottomNavInset(px: Int) {
+        if (px >= 0) latestBottomNavInsetPx = px
+    }
+
     fun applyEdgeToEdge(window: Window, backgroundColor: Int = ThemeTokens.BG_CANVAS) {
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        @Suppress("DEPRECATION")
+        window.clearFlags(
+            WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or
+                WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION
+        )
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
-        window.decorView.setBackgroundColor(backgroundColor)
+        if (backgroundColor != Color.TRANSPARENT) {
+            window.decorView.setBackgroundColor(backgroundColor)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.navigationBarDividerColor = Color.TRANSPARENT
             val attrs = window.attributes
             attrs.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -63,23 +81,78 @@ object AppSystemInsets {
         }
     }
 
-    fun applyBottomSheetEdgeToEdge(dialog: Dialog, sheetView: View) {
-        val window = dialog.window ?: return
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.TRANSPARENT
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val attrs = window.attributes
-            attrs.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            window.attributes = attrs
+    /**
+     * Pads a scrollable container or pinned bottom bar with the live Android gesture-bar ("小白条")
+     * bottom inset while allowing content/background to draw edge-to-edge behind the pill.
+     */
+    fun applyBottomNavPadding(view: View) {
+        if (view is ViewGroup) {
+            view.clipToPadding = false
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            window.isNavigationBarContrastEnforced = false
+        val baseLeft = view.paddingLeft
+        val baseTop = view.paddingTop
+        val baseRight = view.paddingRight
+        val baseBottom = view.paddingBottom
+
+        // Immediately apply last known inset so first frame has zero jump
+        if (latestBottomNavInsetPx > 0) {
+            view.setPadding(baseLeft, baseTop, baseRight, baseBottom + latestBottomNavInsetPx)
         }
-        WindowInsetsControllerCompat(window, window.decorView).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
+
+        ViewCompat.setOnApplyWindowInsetsListener(view) { v, insets ->
+            val navBottom = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
+            if (navBottom > 0) latestBottomNavInsetPx = navBottom
+            v.setPadding(baseLeft, baseTop, baseRight, baseBottom + navBottom)
+            insets
+        }
+        if (view.isAttachedToWindow) {
+            ViewCompat.requestApplyInsets(view)
+        } else {
+            view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) {
+                    v.removeOnAttachStateChangeListener(this)
+                    ViewCompat.requestApplyInsets(v)
+                }
+                override fun onViewDetachedFromWindow(v: View) = Unit
+            })
+        }
+    }
+
+    /**
+     * Installs [sheetView] inside a full-bleed edge-to-edge bottom sheet Dialog (Theme_CarPlus_BottomSheetDialog)
+     * so the #1C1D21 sheet surface draws seamlessly underneath the floating Android gesture pill ("小白条").
+     */
+    fun installBottomSheetContent(
+        dialog: Dialog,
+        sheetView: View,
+        fixedSheetHeightPx: Int? = null,
+        dimAmount: Float = 0.65f
+    ) {
+        val backdrop = FrameLayout(dialog.context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isClickable = true
+            isFocusable = false
+            setOnClickListener { dialog.dismiss() }
+        }
+        sheetView.isClickable = true
+        sheetView.isFocusable = true
+        backdrop.addView(
+            sheetView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                fixedSheetHeightPx ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            )
+        )
+        dialog.setContentView(backdrop)
+
+        dialog.window?.apply {
+            setWindowAnimations(0)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(dimAmount)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            applyEdgeToEdge(this, Color.TRANSPARENT)
         }
 
         val baseLeft = sheetView.paddingLeft
@@ -87,6 +160,32 @@ object AppSystemInsets {
         val baseRight = sheetView.paddingRight
         val baseBottom = sheetView.paddingBottom
 
+        if (latestBottomNavInsetPx > 0) {
+            sheetView.setPadding(baseLeft, baseTop, baseRight, baseBottom + latestBottomNavInsetPx)
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(backdrop) { _, insets ->
+            val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            if (sysBars.bottom > 0) latestBottomNavInsetPx = sysBars.bottom
+            val extraBottom = max(sysBars.bottom, ime.bottom)
+            sheetView.setPadding(
+                baseLeft + sysBars.left,
+                baseTop,
+                baseRight + sysBars.right,
+                baseBottom + extraBottom
+            )
+            insets
+        }
+        backdrop.post { ViewCompat.requestApplyInsets(backdrop) }
+    }
+
+    fun applyBottomSheetEdgeToEdge(dialog: Dialog, sheetView: View) {
+        val window = dialog.window ?: return
+        applyEdgeToEdge(window, Color.TRANSPARENT)
+        val baseLeft = sheetView.paddingLeft
+        val baseTop = sheetView.paddingTop
+        val baseRight = sheetView.paddingRight
+        val baseBottom = sheetView.paddingBottom
         ViewCompat.setOnApplyWindowInsetsListener(sheetView) { v, insets ->
             val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
@@ -1220,7 +1319,7 @@ object SixDigitPinSheet {
         onPinSixDigits: (pin: String, ui: PinSheetController) -> Unit
     ): Dialog {
         var outerRef: View? = null
-        val dialog = object : Dialog(context) {
+        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
             override fun dismiss() {
                 val sheet = outerRef
                 if (sheet == null || MotionSpec.isBypassingSheetDismiss(this)) {
@@ -1559,15 +1658,7 @@ object SixDigitPinSheet {
             ).apply { topMargin = dp(context, 10f) }
         )
 
-        dialog.setContentView(outer)
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setGravity(Gravity.BOTTOM)
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setDimAmount(0.58f)
-            setWindowAnimations(0)
-        }
-        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
+        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.58f)
         MotionSpec.attachSheetSwipeToDismiss(outer, null, dialog)
         dialog.show()
         MotionSpec.animateSheetEnter(outer)

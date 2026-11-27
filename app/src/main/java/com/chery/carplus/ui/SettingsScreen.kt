@@ -354,6 +354,7 @@ class SettingsScreen(
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(32))
@@ -546,6 +547,7 @@ class SettingsScreen(
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(8), 0, dp(36))
@@ -775,6 +777,7 @@ class SettingsScreen(
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(10), 0, dp(36))
@@ -989,7 +992,7 @@ class SettingsScreen(
 
     private fun showAppUpdateSheet() {
         updateSheetDialog?.dismiss()
-        val dialog = Dialog(activity)
+        val dialog = Dialog(activity, R.style.Theme_CarPlus_BottomSheetDialog)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
 
         val sheet = LinearLayout(activity).apply {
@@ -1070,14 +1073,7 @@ class SettingsScreen(
         sheetProgressLabel = progressLabel
         sheetActionBtn = actionBtn
 
-        dialog.setContentView(sheet)
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setGravity(Gravity.BOTTOM)
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setDimAmount(0.55f)
-        }
-        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, sheet)
+        AppSystemInsets.installBottomSheetContent(dialog, sheet, dimAmount = 0.55f)
         MotionSpec.attachSheetSwipeToDismiss(sheet, null, dialog)
         dialog.setOnDismissListener {
             if (updateSheetDialog === dialog) {

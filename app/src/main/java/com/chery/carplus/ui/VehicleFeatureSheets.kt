@@ -37,6 +37,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.webkit.WebViewAssetLoader
+import com.chery.carplus.R
 import com.chery.carplus.cloud.AntiTheftStatus
 import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CherySessionExpiredException
@@ -1844,6 +1845,7 @@ internal class VehicleFeatureSheets(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(lowerScroll)
         val listContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(4), dp(20), dp(20))
@@ -2010,7 +2012,7 @@ internal class VehicleFeatureSheets(
         activeDialog?.dismiss()
         var depthRestored = false
         lateinit var outer: LinearLayout
-        val dialog = object : Dialog(context) {
+        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
             fun restoreDepthIfNeeded() {
                 if (activeDialog === this && !depthRestored) {
                     depthRestored = true
@@ -2133,6 +2135,7 @@ internal class VehicleFeatureSheets(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(lowerScroll)
         val contentHost = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, dp(12))
@@ -2168,16 +2171,7 @@ internal class VehicleFeatureSheets(
         }
         renderTab(currentTab)
 
-        dialog.setContentView(outer)
-        dialog.window?.apply {
-            setWindowAnimations(0)
-            setBackgroundDrawableResource(android.R.color.transparent)
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setDimAmount(0.68f)
-            setLayout(MATCH_PARENT, sheetHeight)
-            setGravity(Gravity.BOTTOM)
-        }
-        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
+        AppSystemInsets.installBottomSheetContent(dialog, outer, fixedSheetHeightPx = sheetHeight, dimAmount = 0.68f)
         MotionSpec.attachSheetSwipeToDismiss(outer, lowerScroll, dialog) {
             dialog.restoreDepthIfNeeded()
         }
@@ -3229,7 +3223,7 @@ internal class VehicleFeatureSheets(
         activeDialog?.dismiss()
         var depthRestored = false
         lateinit var outer: LinearLayout
-        val dialog = object : Dialog(context) {
+        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
             fun restoreDepthIfNeeded() {
                 if (activeDialog === this && !depthRestored) {
                     depthRestored = true
@@ -3281,16 +3275,7 @@ internal class VehicleFeatureSheets(
 
         build(body, dialog)
 
-        dialog.setContentView(outer)
-        dialog.window?.apply {
-            setWindowAnimations(0)
-            setBackgroundDrawableResource(android.R.color.transparent)
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setDimAmount(0.68f)
-            setLayout(MATCH_PARENT, WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-        }
-        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
+        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.68f)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog) {
             dialog.restoreDepthIfNeeded()
         }
@@ -3299,7 +3284,11 @@ internal class VehicleFeatureSheets(
             val measuredHeight = bottom - top
             if (measuredHeight > maxHeight && !clampedToMax) {
                 clampedToMax = true
-                dialog.window?.setLayout(MATCH_PARENT, maxHeight)
+                val lp = outer.layoutParams
+                if (lp != null) {
+                    lp.height = maxHeight
+                    outer.layoutParams = lp
+                }
             }
         }
         dialog.setOnDismissListener {

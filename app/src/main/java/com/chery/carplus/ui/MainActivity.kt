@@ -433,8 +433,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     androidx.core.view.WindowInsetsCompat.Type.displayCutout()
             )
             val ime = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.ime())
-            val bottomInset = maxOf(sysBars.bottom, ime.bottom)
-            v.setPadding(sysBars.left, sysBars.top, sysBars.right, bottomInset)
+            AppSystemInsets.updateBottomNavInset(sysBars.bottom)
+            // Keep bottom edge-to-edge behind Android gesture pill ("小白条"); only IME lifts contentFrame
+            v.setPadding(sysBars.left, sysBars.top, sysBars.right, ime.bottom)
             insets
         }
         setContentView(contentFrame)
@@ -787,6 +788,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val root = FrameLayout(this).apply {
             setBackgroundColor(BG_HOME)
         }
+        AppSystemInsets.applyBottomNavPadding(root)
         presentScreen(Screen.WELCOME, root)
 
         // Centered oversized monochrome CHERY vector emblem only (no CarPlus text)
@@ -1532,6 +1534,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             setBackgroundColor(BG_HOME)
             setPadding(0, 0, 0, dp(28))
         }
+        AppSystemInsets.applyBottomNavPadding(lowerScroll)
         lowerScroll.addView(lowerContent, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         buildIconQuickActionRow(lowerContent)
@@ -2098,6 +2101,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(32))
@@ -2845,6 +2849,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             alpha = 0f
             setPadding(dp(18), dp(8), dp(18), dp(20))
         }
+        AppSystemInsets.applyBottomNavPadding(container)
         quickDeckContainer = container
 
         val editHeader = LinearLayout(this).apply {
@@ -5401,7 +5406,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         var exitAnimStarted = false
         var sheetRootView: View? = null
-        val dialog = object : android.app.Dialog(this@MainActivity) {
+        val dialog = object : android.app.Dialog(this@MainActivity, com.chery.carplus.R.style.Theme_CarPlus_BottomSheetDialog) {
             override fun dismiss() {
                 val target = sheetRootView
                 if (!isShowing || target == null || exitAnimStarted || MotionSpec.isBypassingSheetDismiss(this)) {
@@ -5453,16 +5458,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         buildContent(body, dialog)
 
-        dialog.setContentView(outer)
-        dialog.window?.apply {
-            setBackgroundDrawableResource(android.R.color.transparent)
-            setWindowAnimations(0)
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setDimAmount(0.68f)
-            setLayout(MATCH_PARENT, WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-        }
-        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
+        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.68f)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog) {
             if (appDialog === dialog) {
                 applySheetDepthRecede(false)

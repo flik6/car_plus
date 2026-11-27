@@ -22,6 +22,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.OverScroller
 import android.widget.TextView
+import com.chery.carplus.R
 import android.widget.Toast
 import java.util.Calendar
 import java.util.Locale
@@ -458,7 +459,7 @@ object WheelDateTimePicker {
         var editingEnd = false
         fun activeParts(): DateTimeParts = if (isRange && editingEnd) endParts!! else startParts
 
-        val dialog = Dialog(context)
+        val dialog = Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
 
         val outer = LinearLayout(context).apply {
@@ -802,16 +803,7 @@ object WheelDateTimePicker {
             }
         }
 
-        dialog.setContentView(outer)
-        dialog.window?.apply {
-            setWindowAnimations(0)
-            setBackgroundDrawableResource(android.R.color.transparent)
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setDimAmount(0.62f)
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setGravity(Gravity.BOTTOM)
-        }
-        AppSystemInsets.applyBottomSheetEdgeToEdge(dialog, outer)
+        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.62f)
         dialog.show()
         MotionSpec.animateSheetEnter(outer)
         return dialog

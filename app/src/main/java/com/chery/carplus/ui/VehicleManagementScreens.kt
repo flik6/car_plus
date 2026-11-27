@@ -132,6 +132,7 @@ internal class VehicleManagementScreens(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(8), dp(16), dp(24))
@@ -329,6 +330,7 @@ internal class VehicleManagementScreens(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(32))
@@ -652,6 +654,7 @@ internal class VehicleManagementScreens(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(28))
@@ -834,6 +837,7 @@ internal class VehicleManagementScreens(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(8), dp(16), dp(28))
@@ -1045,6 +1049,7 @@ internal class VehicleManagementScreens(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val listHost = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(28))
@@ -1297,6 +1302,7 @@ internal class VehicleManagementScreens(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(36))
@@ -1965,6 +1971,7 @@ internal class VehicleManagementScreens(
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
+        AppSystemInsets.applyBottomNavPadding(scroll)
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(28))
@@ -2336,6 +2343,7 @@ internal class VehicleManagementScreens(
         val inner = FrameLayout(context).apply {
             setPadding(dp(18), dp(12), dp(18), dp(22))
         }
+        AppSystemInsets.applyBottomNavPadding(inner)
         val btn = AppComponents.createActionButton(context, label, ButtonStyle.PRIMARY, onClick)
         inner.addView(btn, FrameLayout.LayoutParams(MATCH_PARENT, dp(48)))
         container.addView(inner, lp())
