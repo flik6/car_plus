@@ -119,7 +119,7 @@ object PassiveEntryWakeManager {
                 val rc = runCatching {
                     scanner.startScan(filters, settings, pendingIntent)
                 }.getOrElse { err ->
-                    piError = err.message ?: "PendingIntent 扫描注册异常"
+                    piError = err.message ?: "后台感应注册异常"
                     -1
                 }
                 piRegistered = (rc == 0)
@@ -147,15 +147,15 @@ object PassiveEntryWakeManager {
 
         val ok = piRegistered || cdmActive
         val label = when {
-            cdmActive && piRegistered -> "伴随设备 + PendingIntent 双通道"
-            cdmActive -> "系统伴随设备唤醒"
-            piRegistered -> "PendingIntent 后台扫描"
+            cdmActive && piRegistered -> "系统级双通道唤醒"
+            cdmActive -> "系统级后台唤醒"
+            piRegistered -> "后台省电监听"
             else -> "通道注册失败"
         }
         val msg = when {
-            ok -> "已启动$label（目标 $targetMac）"
+            ok -> "已启动$label"
             piError.isNotBlank() -> piError
-            else -> "当前系统不支持后台蓝牙扫描唤醒"
+            else -> "当前系统不支持后台蓝牙感应"
         }
 
         PassiveEntryRuntime.updateWakeChannelStatus(
@@ -208,7 +208,7 @@ object PassiveEntryWakeManager {
             enabled = false,
             active = false,
             channelLabel = "未开启",
-            logMessage = "已关闭蓝牙无感解锁/上锁并注销后台唤醒通道"
+            logMessage = "已关闭蓝牙无感并停止后台感应"
         )
     }
 

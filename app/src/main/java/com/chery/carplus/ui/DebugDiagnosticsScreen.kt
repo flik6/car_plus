@@ -236,7 +236,7 @@ class DebugDiagnosticsScreen(
         val passiveCfg = PassiveEntryStore.load(context, profile.vin)
         val passiveSnap = PassiveEntryRuntime.currentSnapshot()
         val passivePrereq = PassiveEntryPrerequisiteChecker.evaluate(context, profile)
-        body.addView(AppComponents.createSectionHeader(context, "蓝牙无感解锁/上锁引擎"))
+        body.addView(AppComponents.createSectionHeader(context, "蓝牙无感引擎"))
         body.addView(
             infoCard(
                 listOf(

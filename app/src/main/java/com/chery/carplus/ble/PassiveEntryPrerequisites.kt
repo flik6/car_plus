@@ -165,20 +165,20 @@ object PassiveEntryPrerequisiteChecker {
         val pendingIntentSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
 
         val wakeChannelMode = when {
-            cdmAssociated && pendingIntentSupported -> "伴随设备 + PendingIntent 双通道"
-            cdmAssociated -> "系统伴随设备唤醒"
-            pendingIntentSupported -> "PendingIntent 后台蓝牙扫描"
-            else -> "前台近场蓝牙监听"
+            cdmAssociated && pendingIntentSupported -> "系统级双通道唤醒"
+            cdmAssociated -> "系统级后台唤醒"
+            pendingIntentSupported -> "后台省电监听"
+            else -> "前台近场监听"
         }
 
         val items = mutableListOf(
             PrerequisiteCheckItem(
                 id = PrerequisiteId.KEY_MATERIAL,
-                title = "已同步本车蓝牙数字钥匙",
+                title = "数字钥匙已同步",
                 detail = if (keyOk) {
-                    "钥匙材料完整（${targetMac ?: "--"}）"
+                    "已同步本车蓝牙数字钥匙"
                 } else {
-                    "需先从云端同步本车蓝牙钥匙与车辆蓝牙地址"
+                    "请先从云端同步本车数字钥匙"
                 },
                 satisfied = keyOk,
                 required = true,
@@ -187,18 +187,18 @@ object PassiveEntryPrerequisiteChecker {
             PrerequisiteCheckItem(
                 id = PrerequisiteId.BLUETOOTH_ON,
                 title = "系统蓝牙已开启",
-                detail = if (btOn) "蓝牙适配器已就绪" else "需保持系统蓝牙处于开启状态",
+                detail = if (btOn) "蓝牙功能已就绪" else "请保持手机蓝牙处于开启状态",
                 satisfied = btOn,
                 required = true,
                 actionLabel = "开启蓝牙"
             ),
             PrerequisiteCheckItem(
                 id = PrerequisiteId.BLE_PERMISSIONS,
-                title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) "附近设备蓝牙权限" else "蓝牙与后台定位权限",
+                title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) "附近设备权限" else "蓝牙与定位权限",
                 detail = if (permsOk) {
-                    "已授予后台扫描与直连所需权限"
+                    "已授予蓝牙感应与连接权限"
                 } else {
-                    "需授予扫描、连接与后台蓝牙感知权限"
+                    "需授予扫描与连接权限以感应车辆"
                 },
                 satisfied = permsOk,
                 required = true,
@@ -206,12 +206,12 @@ object PassiveEntryPrerequisiteChecker {
             ),
             PrerequisiteCheckItem(
                 id = PrerequisiteId.DEVICE_BONDED,
-                title = "已完成本车系统蓝牙配对",
+                title = "本车蓝牙已配对",
                 detail = when {
                     !keyOk -> "请先完成数字钥匙同步"
-                    !permsOk -> "请先授予附近设备权限以校验配对状态"
-                    bondedOk -> "本车已在系统蓝牙配对列表中，可静默回连"
-                    else -> "首次需在车旁手动输入 6 位配对码完成一次系统配对"
+                    !permsOk -> "请先授予附近设备权限"
+                    bondedOk -> "已完成系统蓝牙配对，可自动回连"
+                    else -> "首次需在车旁输入 6 位配对码完成配对"
                 },
                 satisfied = bondedOk,
                 required = true,
@@ -219,11 +219,11 @@ object PassiveEntryPrerequisiteChecker {
             ),
             PrerequisiteCheckItem(
                 id = PrerequisiteId.NOTIFICATIONS,
-                title = "通知与无感状态提示权限",
+                title = "通知提醒权限",
                 detail = if (notifOk) {
-                    "已允许前台连接服务通知与解/上锁反馈"
+                    "已允许无感连接与解上锁状态提示"
                 } else {
-                    "Android 13+ 需允许通知以维持靠近建连服务"
+                    "需开启通知以保持后台连接稳定"
                 },
                 satisfied = notifOk,
                 required = true,
@@ -231,15 +231,15 @@ object PassiveEntryPrerequisiteChecker {
             ),
             PrerequisiteCheckItem(
                 id = PrerequisiteId.BATTERY_UNRESTRICTED,
-                title = "电池优化设为无限制",
+                title = "电池优化无限制",
                 detail = if (batteryOk) {
-                    "已加入电池白名单，降低息屏休眠断链概率"
+                    "已关闭省电限制，锁屏也可稳定唤醒"
                 } else {
-                    "需关闭省电限制，否则锁屏后后台蓝牙唤醒会被拦截"
+                    "避免锁屏后后台感应服务被系统暂停"
                 },
                 satisfied = batteryOk,
                 required = true,
-                actionLabel = "设为无限制"
+                actionLabel = "去设置"
             )
         )
 
@@ -247,11 +247,11 @@ object PassiveEntryPrerequisiteChecker {
             items.add(
                 PrerequisiteCheckItem(
                     id = PrerequisiteId.BACKGROUND_WAKE_CHANNEL,
-                    title = "系统伴随设备关联（推荐）",
+                    title = "系统设备关联",
                     detail = if (cdmAssociated) {
-                        "已关联本车，系统级免杀唤醒与 PendingIntent 协同生效"
+                        "已关联本车，系统级后台保活已生效"
                     } else {
-                        "当前已支持 PendingIntent 扫描；关联伴随设备可大幅提升抗杀能力"
+                        "关联后可大幅提升息屏唤醒稳定性"
                     },
                     satisfied = cdmAssociated,
                     required = false,
@@ -262,9 +262,9 @@ object PassiveEntryPrerequisiteChecker {
 
         val missingRequired = items.count { it.required && !it.satisfied }
         val summary = if (missingRequired == 0) {
-            "前置条件已全部满足 · $wakeChannelMode"
+            "全部必备条件已满足 · $wakeChannelMode"
         } else {
-            "还需完成 $missingRequired 项必备条件后方可开启"
+            "还需完成 $missingRequired 项设置"
         }
 
         return PrerequisiteReport(
@@ -312,11 +312,11 @@ object PassiveEntryPrerequisiteChecker {
     ) {
         val normalizedMac = normalizeMac(bleMac)
         if (normalizedMac == null) {
-            onError("车辆蓝牙 MAC 不可用")
+            onError("尚未同步车辆蓝牙信息")
             return
         }
         if (!isCompanionSupported(activity)) {
-            onError("当前系统不支持伴随设备关联，将使用 PendingIntent 后台扫描")
+            onError("当前系统不支持设备关联，将使用后台省电监听")
             return
         }
         if (isCompanionAssociated(activity, normalizedMac)) {
@@ -325,7 +325,7 @@ object PassiveEntryPrerequisiteChecker {
         }
         val cdm = activity.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
         if (cdm == null) {
-            onError("伴随设备服务不可用")
+            onError("系统设备关联服务不可用")
             return
         }
         try {
@@ -355,7 +355,7 @@ object PassiveEntryPrerequisiteChecker {
                 }
 
                 override fun onFailure(error: CharSequence?) {
-                    val msg = error?.toString()?.ifBlank { "伴随设备关联失败" } ?: "伴随设备关联失败"
+                    val msg = error?.toString()?.ifBlank { "设备关联失败" } ?: "设备关联失败"
                     activity.runOnUiThread { onError(msg) }
                 }
             }
@@ -367,7 +367,7 @@ object PassiveEntryPrerequisiteChecker {
                 cdm.associate(request, callback, null)
             }
         } catch (t: Throwable) {
-            onError(t.message ?: "无法发起伴随设备关联")
+            onError(t.message ?: "无法发起系统设备关联")
         }
     }
 }

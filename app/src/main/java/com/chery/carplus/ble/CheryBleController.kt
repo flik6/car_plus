@@ -683,7 +683,7 @@ class CheryBleController(
         currentStage = Stage.DISCONNECTED
         emitStage()
         listener?.onConnectionStateChanged(false, currentStage.label)
-        listener?.onChannelModeChanged(false, null, "远程云端连接 (HTTP)")
+        listener?.onChannelModeChanged(false, null, "远程网络控制")
         if (autoProximityEnabled) scheduleProximityTick(1_500)
     }
 
@@ -1388,7 +1388,7 @@ class CheryBleController(
                 } else if (status != BluetoothGatt.GATT_SUCCESS) {
                     listener?.onError("GATT 连接断开，status=$status", null)
                 }
-                listener?.onChannelModeChanged(false, null, "远程云端连接 (HTTP)")
+                listener?.onChannelModeChanged(false, null, "远程网络控制")
                 if (autoProximityEnabled) scheduleProximityTick(1_500)
             }
         }
@@ -2221,7 +2221,7 @@ class CheryBleController(
         }
         listener?.onError(staleBondHint, throwable)
         if (autoProximityEnabled) {
-            listener?.onChannelModeChanged(false, null, "远程云端连接 (HTTP)")
+            listener?.onChannelModeChanged(false, null, "远程网络控制")
             scheduleProximityTick(PROXIMITY_INTERVAL_MS)
         }
     }

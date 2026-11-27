@@ -13,6 +13,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.Window
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -25,6 +26,7 @@ import com.chery.carplus.ble.PassiveEntryRuntime
 import com.chery.carplus.ble.PassiveEntrySnapshot
 import com.chery.carplus.ble.PassiveEntryStore
 import com.chery.carplus.ble.PassiveSensitivity
+import com.chery.carplus.ble.PassiveState
 import com.chery.carplus.ble.PrerequisiteCheckItem
 import com.chery.carplus.ble.PrerequisiteId
 import com.chery.carplus.profile.VehicleProfile
@@ -34,9 +36,9 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
- * Minimalist dark bottom sheets for Bluetooth Passive Unlock / Walk-Away Lock:
+ * Minimalist dark bottom sheets for Bluetooth Passive Entry ("蓝牙无感"):
  * 1. Prerequisite gate checklist sheet (blocks enabling until all required items pass).
- * 2. Passive entry strategy & live RSSI calibration sheet.
+ * 2. Compact passive entry control & distance calibration sheet.
  */
 class PassiveEntrySheets(
     private val context: Context,
@@ -51,6 +53,7 @@ class PassiveEntrySheets(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var activeDialog: Dialog? = null
+    private var activeImmediateDismiss: (() -> Unit)? = null
     private var refreshOpenSheetBlock: (() -> Unit)? = null
     private var rssiPollRunnable: Runnable? = null
 
@@ -61,35 +64,36 @@ class PassiveEntrySheets(
     fun dismiss() {
         stopRssiPolling()
         refreshOpenSheetBlock = null
-        activeDialog?.dismiss()
+        activeImmediateDismiss?.invoke() ?: activeDialog?.dismiss()
+        activeImmediateDismiss = null
         activeDialog = null
     }
 
     /**
-     * Shows the prerequisite gate bottom sheet. When [inspectOnly] is false, users can proceed
-     * to PIN verification and enable passive entry as soon as all required items are satisfied.
+     * Shows the prerequisite check & wake-status bottom sheet.
      */
     fun showPrerequisiteGateSheet(
         inspectOnly: Boolean = false,
         onEnabledCallback: ((Boolean) -> Unit)? = null
     ) {
         dismiss()
-        val dialog = Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog)
         val outer = createSheetShell()
+        val (dialog, immediateDismiss) = createAnimatedSheetDialog(outer)
 
         val titleTv = text(
-            if (inspectOnly) "无感前置条件与通道自检" else "开启无感需满足前置条件",
+            if (inspectOnly) "权限与连接检查" else "开启前需完成设置",
             19f,
             ThemeTokens.TEXT_PRIMARY,
             Typeface.BOLD
         )
         val subtitleTv = text("", 13f, ThemeTokens.TEXT_SUB).apply {
-            setLineSpacing(dpF(2f), 1f)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         }
-        outer.addView(titleTv, lp(top = dp(6)))
+        outer.addView(titleTv, lp(top = dp(4)))
         outer.addView(subtitleTv, lp(top = dp(5), bottom = dp(12)))
 
-        val maxScrollH = (context.resources.displayMetrics.heightPixels * 0.56f).roundToInt()
+        val maxScrollH = (context.resources.displayMetrics.heightPixels * 0.50f).roundToInt()
         val scroll = ScrollView(context).apply {
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -98,9 +102,7 @@ class PassiveEntrySheets(
             orientation = LinearLayout.VERTICAL
         }
         scroll.addView(listBody, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        outer.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            height = WRAP_CONTENT
-        })
+        outer.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         scroll.post {
             if (scroll.height > maxScrollH) {
                 scroll.layoutParams = (scroll.layoutParams as LinearLayout.LayoutParams).apply {
@@ -111,7 +113,7 @@ class PassiveEntrySheets(
 
         val ctaBtn = AppComponents.createActionButton(
             context = context,
-            label = "完成必备条件后开启",
+            label = "完成设置后开启",
             style = ButtonStyle.PRIMARY
         ) {}
         outer.addView(ctaBtn, lp(top = dp(14)))
@@ -122,16 +124,16 @@ class PassiveEntrySheets(
             val requiredTotal = report.items.count { it.required }
             val requiredDone = report.items.count { it.required && it.satisfied }
             subtitleTv.text = if (report.allRequiredSatisfied) {
-                "已满足全部 $requiredTotal 项必备条件 · ${report.wakeChannelMode}"
+                "全部必备条件已就绪 · ${report.wakeChannelMode}"
             } else {
-                "已完成 $requiredDone / $requiredTotal 项必备条件，请依次完成以下待处理项"
+                "已完成 $requiredDone/$requiredTotal 项必备条件"
             }
 
             listBody.removeAllViews()
             report.items.forEachIndexed { idx, item ->
                 listBody.addView(buildPrerequisiteRow(item, profile), lp())
                 if (idx < report.items.lastIndex) {
-                    listBody.addView(AppComponents.createHairline(context, startInsetDp = 34), lp())
+                    listBody.addView(createFullHairline(startInsetDp = 32), lp())
                 }
             }
 
@@ -141,7 +143,7 @@ class PassiveEntrySheets(
                 ctaBtn.isEnabled = true
                 ctaBtn.setOnClickListener { dialog.dismiss() }
             } else if (report.allRequiredSatisfied) {
-                ctaBtn.text = "验证 PIN 码并开启无感"
+                ctaBtn.text = "验证 PIN 码并开启"
                 ctaBtn.alpha = 1f
                 ctaBtn.isEnabled = true
                 ctaBtn.setOnClickListener {
@@ -152,7 +154,7 @@ class PassiveEntrySheets(
                     }
                 }
             } else {
-                ctaBtn.text = "还需完成 ${report.missingRequiredCount} 项必备条件"
+                ctaBtn.text = "还需完成 ${report.missingRequiredCount} 项设置"
                 ctaBtn.alpha = 0.45f
                 ctaBtn.isEnabled = false
                 ctaBtn.setOnClickListener(null)
@@ -162,20 +164,23 @@ class PassiveEntrySheets(
         render()
         refreshOpenSheetBlock = render
 
-        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.68f)
+        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.65f)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog)
         dialog.setOnDismissListener {
             if (activeDialog === dialog) {
                 activeDialog = null
+                activeImmediateDismiss = null
                 refreshOpenSheetBlock = null
             }
         }
         activeDialog = dialog
+        activeImmediateDismiss = immediateDismiss
         dialog.show()
+        MotionSpec.animateSheetEnter(outer)
     }
 
     /**
-     * Shows the passive entry strategy & live RSSI calibration bottom sheet.
+     * Shows the redesigned, compact "蓝牙无感" configuration & proximity calibration sheet.
      */
     fun showPassiveEntryConfigSheet() {
         dismiss()
@@ -185,32 +190,30 @@ class PassiveEntrySheets(
             return
         }
 
-        val dialog = Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog)
         val outer = createSheetShell()
+        val (dialog, immediateDismiss) = createAnimatedSheetDialog(outer)
 
+        // Compact header: Title + compact status pill (zero multi-line wrapping subtitle)
         val titleRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         titleRow.addView(
-            text("蓝牙无感解锁/上锁", 19f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
+            text("蓝牙无感", 20f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD),
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
         val stateBadge = text("", 11.5f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD).apply {
-            setPadding(dp(9), dp(4), dp(9), dp(4))
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             background = GradientDrawable().apply {
-                cornerRadius = dpF(10f)
-                setColor(Color.parseColor("#1D2E45"))
+                cornerRadius = dpF(11f)
+                setColor(Color.parseColor("#1D2C44"))
+                setStroke(strokePx(), Color.parseColor("#2E4870"))
             }
         }
         titleRow.addView(stateBadge, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        outer.addView(titleRow, lp(top = dp(6)))
+        outer.addView(titleRow, lp(top = dp(4), bottom = dp(14)))
 
-        val channelInfoTv = text("", 12.5f, ThemeTokens.TEXT_SUB).apply {
-            setLineSpacing(dpF(2f), 1f)
-        }
-        outer.addView(channelInfoTv, lp(top = dp(5), bottom = dp(10)))
-
+        val maxBodyH = (context.resources.displayMetrics.heightPixels * 0.56f).roundToInt()
         val scroll = ScrollView(context).apply {
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -220,32 +223,48 @@ class PassiveEntrySheets(
         }
         scroll.addView(body, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         outer.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        scroll.post {
+            if (scroll.height > maxBodyH) {
+                scroll.layoutParams = (scroll.layoutParams as LinearLayout.LayoutParams).apply {
+                    height = maxBodyH
+                }
+            }
+        }
 
         var cfg = PassiveEntryStore.load(context, profile.vin)
 
-        // Live signal & threshold summary strip
-        val rssiSummaryBox = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+        // Elevated status card with colored StatusDotView anchor & clear luminance contrast
+        val statusCard = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
             background = GradientDrawable().apply {
-                cornerRadius = dpF(12f)
-                setColor(Color.parseColor("#22242A"))
+                cornerRadius = dpF(13f)
+                setColor(ThemeTokens.BG_CARD_ELEVATED)
+                setStroke(strokePx(), ThemeTokens.BORDER_SUBTLE)
             }
         }
-        val rssiLiveTv = text("", 13.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD)
-        val rssiThreshTv = text("", 12f, ThemeTokens.TEXT_SUB).apply {
-            setLineSpacing(dpF(2f), 1f)
+        val statusDot = StatusDotView(context)
+        statusCard.addView(
+            statusDot,
+            LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(11) }
+        )
+        val statusTextCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val statusMainTv = text("", 14f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         }
-        val lastEventTv = text("", 11.5f, ThemeTokens.TEXT_SUB).apply {
+        val statusSubTv = text("", 12f, ThemeTokens.TEXT_SUB).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
             visibility = View.GONE
         }
-        rssiSummaryBox.addView(rssiLiveTv, lp())
-        rssiSummaryBox.addView(rssiThreshTv, lp(top = dp(4)))
-        rssiSummaryBox.addView(lastEventTv, lp(top = dp(4)))
-        body.addView(rssiSummaryBox, lp(bottom = dp(10)))
+        statusTextCol.addView(statusMainTv, lp())
+        statusTextCol.addView(statusSubTv, lp(top = dp(3)))
+        statusCard.addView(statusTextCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        body.addView(statusCard, lp(bottom = dp(10)))
 
-        // Sub-switch 1: Approach Auto-Unlock
-        val unlockSubTv = text("", 12.5f, ThemeTokens.TEXT_SUB)
+        // Sub-switch 1: Approach Auto-Unlock (concise single-line subtitle, zero dBm jargon)
         val unlockSwitch = ToggleSwitch(context).apply {
             setChecked(cfg.autoUnlockEnabled, animate = false)
             onToggleAttempt = { next ->
@@ -260,15 +279,14 @@ class PassiveEntrySheets(
             buildSimpleToggleRow(
                 icon = AppIconType.LOCK_OPEN,
                 title = "靠近自动解锁",
-                subtitleView = unlockSubTv,
+                subtitle = "携带手机走近车门自动解锁",
                 toggle = unlockSwitch
             ),
             lp()
         )
-        body.addView(AppComponents.createHairline(context, startInsetDp = 36), lp())
+        body.addView(createFullHairline(startInsetDp = 34), lp())
 
-        // Sub-switch 2: Walk-Away Auto-Lock
-        val lockSubTv = text("", 12.5f, ThemeTokens.TEXT_SUB)
+        // Sub-switch 2: Walk-Away Auto-Lock (safety condition stated once, cleanly)
         val lockSwitch = ToggleSwitch(context).apply {
             setChecked(cfg.autoLockEnabled, animate = false)
             onToggleAttempt = { next ->
@@ -283,33 +301,59 @@ class PassiveEntrySheets(
             buildSimpleToggleRow(
                 icon = AppIconType.LOCK_CLOSED,
                 title = "离车自动上锁",
-                subtitleView = lockSubTv,
+                subtitle = "熄火关门后远离车辆自动上锁",
                 toggle = lockSwitch
             ),
             lp()
         )
-        body.addView(AppComponents.createHairline(context, startInsetDp = 36), lp())
+        body.addView(createFullHairline(startInsetDp = 0), lp(top = dp(2)))
 
-        // Sensitivity segmented selector
-        body.addView(
-            text("触发距离灵敏度", 13f, ThemeTokens.TEXT_SUB, Typeface.BOLD),
-            lp(top = dp(14), bottom = dp(8))
+        // Trigger distance selector with recessed dark groove & crisp pill contrast
+        val distanceHeaderRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        distanceHeaderRow.addView(
+            text("触发距离", 13.5f, ThemeTokens.TEXT_BODY, Typeface.BOLD),
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
+        val resetCalBtn = text("恢复默认", 12.5f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD).apply {
+            setPadding(dp(8), dp(4), 0, dp(4))
+            isClickable = true
+            isFocusable = true
+            visibility = View.GONE
+            setOnClickListener {
+                AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
+                cfg = cfg.copy(calibratedUnlockRssi = null)
+                PassiveEntryStore.save(context, cfg)
+                onConfigUpdated(cfg)
+                Toast.makeText(context, "已恢复默认触发距离", Toast.LENGTH_SHORT).show()
+                refreshOpenSheetBlock?.invoke()
+            }
+        }
+        distanceHeaderRow.addView(resetCalBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        body.addView(distanceHeaderRow, lp(top = dp(12), bottom = dp(8)))
+
         val sensitivities = listOf(
             PassiveSensitivity.NEAR,
             PassiveSensitivity.STANDARD,
             PassiveSensitivity.FAR
         )
         val initialIdx = sensitivities.indexOf(cfg.sensitivity).coerceAtLeast(0)
-        val sensitivityDescTv = text(cfg.sensitivity.description, 12f, ThemeTokens.TEXT_SUB)
+        val sensitivityDescTv = text(cfg.sensitivity.description, 12f, ThemeTokens.TEXT_SUB).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
         val segBar = MotionSpec.createSlidingSegmentedBar(
             context = context,
             labels = sensitivities.map { it.label },
             initial = initialIdx,
-            bgColor = Color.parseColor("#25272E"),
-            pillColor = Color.parseColor("#353944"),
+            bgColor = ThemeTokens.SEGMENT_TRACK,
+            pillColor = ThemeTokens.SEGMENT_PILL,
             activeTextColor = ThemeTokens.TEXT_PRIMARY,
-            inactiveTextColor = ThemeTokens.TEXT_SUB
+            inactiveTextColor = ThemeTokens.TEXT_SUB,
+            trackStrokeColor = ThemeTokens.SEGMENT_TRACK_BORDER,
+            pillStrokeColor = ThemeTokens.SEGMENT_PILL_BORDER
         ) { selectedIdx ->
             val picked = sensitivities.getOrElse(selectedIdx) { PassiveSensitivity.STANDARD }
             cfg = cfg.copy(sensitivity = picked, calibratedUnlockRssi = null)
@@ -321,73 +365,58 @@ class PassiveEntrySheets(
         body.addView(segBar, lp())
         body.addView(sensitivityDescTv, lp(top = dp(6), bottom = dp(12)))
 
-        // On-site calibration buttons
-        val calRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val calibrateBtn = AppComponents.createActionButton(
-            context = context,
-            label = "站在车门旁一键标定解锁距离",
-            style = ButtonStyle.SECONDARY
+        // Tactile calibration button with visible border + leading crosshair icon
+        val calibrateBtn = buildIconSecondaryButton(
+            icon = AppIconType.CROSSHAIR,
+            label = "以当前位置标定解锁距离"
         ) {
             val snap = PassiveEntryRuntime.currentSnapshot()
             val liveRssi = liveBleRssiProvider() ?: snap.filteredRssi ?: snap.currentRawRssi
             if (liveRssi == null || liveRssi !in -95..-35) {
-                Toast.makeText(context, "请先在车旁建立蓝牙直连后再标定信号", Toast.LENGTH_SHORT).show()
-                return@createActionButton
+                Toast.makeText(context, "请在车旁连接手机钥匙后再标定", Toast.LENGTH_SHORT).show()
+                return@buildIconSecondaryButton
             }
             val clamped = liveRssi.coerceIn(-82, -45)
             cfg = cfg.copy(calibratedUnlockRssi = clamped)
             PassiveEntryStore.save(context, cfg)
             onConfigUpdated(cfg)
-            AppHaptics.perform(calRow, HapticLevel.MEDIUM_CONFIRM)
-            Toast.makeText(
-                context,
-                "已标定：靠近 ${cfg.effectiveUnlockRssi} dBm 解锁，离开 ${cfg.effectiveLockRssi} dBm 上锁",
-                Toast.LENGTH_SHORT
-            ).show()
+            AppHaptics.perform(outer, HapticLevel.MEDIUM_CONFIRM)
+            Toast.makeText(context, "已将当前位置设为解锁距离", Toast.LENGTH_SHORT).show()
             refreshOpenSheetBlock?.invoke()
         }
-        val resetCalBtn = text("恢复默认", 13f, ThemeTokens.ACCENT_LIGHT, Typeface.BOLD).apply {
-            setPadding(dp(12), dp(10), dp(4), dp(10))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
-                cfg = cfg.copy(calibratedUnlockRssi = null)
-                PassiveEntryStore.save(context, cfg)
-                onConfigUpdated(cfg)
-                Toast.makeText(context, "已恢复预设距离阈值", Toast.LENGTH_SHORT).show()
-                refreshOpenSheetBlock?.invoke()
-            }
-        }
-        calRow.addView(calibrateBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        calRow.addView(resetCalBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        body.addView(calRow, lp(bottom = dp(12)))
+        body.addView(calibrateBtn, lp(bottom = dp(14)))
 
-        body.addView(AppComponents.createHairline(context, startInsetDp = 0), lp())
+        // Clean full-width divider separating calibration controls from inspection row
+        body.addView(createFullHairline(startInsetDp = 0), lp())
 
-        // Prerequisite & wake channel inspection row
+        // Bottom inspection entry: left SHIELD_CHECK icon strictly aligned with upper toggle icons
         val prereqRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(14), 0, dp(6))
+            setPadding(0, dp(13), 0, dp(4))
             isClickable = true
             isFocusable = true
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.985f, haptic = false)
             setOnClickListener {
                 dialog.dismiss()
                 showPrerequisiteGateSheet(inspectOnly = true)
             }
         }
+        prereqRow.addView(
+            AppIconView(context, AppIconType.SHIELD_CHECK, ThemeTokens.TEXT_PRIMARY),
+            LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(14) }
+        )
         val prereqTextCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        val prereqTitle = text("前置条件与唤醒通道检查", 15f, ThemeTokens.TEXT_PRIMARY)
-        val prereqSub = text("", 12.5f, ThemeTokens.TEXT_SUB)
+        val prereqTitle = text("权限与连接检查", 15f, ThemeTokens.TEXT_PRIMARY)
+        val prereqSub = text("", 12f, ThemeTokens.TEXT_SUB).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
         prereqTextCol.addView(prereqTitle, lp())
         prereqTextCol.addView(prereqSub, lp(top = dp(2)))
-        prereqRow.addView(prereqTextCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        prereqRow.addView(prereqTextCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
         prereqRow.addView(
-            AppIconView(context, AppIconType.CHEVRON_RIGHT, ThemeTokens.TEXT_SUB),
+            AppIconView(context, AppIconType.CHEVRON_RIGHT, Color.parseColor("#6B707D")),
             LinearLayout.LayoutParams(dp(16), dp(16))
         )
         body.addView(prereqRow, lp())
@@ -400,28 +429,47 @@ class PassiveEntrySheets(
             val liveRssi = liveBleRssiProvider() ?: snap.filteredRssi ?: snap.currentRawRssi
             val bleReady = liveBleConnectedProvider() || snap.sessionReady
 
-            stateBadge.text = snap.state.label
-            channelInfoTv.text = "唤醒通道：${report.wakeChannelMode} · 仅在熄火且车门关闭时执行离车上锁"
-            rssiLiveTv.text = when {
-                bleReady && liveRssi != null -> "当前实时信号：$liveRssi dBm（蓝牙数字钥匙已直连）"
-                liveRssi != null -> "最近蓝牙信号：$liveRssi dBm"
-                else -> "当前信号：未靠近车辆（休眠低功耗监听）"
+            stateBadge.text = if (snap.state == PassiveState.PAUSED_FOREGROUND) {
+                if (bleReady) "已连接" else "监听中"
+            } else {
+                snap.state.label
             }
-            val calTag = if (cfg.calibratedUnlockRssi != null) "（已现场标定）" else "（${cfg.sensitivity.label}预设）"
-            rssiThreshTv.text = "解锁阈值 ≥ ${cfg.effectiveUnlockRssi} dBm  ·  上锁阈值 ≤ ${cfg.effectiveLockRssi} dBm $calTag"
-            unlockSubTv.text = "连续靠近达到 ${cfg.effectiveUnlockRssi} dBm 时自动解锁"
-            lockSubTv.text = "离开衰减至 ${cfg.effectiveLockRssi} dBm 且熄火关门后上锁"
-            resetCalBtn.visibility = if (cfg.calibratedUnlockRssi != null) View.VISIBLE else View.GONE
-            prereqSub.text = report.summaryText
+            statusDot.state = when {
+                snap.state == PassiveState.ERROR || !report.allRequiredSatisfied -> StatusDotView.State.DISCONNECTED
+                bleReady || snap.state == PassiveState.NEAR_READY || snap.state == PassiveState.UNLOCKED_NEAR ->
+                    StatusDotView.State.CONNECTED
+                snap.state == PassiveState.WAKING_CONNECT -> StatusDotView.State.CONNECTING
+                else -> StatusDotView.State.IDLE
+            }
+
+            statusMainTv.text = when {
+                !report.allRequiredSatisfied -> "还有 ${report.missingRequiredCount} 项必备设置待完成"
+                bleReady && liveRssi != null && liveRssi >= cfg.effectiveUnlockRssi -> "就在车旁 · 信号很强"
+                bleReady -> "已连接车辆 · 蓝牙信号良好"
+                liveRssi != null -> "已检测到附近车辆"
+                else -> "未靠近车辆 · 后台省电监听中"
+            }
 
             val eventSummary = snap.lastEventText.ifBlank { cfg.lastTriggerSummary }
             val eventTime = if (snap.lastEventAtMs > 0L) snap.lastEventAtMs else cfg.lastTriggerAtMs
             if (eventSummary.isNotBlank() && eventTime > 0L) {
                 val ts = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(eventTime))
-                lastEventTv.text = "最近触发：$ts · $eventSummary"
-                lastEventTv.visibility = View.VISIBLE
+                statusSubTv.text = "最近触发：$ts · $eventSummary"
+                statusSubTv.visibility = View.VISIBLE
             } else {
-                lastEventTv.visibility = View.GONE
+                statusSubTv.visibility = View.GONE
+            }
+
+            sensitivityDescTv.text = if (cfg.calibratedUnlockRssi != null) {
+                "已使用当前车旁标定位置，可随时恢复默认"
+            } else {
+                cfg.sensitivity.description
+            }
+            resetCalBtn.visibility = if (cfg.calibratedUnlockRssi != null) View.VISIBLE else View.GONE
+            prereqSub.text = if (report.allRequiredSatisfied) {
+                "全部必备条件已满足"
+            } else {
+                "缺少 ${report.missingRequiredCount} 项必备条件"
             }
         }
 
@@ -433,18 +481,42 @@ class PassiveEntrySheets(
         refreshOpenSheetBlock = renderLive
         startRssiPolling()
 
-        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.68f)
+        AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.65f)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog)
         dialog.setOnDismissListener {
             PassiveEntryRuntime.removeListener(runtimeListener)
             stopRssiPolling()
             if (activeDialog === dialog) {
                 activeDialog = null
+                activeImmediateDismiss = null
                 refreshOpenSheetBlock = null
             }
         }
         activeDialog = dialog
+        activeImmediateDismiss = immediateDismiss
         dialog.show()
+        MotionSpec.animateSheetEnter(outer)
+    }
+
+    private fun createAnimatedSheetDialog(sheetView: View): Pair<Dialog, () -> Unit> {
+        var bypassImmediate = false
+        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
+            override fun dismiss() {
+                if (!isShowing || bypassImmediate || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
+                    return
+                }
+                MotionSpec.dismissSheetAnimated(sheetView, this)
+            }
+        }
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val immediateDismiss = {
+            bypassImmediate = true
+            sheetView.animate().cancel()
+            runCatching { if (dialog.isShowing) dialog.dismiss() }
+            Unit
+        }
+        return dialog to immediateDismiss
     }
 
     private fun startRssiPolling() {
@@ -468,11 +540,45 @@ class PassiveEntrySheets(
         rssiPollRunnable = null
     }
 
+    private fun buildIconSecondaryButton(
+        icon: AppIconType,
+        label: String,
+        onClick: () -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            minimumHeight = dp(44)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dpF(11f)
+                setColor(ThemeTokens.BTN_SECONDARY)
+                setStroke(strokePx(), ThemeTokens.BTN_SECONDARY_BORDER)
+            }
+            isClickable = true
+            isFocusable = true
+            addView(
+                AppIconView(context, icon, Color.parseColor("#E2E8F0")),
+                LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) }
+            )
+            addView(
+                text(label, 14f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+            )
+            MotionSpec.attachPressPhysics(this, pressedScale = 0.97f, haptic = false)
+            setOnClickListener { onClick() }
+        }
+    }
+
     private fun buildPrerequisiteRow(item: PrerequisiteCheckItem, profile: VehicleProfile): View {
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(12))
+            setPadding(0, dp(11), 0, dp(11))
         }
 
         val iconType = if (item.satisfied) AppIconType.CHECK_CIRCLE else AppIconType.INFO_CIRCLE
@@ -513,7 +619,8 @@ class PassiveEntrySheets(
         textCol.addView(titleRow, lp())
         textCol.addView(
             text(item.detail, 12f, ThemeTokens.TEXT_SUB).apply {
-                setLineSpacing(dpF(2f), 1f)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
             },
             lp(top = dp(3))
         )
@@ -521,7 +628,7 @@ class PassiveEntrySheets(
 
         if (item.satisfied) {
             row.addView(
-                text("已满足", 12f, Color.parseColor("#34D399"), Typeface.BOLD),
+                text("已就绪", 12f, Color.parseColor("#34D399"), Typeface.BOLD),
                 LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
             )
         } else {
@@ -531,10 +638,11 @@ class PassiveEntrySheets(
                 if (item.required) ThemeTokens.TEXT_PRIMARY else ThemeTokens.ACCENT_LIGHT,
                 Typeface.BOLD
             ).apply {
-                setPadding(dp(12), dp(7), dp(12), dp(7))
+                setPadding(dp(12), dp(6), dp(12), dp(6))
                 background = GradientDrawable().apply {
-                    cornerRadius = dpF(16f)
-                    setColor(if (item.required) Color.parseColor("#2B303B") else Color.parseColor("#1D2E45"))
+                    cornerRadius = dpF(15f)
+                    setColor(if (item.required) ThemeTokens.BTN_SECONDARY else Color.parseColor("#1D2E45"))
+                    setStroke(strokePx(), if (item.required) ThemeTokens.BTN_SECONDARY_BORDER else Color.parseColor("#2E4870"))
                 }
                 isClickable = true
                 isFocusable = true
@@ -552,7 +660,7 @@ class PassiveEntrySheets(
     private fun buildSimpleToggleRow(
         icon: AppIconType,
         title: String,
-        subtitleView: TextView,
+        subtitle: String,
         toggle: ToggleSwitch
     ): View {
         val row = LinearLayout(context).apply {
@@ -566,10 +674,26 @@ class PassiveEntrySheets(
         )
         val col = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         col.addView(text(title, 15.5f, ThemeTokens.TEXT_PRIMARY), lp())
-        col.addView(subtitleView, lp(top = dp(2)))
+        col.addView(
+            text(subtitle, 12f, ThemeTokens.TEXT_SUB).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            },
+            lp(top = dp(2))
+        )
         row.addView(col, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(12) })
         row.addView(toggle, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         return row
+    }
+
+    private fun createFullHairline(startInsetDp: Int): View {
+        val hPx = (0.7f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
+        return View(context).apply {
+            setBackgroundColor(ThemeTokens.DIVIDER)
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, hPx).apply {
+                marginStart = dp(startInsetDp)
+            }
+        }
     }
 
     private fun createSheetShell(): LinearLayout {
@@ -582,11 +706,11 @@ class PassiveEntrySheets(
                     0f, 0f, 0f, 0f
                 )
             }
-            setPadding(dp(20), dp(10), dp(20), dp(22))
+            setPadding(dp(20), dp(10), dp(20), dp(20))
         }
         val handle = View(context).apply {
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#474B55"))
+                setColor(Color.parseColor("#4C515E"))
                 cornerRadius = dpF(2f)
             }
         }
@@ -611,6 +735,9 @@ class PassiveEntrySheets(
         setTextColor(color)
         setTypeface(Typeface.SANS_SERIF, style)
     }
+
+    private fun strokePx(): Int =
+        (0.9f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1)
 
     private fun dp(value: Int): Int = (value * context.resources.displayMetrics.density).roundToInt()
     private fun dpF(value: Float): Float = value * context.resources.displayMetrics.density

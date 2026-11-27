@@ -118,9 +118,14 @@ object AppSystemInsets {
         }
     }
 
+    const val TAG_SHEET_SCRIM = "carplus_sheet_scrim"
+
     /**
      * Installs [sheetView] inside a full-bleed edge-to-edge bottom sheet Dialog (Theme_CarPlus_BottomSheetDialog)
      * so the #1C1D21 sheet surface draws seamlessly underneath the floating Android gesture pill ("小白条").
+     *
+     * Uses an in-window GPU-composited sibling scrim View instead of WindowManager FLAG_DIM_BEHIND so
+     * backdrop fade-in, swipe-to-dismiss opacity, and exit fade-out run in exact 1:1 lockstep with the sheet.
      */
     fun installBottomSheetContent(
         dialog: Dialog,
@@ -130,10 +135,22 @@ object AppSystemInsets {
     ) {
         val backdrop = FrameLayout(dialog.context).apply {
             setBackgroundColor(Color.TRANSPARENT)
+        }
+        val scrimAlpha = (dimAmount.coerceIn(0f, 1f) * 255f).roundToInt()
+        val scrimView = View(dialog.context).apply {
+            tag = TAG_SHEET_SCRIM
+            setBackgroundColor(Color.argb(scrimAlpha, 0, 0, 0))
             isClickable = true
             isFocusable = false
             setOnClickListener { dialog.dismiss() }
         }
+        backdrop.addView(
+            scrimView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
         sheetView.isClickable = true
         sheetView.isFocusable = true
         backdrop.addView(
@@ -149,8 +166,8 @@ object AppSystemInsets {
         dialog.window?.apply {
             setWindowAnimations(0)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setDimAmount(dimAmount)
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0f)
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             applyEdgeToEdge(this, Color.TRANSPARENT)
         }
@@ -209,8 +226,15 @@ object ThemeTokens {
     val BG_CANVAS: Int = Color.parseColor("#161719")
     val BG_SURFACE: Int = Color.parseColor("#1C1D21")
     val BG_POPOVER: Int = Color.parseColor("#202228")
-    val DIVIDER: Int = Color.parseColor("#23252B")
-    val BTN_SECONDARY: Int = Color.parseColor("#2A2C32")
+    val BG_CARD_ELEVATED: Int = Color.parseColor("#252831")
+    val BORDER_SUBTLE: Int = Color.parseColor("#363B48")
+    val SEGMENT_TRACK: Int = Color.parseColor("#13151A")
+    val SEGMENT_TRACK_BORDER: Int = Color.parseColor("#2D323E")
+    val SEGMENT_PILL: Int = Color.parseColor("#343A48")
+    val SEGMENT_PILL_BORDER: Int = Color.parseColor("#4B5368")
+    val DIVIDER: Int = Color.parseColor("#282B33")
+    val BTN_SECONDARY: Int = Color.parseColor("#2B2F3A")
+    val BTN_SECONDARY_BORDER: Int = Color.parseColor("#424858")
     val ACCENT_BLUE: Int = Color.parseColor("#3E6AE1")
     val ACCENT_ACTIVE: Int = Color.parseColor("#3D9BFF")
     val ACCENT_LIGHT: Int = Color.parseColor("#3D9BFF")
@@ -1191,13 +1215,17 @@ object AppComponents {
                 }
                 ButtonStyle.SECONDARY -> {
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
-                    setTypeface(null, Typeface.NORMAL)
+                    setTypeface(null, Typeface.BOLD)
                     setTextColor(ThemeTokens.TEXT_PRIMARY)
                     minimumHeight = dp(context, 44f)
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.RECTANGLE
                         cornerRadius = dpF(context, 11f)
                         setColor(ThemeTokens.BTN_SECONDARY)
+                        setStroke(
+                            (0.9f * context.resources.displayMetrics.density).roundToInt().coerceAtLeast(1),
+                            ThemeTokens.BTN_SECONDARY_BORDER
+                        )
                     }
                 }
                 ButtonStyle.DANGER_TEXT -> {
@@ -1322,8 +1350,8 @@ object SixDigitPinSheet {
         val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
             override fun dismiss() {
                 val sheet = outerRef
-                if (sheet == null || MotionSpec.isBypassingSheetDismiss(this)) {
-                    super.dismiss()
+                if (!isShowing || sheet == null || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
                 } else {
                     MotionSpec.dismissSheetAnimated(sheet, this)
                 }

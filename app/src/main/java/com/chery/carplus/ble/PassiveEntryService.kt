@@ -26,13 +26,13 @@ import java.util.concurrent.CopyOnWriteArraySet
 
 enum class PassiveState(val label: String) {
     DISABLED("未开启"),
-    SLEEPING_WATCH("低功耗监听中"),
-    WAKING_CONNECT("已靠近 · 正在建连"),
-    NEAR_READY("已直连 · 测距中"),
-    UNLOCKED_NEAR("已无感解锁"),
-    LOCKED_AWAY("已离车上锁"),
-    PAUSED_FOREGROUND("前台控车协同中"),
-    ERROR("状态异常")
+    SLEEPING_WATCH("监听中"),
+    WAKING_CONNECT("连接中"),
+    NEAR_READY("已连接"),
+    UNLOCKED_NEAR("已解锁"),
+    LOCKED_AWAY("已上锁"),
+    PAUSED_FOREGROUND("监听中"),
+    ERROR("连接异常")
 }
 
 data class PassiveEntrySnapshot(

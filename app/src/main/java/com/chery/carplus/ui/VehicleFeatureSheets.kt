@@ -2210,7 +2210,7 @@ internal class VehicleFeatureSheets(
             return true
         }
 
-        activeDialog?.dismiss()
+        activeImmediateDismiss?.invoke() ?: activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         var depthRestored = false
         lateinit var outer: LinearLayout
         val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
@@ -2224,7 +2224,7 @@ internal class VehicleFeatureSheets(
             fun dismissImmediately() {
                 outer.animate().cancel()
                 restoreDepthIfNeeded()
-                runCatching { if (isShowing) super.dismiss() }
+                MotionSpec.dismissSheetImmediately(this)
             }
 
             override fun dismiss() {
@@ -2813,8 +2813,8 @@ internal class VehicleFeatureSheets(
         val ready = hasLocalKeyMaterial(profile)
         val lines = mutableListOf<String>()
         lines += when {
-            bleReady -> "通道状态：手机钥匙已连接（BLE 近场直连）"
-            isBleNearby() -> "通道状态：发现附近车辆，正在建立蓝牙会话..."
+            bleReady -> "通道状态：手机钥匙已连接（蓝牙直连）"
+            isBleNearby() -> "通道状态：发现附近车辆，正在建立蓝牙连接..."
             else -> "通道状态：手机钥匙已断开连接（当前远程网络）"
         }
         lines += if (ready) {
@@ -4282,7 +4282,7 @@ internal class VehicleFeatureSheets(
         onDismiss: (() -> Unit)? = null,
         build: (LinearLayout, Dialog) -> Unit
     ) {
-        activeDialog?.dismiss()
+        activeImmediateDismiss?.invoke() ?: activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         var depthRestored = false
         lateinit var outer: LinearLayout
         val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
@@ -4296,7 +4296,7 @@ internal class VehicleFeatureSheets(
             fun dismissImmediately() {
                 outer.animate().cancel()
                 restoreDepthIfNeeded()
-                runCatching { if (isShowing) super.dismiss() }
+                MotionSpec.dismissSheetImmediately(this)
             }
 
             override fun dismiss() {

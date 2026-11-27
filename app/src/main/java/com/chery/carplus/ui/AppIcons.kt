@@ -590,7 +590,7 @@ class BatteryPillView(context: Context) : View(context) {
  */
 class StatusDotView(context: Context) : View(context) {
 
-    enum class State { CONNECTED, CONNECTING, DISCONNECTED }
+    enum class State { CONNECTED, CONNECTING, DISCONNECTED, IDLE }
 
     var state: State = State.DISCONNECTED
         set(value) {
@@ -613,6 +613,7 @@ class StatusDotView(context: Context) : View(context) {
             State.CONNECTED -> Color.rgb(52, 211, 153)
             State.CONNECTING -> Color.rgb(251, 191, 36)
             State.DISCONNECTED -> Color.rgb(239, 108, 108)
+            State.IDLE -> Color.rgb(126, 132, 146)
         }
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 1.4f * resources.displayMetrics.density

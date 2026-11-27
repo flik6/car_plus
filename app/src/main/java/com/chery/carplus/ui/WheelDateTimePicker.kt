@@ -459,7 +459,17 @@ object WheelDateTimePicker {
         var editingEnd = false
         fun activeParts(): DateTimeParts = if (isRange && editingEnd) endParts!! else startParts
 
-        val dialog = Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog)
+        var outerRef: View? = null
+        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
+            override fun dismiss() {
+                val target = outerRef
+                if (!isShowing || target == null || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
+                    return
+                }
+                MotionSpec.dismissSheetAnimated(target, this)
+            }
+        }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
 
         val outer = LinearLayout(context).apply {
@@ -472,6 +482,7 @@ object WheelDateTimePicker {
             }
             setPadding(0, dp(context, 10f), 0, dp(context, 24f))
         }
+        outerRef = outer
 
         // Top subtle drag handle
         val handle = View(context).apply {

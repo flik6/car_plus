@@ -5,6 +5,7 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Dialog
 import android.content.Context
+import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -207,10 +208,24 @@ object MotionSpec {
         }
     }
 
+    private fun findSheetScrim(sheetView: View): View? =
+        (sheetView.parent as? ViewGroup)?.findViewWithTag(AppSystemInsets.TAG_SHEET_SCRIM)
+
     /**
-     * Bottom sheet entrance: rises from +64dp while fading in over 260ms.
+     * Bottom sheet entrance: rises from +64dp while fading in over 260ms,
+     * with synchronized sibling scrim fade-in over 240ms.
      */
     fun animateSheetEnter(sheetView: View) {
+        val scrim = findSheetScrim(sheetView)
+        scrim?.let {
+            it.animate().cancel()
+            it.alpha = 0f
+            it.animate()
+                .alpha(1f)
+                .setDuration(240L)
+                .setInterpolator(EASE_OUT_EXPO)
+                .start()
+        }
         sheetView.animate().cancel()
         sheetView.translationY = dp(sheetView.context, 64f)
         sheetView.alpha = 0f
@@ -226,6 +241,14 @@ object MotionSpec {
      * Bottom sheet exit: glides down 48dp while fading out over 170ms, then invokes [onEnd].
      */
     fun animateSheetExit(sheetView: View, onEnd: () -> Unit) {
+        findSheetScrim(sheetView)?.let {
+            it.animate().cancel()
+            it.animate()
+                .alpha(0f)
+                .setDuration(160L)
+                .setInterpolator(EASE_STANDARD)
+                .start()
+        }
         sheetView.animate().cancel()
         var ended = false
         val finish = {
@@ -251,8 +274,25 @@ object MotionSpec {
         bypassDismissDialogs[dialog] == true
 
     /**
+     * Synchronously dismisses a bottom sheet dialog without running exit animations.
+     * Use during Activity/screen teardown or before replacing an already-open sheet.
+     */
+    fun dismissSheetImmediately(dialog: Dialog) {
+        dismissingDialogs.remove(dialog)
+        bypassDismissDialogs[dialog] = true
+        try {
+            if (dialog.isShowing) {
+                runCatching { dialog.dismiss() }
+            }
+        } finally {
+            bypassDismissDialogs.remove(dialog)
+        }
+    }
+
+    /**
      * Smoothly slides [sheetView] completely off the bottom of the screen (200ms EASE_STANDARD)
-     * and dismisses [dialog] on completion. Safe against duplicate calls.
+     * while fading its backdrop scrim to 0 in parallel, then dismisses [dialog] on completion.
+     * Safe against duplicate calls and pre-layout invocation.
      */
     fun dismissSheetAnimated(
         sheetView: View,
@@ -263,11 +303,33 @@ object MotionSpec {
         dismissingDialogs[dialog] = true
         onDismissStart()
 
+        val scrim = findSheetScrim(sheetView)
+        scrim?.isClickable = false
+
+        // If dismissed before first draw while still invisible, close immediately without blocking touches
+        if (!sheetView.isLaidOut && sheetView.alpha == 0f) {
+            scrim?.animate()?.cancel()
+            sheetView.animate().cancel()
+            dismissSheetImmediately(dialog)
+            return
+        }
+
+        scrim?.let {
+            it.animate().cancel()
+            it.animate()
+                .alpha(0f)
+                .setDuration(180L)
+                .setInterpolator(EASE_STANDARD)
+                .start()
+        }
+
         sheetView.animate().cancel()
         val offscreenY = if (sheetView.height > 0) {
             sheetView.height.toFloat()
         } else {
-            dp(sheetView.context, 420f)
+            val lpHeight = sheetView.layoutParams?.height?.takeIf { it > 0 } ?: 0
+            val screenH = sheetView.resources.displayMetrics.heightPixels
+            maxOf(lpHeight, screenH).toFloat()
         }
         sheetView.animate()
             .translationY(offscreenY)
@@ -277,7 +339,7 @@ object MotionSpec {
                 bypassDismissDialogs[dialog] = true
                 try {
                     if (dialog.isShowing) {
-                        dialog.dismiss()
+                        runCatching { dialog.dismiss() }
                     }
                 } finally {
                     bypassDismissDialogs.remove(dialog)
@@ -290,7 +352,7 @@ object MotionSpec {
     /**
      * Attaches physical 1:1 vertical swipe-to-dismiss to a bottom sheet dialog:
      * - Dragging down on the sheet/handle bar (or on [scrollView] when `scrollY <= 0`) translates
-     *   [sheetView] downward 1:1 and fades the window dim proportionally.
+     *   [sheetView] downward 1:1 and fades the scrim proportionally with zero window-manager jank.
      * - Releasing past 110dp OR with downward velocity > 1100px/s smoothly slides off-screen and
      *   dismisses; otherwise springs back smoothly to 0 in 240ms.
      * - Back key also triggers [dismissSheetAnimated].
@@ -312,10 +374,15 @@ object MotionSpec {
         var velocityTracker: VelocityTracker? = null
 
         fun updateDimForOffset(dy: Float) {
-            val win = dialog.window ?: return
             val h = if (sheetView.height > 0) sheetView.height.toFloat() else dp(sheetView.context, 420f)
             val progress = (dy / h).coerceIn(0f, 1f)
-            win.setDimAmount((baseDim * (1f - progress * 0.85f)).coerceAtLeast(0f))
+            val scrim = findSheetScrim(sheetView)
+            if (scrim != null) {
+                scrim.animate().cancel()
+                scrim.alpha = (1f - progress).coerceIn(0f, 1f)
+            } else {
+                dialog.window?.setDimAmount((baseDim * (1f - progress * 0.85f)).coerceAtLeast(0f))
+            }
         }
 
         fun finishDrag() {
@@ -336,10 +403,21 @@ object MotionSpec {
                 sheetView.animate().cancel()
                 sheetView.animate()
                     .translationY(0f)
+                    .alpha(1f)
                     .setDuration(240L)
                     .setInterpolator(EASE_OUT_EXPO)
                     .start()
-                dialog.window?.setDimAmount(baseDim)
+                val scrim = findSheetScrim(sheetView)
+                if (scrim != null) {
+                    scrim.animate().cancel()
+                    scrim.animate()
+                        .alpha(1f)
+                        .setDuration(220L)
+                        .setInterpolator(EASE_OUT_EXPO)
+                        .start()
+                } else {
+                    dialog.window?.setDimAmount(baseDim)
+                }
             }
         }
 
@@ -362,6 +440,7 @@ object MotionSpec {
                         dragging = true
                         downRawY = event.rawY
                         sheetView.animate().cancel()
+                        sheetView.alpha = 1f
                     }
                     if (dragging) {
                         val dy = (event.rawY - downRawY).coerceAtLeast(0f)
@@ -399,6 +478,7 @@ object MotionSpec {
                         dragging = true
                         downRawY = event.rawY
                         sheetView.animate().cancel()
+                        sheetView.alpha = 1f
                     }
                     if (dragging) {
                         val dy = (event.rawY - downRawY).coerceAtLeast(0f)
@@ -587,11 +667,14 @@ object MotionSpec {
         pillColor: Int,
         activeTextColor: Int,
         inactiveTextColor: Int,
+        trackStrokeColor: Int = Color.TRANSPARENT,
+        pillStrokeColor: Int = Color.TRANSPARENT,
         onSelect: (Int) -> Unit
     ): FrameLayout {
         val count = labels.size.coerceAtLeast(1)
         var selectedIndex = initial.coerceIn(0, count - 1)
         var tabWidth = 0f
+        val strokePx = dpInt(context, 0.9f).coerceAtLeast(1)
 
         val pad = dpInt(context, 3f)
         val container = FrameLayout(context).apply {
@@ -600,6 +683,9 @@ object MotionSpec {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(context, 12f)
                 setColor(bgColor)
+                if (trackStrokeColor != Color.TRANSPARENT) {
+                    setStroke(strokePx, trackStrokeColor)
+                }
             }
         }
 
@@ -608,6 +694,9 @@ object MotionSpec {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dp(context, 9f)
                 setColor(pillColor)
+                if (pillStrokeColor != Color.TRANSPARENT) {
+                    setStroke(strokePx, pillStrokeColor)
+                }
             }
         }
         container.addView(

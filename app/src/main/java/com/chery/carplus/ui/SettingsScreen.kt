@@ -1063,8 +1063,19 @@ class SettingsScreen(
     }
 
     private fun showAppUpdateSheet() {
-        updateSheetDialog?.dismiss()
-        val dialog = Dialog(activity, R.style.Theme_CarPlus_BottomSheetDialog)
+        updateSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
+        updateSheetDialog = null
+        var sheetRef: View? = null
+        val dialog = object : Dialog(activity, R.style.Theme_CarPlus_BottomSheetDialog) {
+            override fun dismiss() {
+                val target = sheetRef
+                if (!isShowing || target == null || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
+                    return
+                }
+                MotionSpec.dismissSheetAnimated(target, this)
+            }
+        }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
 
         val sheet = LinearLayout(activity).apply {
@@ -1076,6 +1087,7 @@ class SettingsScreen(
             }
             setPadding(dp(20), dp(12), dp(20), dp(24))
         }
+        sheetRef = sheet
 
         // Top drag handle
         val handle = View(activity).apply {
@@ -1626,7 +1638,7 @@ class SettingsScreen(
     internal fun dismissTransientOverlays() {
         activeConfirmDialog?.dismiss()
         activeConfirmDialog = null
-        updateSheetDialog?.dismiss()
+        updateSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         updateSheetDialog = null
         activeDropdown?.dismiss()
         activeDropdown = null

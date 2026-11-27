@@ -515,9 +515,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         PassiveEntryWakeManager.enableForVehicle(this, profile)
                     }
                 }
-                Toast.makeText(this, "已完成系统伴随设备关联", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "已完成系统设备关联", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "已取消伴随设备关联，将继续使用 PendingIntent 后台扫描", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "已取消设备关联，将继续使用后台省电监听", Toast.LENGTH_SHORT).show()
             }
             securityPassiveRefreshCallback?.invoke()
             if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
@@ -1181,7 +1181,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         if (syncDismiss != null) {
             syncDismiss()
         } else {
-            appDialog?.dismiss()
+            appDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         }
         appDialog = null
     }
@@ -2971,12 +2971,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
         content.addView(AppComponents.createHairline(this, startInsetDp = 58))
 
-        // Row 1b: 蓝牙无感解锁/上锁 (PendingIntent + CompanionDeviceManager; prerequisite-gated before enable)
+        // Row 1b: 蓝牙无感 (prerequisite-gated before enable)
         val passiveSwitch = ToggleSwitch(this)
         val passiveRow = AppComponents.createListRow(
             context = this,
             icon = AppIconType.RADAR,
-            title = "蓝牙无感解锁/上锁",
+            title = "蓝牙无感",
             subtitle = "检查前置条件中...",
             trailingView = passiveSwitch,
             showChevron = false
@@ -3012,7 +3012,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         if (cfg.autoUnlockEnabled) add("解锁")
                         if (cfg.autoLockEnabled) add("上锁")
                     }.joinToString("/").ifBlank { "仅监听" }
-                    "$modeBits · ${snap.state.label}"
+                    val stateLabel = if (snap.state == com.chery.carplus.ble.PassiveState.PAUSED_FOREGROUND) {
+                        if (bleConnected || bleController.isSessionReady()) "已连接" else "监听中"
+                    } else {
+                        snap.state.label
+                    }
+                    "$modeBits · $stateLabel"
                 }
                 report.allRequiredSatisfied ->
                     "靠近解锁 · 离车上锁"
@@ -3045,7 +3050,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             } else {
                 AppComponents.showConfirmDialog(
                     context = this@MainActivity,
-                    title = "关闭蓝牙无感解锁/上锁",
+                    title = "关闭蓝牙无感",
                     message = "关闭后将停止靠近解锁与离车上锁。",
                     confirmText = "确认关闭",
                     cancelText = "取消",
@@ -3056,7 +3061,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     PassiveEntryWakeManager.disable(this@MainActivity, profile.bleMac)
                     passiveSwitch.setChecked(false, animate = true)
                     refreshPassiveEntrySecurityRow()
-                    Toast.makeText(this@MainActivity, "已关闭蓝牙无感解锁/上锁", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "已关闭蓝牙无感", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -3643,13 +3648,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val isConnecting = !isBleReady && (bleNearby || bleController.isVehicleNearby)
         val keyReady = hasCompleteKeyMaterial(profile)
         return when {
-            isBleReady -> {
-                val rssi = bleController.lastProximityRssi?.let { " · $it dBm" }.orEmpty()
-                "BLE 近场直连中$rssi · 无感控车已就绪"
-            }
-            isConnecting -> "附近车辆已发现 · 正在自动建立加密蓝牙会话"
-            keyReady -> "本地数字钥匙已就绪 · 靠近车辆自动连接"
-            else -> "数字钥匙待同步 · 点击首页蓝牙图标可自动同步"
+            isBleReady -> "手机钥匙已连接 · 靠近控车已就绪"
+            isConnecting -> "已发现附近车辆 · 正在连接手机钥匙"
+            keyReady -> "数字钥匙已就绪 · 靠近车辆自动连接"
+            else -> "数字钥匙待同步 · 点击首页蓝牙图标可同步"
         }
     }
 
@@ -3985,8 +3987,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun onChannelBadgeTapped() {
         val profile = profileStore.getActiveProfile()
         if (bleConnected || bleController.isSessionReady()) {
-            val rssi = bleController.lastProximityRssi?.let { " · $it dBm" }.orEmpty()
-            showHomeStatus("蓝牙数字钥匙已直连$rssi")
+            showHomeStatus("手机钥匙已连接")
             return
         }
         if (profile.vin.isBlank()) {
@@ -4515,10 +4516,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
         val isBleReady = bleConnected || bleController.isSessionReady()
-        val rssiText = bleController.lastProximityRssi?.let { " ($it dBm)" }.orEmpty()
+        val signalDesc = bleController.lastProximityRssi?.let { rssi ->
+            when {
+                rssi >= -65 -> "（信号强）"
+                rssi >= -80 -> "（信号良好）"
+                else -> "（信号较弱）"
+            }
+        }.orEmpty()
         val bleChannelText = when {
-            isBleReady -> "BLE 已连接$rssiText"
-            bleNearby || bleController.isVehicleNearby -> "附近已发现$rssiText"
+            isBleReady -> "蓝牙已连接$signalDesc"
+            bleNearby || bleController.isVehicleNearby -> "附近已发现车辆"
             else -> "未连接（远程网络）"
         }
         val keyValidityText = when {
@@ -4585,7 +4592,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             ),
             "连接与数字钥匙" to listOf(
                 "云端在线状态" to onlineText,
-                "BLE 通道与信号" to bleChannelText,
+                "蓝牙连接状态" to bleChannelText,
                 "数字钥匙有效期" to keyValidityText,
                 "车辆识别码 (VIN)" to maskedVin(profile.vin),
                 "最近同步时间" to (t?.time?.takeIf { it.isNotBlank() } ?: "--")
@@ -4835,8 +4842,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         when {
             isBleReady -> {
                 securityDotView?.state = StatusDotView.State.CONNECTED
-                val rssi = bleController.lastProximityRssi?.let { " · $it dBm" }.orEmpty()
-                securityRowSubtitle?.text = "手机钥匙已连接 (BLE 直连)$rssi"
+                securityRowSubtitle?.text = "手机钥匙已连接 · 蓝牙直连"
                 channelBadgeIcon?.apply {
                     iconType = AppIconType.BLUETOOTH_ICON
                     contentDescription = "蓝牙通道已连接"
@@ -5581,21 +5587,35 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         var passVent = !passHeat && t?.pSeatVentilateState == "1"
         val airTypeInt = uiPrefs.getString(KEY_AIR_TYPE, "1").orEmpty().toIntOrNull()?.coerceIn(0, 1) ?: 1
 
-        showBottomSheet("温度与座舱舒适") { sheet, dialog ->
+        showBottomSheet("空调") { sheet, dialog ->
+            // Compact status line with colored StatusDotView anchor
+            val statusRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            statusRow.addView(
+                StatusDotView(this).apply {
+                    state = if (acActive) StatusDotView.State.CONNECTED else StatusDotView.State.IDLE
+                },
+                LinearLayout.LayoutParams(dp(10), dp(10)).apply { marginEnd = dp(7) }
+            )
             val sub = buildString {
-                append(if (acActive) "空调运行中" else "空调已关闭")
+                append(if (acActive) "运行中" else "已关闭")
                 if (cabin != null) append("  ·  车内 ${cabin.roundToInt()}°C")
             }
-            sheet.addView(text(sub, 13f, TEXT_SECONDARY).apply {
-                layoutParams = lp(top = dp(6))
-            })
+            statusRow.addView(text(sub, 13f, TEXT_SECONDARY))
+            sheet.addView(statusRow, lp(top = dp(6), bottom = dp(14)))
 
+            // Elevated hero temperature card
+            val heroCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(16), dp(16), dp(14))
+                background = rounded(ThemeTokens.BG_CARD_ELEVATED, 14f, ThemeTokens.BORDER_SUBTLE, 0.9f)
+            }
             val stepper = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
             }
-            sheet.addView(stepper, lp(top = dp(18), bottom = dp(14)))
-
             val minus = sheetCircleButton("−") {
                 AppHaptics.perform(sheetClimateTempView, HapticLevel.LIGHT_TICK)
                 climateTemperatureCelsius = (climateTemperatureCelsius - 0.5).coerceAtLeast(minTemp)
@@ -5603,6 +5623,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             sheetClimateTempView = text(formatTemp(climateTemperatureCelsius), 34f, TEXT_PRIMARY, Typeface.BOLD).apply {
                 gravity = Gravity.CENTER
+                fontFeatureSettings = "tnum"
                 setPadding(dp(26), 0, dp(26), 0)
             }
             val plus = sheetCircleButton("+") {
@@ -5610,43 +5631,135 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 climateTemperatureCelsius = (climateTemperatureCelsius + 0.5).coerceAtMost(maxTemp)
                 sheetClimateTempView?.text = formatTemp(climateTemperatureCelsius)
             }
-            stepper.addView(minus, LinearLayout.LayoutParams(dp(48), dp(48)))
+            stepper.addView(minus, LinearLayout.LayoutParams(dp(44), dp(44)))
             stepper.addView(sheetClimateTempView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-            stepper.addView(plus, LinearLayout.LayoutParams(dp(48), dp(48)))
+            stepper.addView(plus, LinearLayout.LayoutParams(dp(44), dp(44)))
+            heroCard.addView(stepper, lp(bottom = dp(14)))
 
-            // Runtime duration selector (5 / 10 / 15 min -> 300D)
-            val durRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            val durViews = mutableListOf<Pair<Int, TextView>>()
-            listOf(5, 10, 15).forEachIndexed { idx, mins ->
-                val chip = text("${mins} 分钟", 12.5f, TEXT_PRIMARY, Typeface.BOLD).apply {
-                    gravity = Gravity.CENTER
-                    isClickable = true
-                    isFocusable = true
-                    setOnClickListener {
-                        selectedDuration = mins
-                        durViews.forEach { (m, tv) ->
-                            val on = m == selectedDuration
-                            tv.background = rounded(if (on) ThemeTokens.ACCENT_BLUE else TILE_BG, 9f)
-                            tv.setTextColor(if (on) TEXT_PRIMARY else TEXT_SECONDARY)
-                        }
-                    }
+            // Recessed runtime duration sliding segmented bar (5 / 10 / 15 min)
+            val durations = listOf(5, 10, 15)
+            val durSegBar = MotionSpec.createSlidingSegmentedBar(
+                context = this,
+                labels = durations.map { "${it} 分钟" },
+                initial = durations.indexOf(selectedDuration).coerceAtLeast(0),
+                bgColor = ThemeTokens.SEGMENT_TRACK,
+                pillColor = ThemeTokens.SEGMENT_PILL,
+                activeTextColor = ThemeTokens.TEXT_PRIMARY,
+                inactiveTextColor = ThemeTokens.TEXT_SUB,
+                trackStrokeColor = ThemeTokens.SEGMENT_TRACK_BORDER,
+                pillStrokeColor = ThemeTokens.SEGMENT_PILL_BORDER
+            ) { idx ->
+                selectedDuration = durations.getOrElse(idx) { 10 }
+            }
+            heroCard.addView(durSegBar, lp())
+            sheet.addView(heroCard, lp(bottom = dp(14)))
+
+            // Clean 2-button primary action bar (Start/Apply + Off)
+            val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val startBtn = primaryActionButton(if (acActive) "更新空调设定" else "开启空调") {
+                val extra = buildMap {
+                    put("airType", airTypeInt.toString())
+                    put("controlTime", selectedDuration.toString())
+                    if (airPm) put("airPM", "1")
+                    if (frontDefrost) put("frontDefrost", "1")
+                    if (rearDefrost) put("rearDefrost", "1")
+                    if (driverHeat) put("driverHeating", "1")
+                    if (passHeat) put("passengerHeating", "1")
+                    if (driverVent) put("driverVent", "1")
+                    if (passVent) put("passengerVent", "1")
                 }
-                durViews += mins to chip
-                durRow.addView(chip, LinearLayout.LayoutParams(0, dp(36), 1f).apply {
-                    if (idx > 0) marginStart = dp(8)
-                })
+                dialog.dismiss()
+                dispatchSmartVehicleCommand(
+                    "ac_on",
+                    "开启空调 (${formatTemp(climateTemperatureCelsius)})",
+                    temperatureCelsius = climateTemperatureCelsius,
+                    extraParams = extra
+                )
             }
-            durViews.forEach { (m, tv) ->
-                val on = m == selectedDuration
-                tv.background = rounded(if (on) ThemeTokens.ACCENT_BLUE else TILE_BG, 9f)
-                tv.setTextColor(if (on) TEXT_PRIMARY else TEXT_SECONDARY)
+            val offBtn = secondaryActionButton("关闭空调") {
+                dialog.dismiss()
+                dispatchSmartVehicleCommand("ac_off", "关闭空调", extraParams = mapOf("airType" to airTypeInt.toString()))
             }
-            sheet.addView(durRow, lp(bottom = dp(12)))
+            actionRow.addView(startBtn, LinearLayout.LayoutParams(0, dp(46), 1.35f))
+            actionRow.addView(offBtn, LinearLayout.LayoutParams(0, dp(46), 0.9f).apply { marginStart = dp(10) })
+            sheet.addView(actionRow, lp(bottom = dp(14)))
 
-            // Cabin comfort toggle chips (defrost / air purification / seat heating & ventilation)
+            // Divider before clean collapsible comfort & schedule rows
+            sheet.addView(View(this).apply {
+                setBackgroundColor(ThemeTokens.DIVIDER)
+            }, LinearLayout.LayoutParams(MATCH_PARENT, dpF(0.7f).roundToInt().coerceAtLeast(1)))
+
+            // Collapsible "座舱舒适项" row (collapsed by default to keep sheet calm & uncluttered)
+            var comfortExpanded = false
+            val comfortSummaryTv = text("", 12.5f, TEXT_SECONDARY).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            fun updateComfortSummary() {
+                val activeLabels = buildList {
+                    if (frontDefrost) add("除霜")
+                    if (rearDefrost) add("后挡加热")
+                    if (airPm) add("净化")
+                    if (driverHeat || passHeat) add("座椅加热")
+                    if (driverVent || passVent) add("座椅通风")
+                }
+                comfortSummaryTv.text = when {
+                    activeLabels.isEmpty() -> "未选"
+                    activeLabels.size <= 2 -> activeLabels.joinToString(" · ")
+                    else -> "已选 ${activeLabels.size} 项"
+                }
+                comfortSummaryTv.setTextColor(if (activeLabels.isNotEmpty()) ACCENT_BLUE else TEXT_SECONDARY)
+            }
+            updateComfortSummary()
+
+            val comfortChevron = AppIconView(this, AppIconType.CHEVRON_DOWN, Color.parseColor("#6B707D"))
+            val comfortPanel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                visibility = View.GONE
+                setPadding(0, dp(4), 0, dp(10))
+            }
+
+            val comfortHeaderRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(13), 0, dp(13))
+                isClickable = true
+                isFocusable = true
+                MotionSpec.attachPressPhysics(this, pressedScale = 0.985f, haptic = false)
+                setOnClickListener {
+                    AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
+                    comfortExpanded = !comfortExpanded
+                    comfortPanel.visibility = if (comfortExpanded) View.VISIBLE else View.GONE
+                    comfortChevron.animate()
+                        .rotation(if (comfortExpanded) 180f else 0f)
+                        .setDuration(200L)
+                        .setInterpolator(MotionSpec.EASE_OUT_EXPO)
+                        .start()
+                }
+            }
+            comfortHeaderRow.addView(
+                AppIconView(this, AppIconType.FAN_BLADE, TEXT_PRIMARY),
+                LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(12) }
+            )
+            comfortHeaderRow.addView(
+                text("座舱舒适项", 15f, TEXT_PRIMARY),
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            )
+            comfortHeaderRow.addView(
+                comfortSummaryTv,
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginEnd = dp(6) }
+            )
+            comfortHeaderRow.addView(comfortChevron, LinearLayout.LayoutParams(dp(16), dp(16)))
+            sheet.addView(comfortHeaderRow, lp())
+
             fun styleComfortChip(tv: TextView, active: Boolean) {
-                tv.background = rounded(if (active) TILE_ACTIVE_BG else TILE_BG, 10f, if (active) ACCENT_BLUE else Color.TRANSPARENT, if (active) 1f else 0f)
-                tv.setTextColor(if (active) TEXT_PRIMARY else TEXT_SECONDARY)
+                tv.background = rounded(
+                    if (active) TILE_ACTIVE_BG else ThemeTokens.BTN_SECONDARY,
+                    10f,
+                    if (active) ACCENT_BLUE else ThemeTokens.BTN_SECONDARY_BORDER,
+                    0.9f
+                )
+                tv.setTextColor(if (active) TEXT_PRIMARY else TEXT_BODY)
             }
 
             lateinit var driverHeatChip: TextView
@@ -5657,10 +5770,18 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             fun makeChip(label: String, initial: Boolean, onTap: (TextView) -> Unit): TextView =
                 text(label, 12.5f, TEXT_PRIMARY).apply {
                     gravity = Gravity.CENTER
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(dp(4), 0, dp(4), 0)
                     isClickable = true
                     isFocusable = true
                     styleComfortChip(this, initial)
-                    setOnClickListener { onTap(this) }
+                    MotionSpec.attachPressPhysics(this, pressedScale = 0.96f, haptic = false)
+                    setOnClickListener {
+                        AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
+                        onTap(this)
+                        updateComfortSummary()
+                    }
                 }
 
             val rowA = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -5679,7 +5800,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             rowA.addView(frontDefrostChip, LinearLayout.LayoutParams(0, dp(36), 1f))
             rowA.addView(rearDefrostChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(8) })
             rowA.addView(airPmChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(8) })
-            sheet.addView(rowA, lp(bottom = dp(8)))
+            comfortPanel.addView(rowA, lp(bottom = dp(8)))
 
             val rowB = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             driverHeatChip = makeChip("主驾加热", driverHeat) { tv ->
@@ -5718,16 +5839,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             rowB.addView(passHeatChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
             rowB.addView(driverVentChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
             rowB.addView(passVentChip, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginStart = dp(6) })
-            sheet.addView(rowB, lp(bottom = dp(12)))
+            comfortPanel.addView(rowB, lp(bottom = dp(10)))
 
-            // Cabin auto ventilation toggle (zyhl 975) + Travel schedule shortcut (143 + 1111)
             val extrasRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(2), dp(4), dp(2), dp(12))
+                setPadding(dp(2), dp(4), dp(2), dp(2))
             }
             val autoAirInitial = uiPrefs.getString(KEY_OPEN_AIR, "0") == "1"
-            extrasRow.addView(text("座舱自动换气", 13.5f, TEXT_PRIMARY), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+            extrasRow.addView(text("座舱自动换气", 13.5f, TEXT_BODY), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
             val autoAirSwitch = ToggleSwitch(this).apply {
                 setChecked(autoAirInitial, animate = false)
                 onToggleAttempt = { target ->
@@ -5750,43 +5870,43 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 }
             }
             extrasRow.addView(autoAirSwitch)
-            sheet.addView(extrasRow)
+            comfortPanel.addView(extrasRow)
+            sheet.addView(comfortPanel, lp())
 
-            sheet.addView(primaryActionButton("开启空调") {
-                val extra = buildMap {
-                    put("airType", airTypeInt.toString())
-                    put("controlTime", selectedDuration.toString())
-                    if (airPm) put("airPM", "1")
-                    if (frontDefrost) put("frontDefrost", "1")
-                    if (rearDefrost) put("rearDefrost", "1")
-                    if (driverHeat) put("driverHeating", "1")
-                    if (passHeat) put("passengerHeating", "1")
-                    if (driverVent) put("driverVent", "1")
-                    if (passVent) put("passengerVent", "1")
+            // Aligned bottom hairline + "预约出行" row
+            sheet.addView(View(this).apply {
+                setBackgroundColor(ThemeTokens.DIVIDER)
+            }, LinearLayout.LayoutParams(MATCH_PARENT, dpF(0.7f).roundToInt().coerceAtLeast(1)))
+
+            val scheduleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(13), 0, dp(4))
+                isClickable = true
+                isFocusable = true
+                MotionSpec.attachPressPhysics(this, pressedScale = 0.985f, haptic = false)
+                setOnClickListener {
+                    dialog.dismiss()
+                    featureSheets.showTravelScheduleSheet(
+                        profile = profileStore.getActiveProfile(),
+                        airType = airTypeInt,
+                        resolvePin = { desc, cb -> resolveVehiclePinForAction(desc, cb) }
+                    )
                 }
-                dialog.dismiss()
-                dispatchSmartVehicleCommand(
-                    "ac_on",
-                    "开启空调 (${formatTemp(climateTemperatureCelsius)})",
-                    temperatureCelsius = climateTemperatureCelsius,
-                    extraParams = extra
-                )
-            }, lp(height = dp(48)))
-
-            val bottomBtns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            bottomBtns.addView(secondaryActionButton("关闭空调") {
-                dialog.dismiss()
-                dispatchSmartVehicleCommand("ac_off", "关闭空调", extraParams = mapOf("airType" to airTypeInt.toString()))
-            }, weightedLp(0, dp(46)))
-            bottomBtns.addView(secondaryActionButton("预约出行") {
-                dialog.dismiss()
-                featureSheets.showTravelScheduleSheet(
-                    profile = profileStore.getActiveProfile(),
-                    airType = airTypeInt,
-                    resolvePin = { desc, cb -> resolveVehiclePinForAction(desc, cb) }
-                )
-            }, weightedLp(dp(10), dp(46)))
-            sheet.addView(bottomBtns, lp(top = dp(10)))
+            }
+            scheduleRow.addView(
+                AppIconView(this, AppIconType.CLOCK, TEXT_PRIMARY),
+                LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(12) }
+            )
+            scheduleRow.addView(
+                text("预约出行", 15f, TEXT_PRIMARY),
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            )
+            scheduleRow.addView(
+                AppIconView(this, AppIconType.CHEVRON_RIGHT, Color.parseColor("#6B707D")),
+                LinearLayout.LayoutParams(dp(16), dp(16))
+            )
+            sheet.addView(scheduleRow, lp())
         }
     }
 
@@ -5799,8 +5919,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val bleReady = bleConnected || bleController.isSessionReady()
         val lines = mutableListOf<String>()
         lines += when {
-            bleReady -> "通道状态：手机钥匙已连接（BLE 近场直连）"
-            bleNearby || bleController.isVehicleNearby -> "通道状态：发现附近车辆，正在建立蓝牙会话..."
+            bleReady -> "通道状态：手机钥匙已连接（蓝牙直连）"
+            bleNearby || bleController.isVehicleNearby -> "通道状态：发现附近车辆，正在建立蓝牙连接..."
             else -> "通道状态：手机钥匙已断开连接（当前使用远程网络）"
         }
         lines += if (ready) {
@@ -6481,8 +6601,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         AppHaptics.perform(triggerView, HapticLevel.LIGHT_TICK)
         if (bleConnected || bleController.isSessionReady()) {
-            val rssi = bleController.lastProximityRssi?.let { " ($it dBm)" }.orEmpty()
-            showHomeStatus("手机钥匙已连接 (BLE 直连)$rssi")
+            showHomeStatus("手机钥匙已连接")
             return
         }
         val profile = profileStore.getActiveProfile()
@@ -6605,7 +6724,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             if (isBleConnected) {
                 lastPairingPin = ""
                 dismissTopPairingPinDrawer()
-                showHomeStatus("手机钥匙已连接 (BLE 直连)")
+                showHomeStatus("手机钥匙已连接")
             }
             PassiveEntryRuntime.reportForegroundBleRssi(rssi, isBleConnected)
             securityPassiveRefreshCallback?.invoke()
@@ -6734,7 +6853,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         runCatching {
                             companionAssocLauncher.launch(IntentSenderRequest.Builder(sender).build())
                         }.onFailure {
-                            Toast.makeText(this, "拉起系统伴随设备关联失败", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, "拉起系统设备关联失败", Toast.LENGTH_SHORT).show()
                         }
                     },
                     onAlreadyAssociated = {
@@ -6743,7 +6862,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             val cfg = PassiveEntryStore.load(this, profile.vin)
                             PassiveEntryStore.save(this, cfg.copy(cdmAssociatedMac = mac))
                         }
-                        Toast.makeText(this, "已完成系统伴随设备关联", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "已完成系统设备关联", Toast.LENGTH_SHORT).show()
                         passiveEntrySheets.refreshIfOpen()
                         securityPassiveRefreshCallback?.invoke()
                     },
@@ -7033,7 +7152,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     override fun onError(message: String, throwable: Throwable?) {
         runOnUiThread {
             if (currentScreen == Screen.HOME) {
-                showHomeStatus(message.take(100))
+                val friendly = when {
+                    message.contains("GATT", ignoreCase = true) ||
+                        message.contains("BLE 握手", ignoreCase = true) ||
+                        message.contains("AES-CMAC", ignoreCase = true) ->
+                        "蓝牙钥匙连接中断，已切换远程网络"
+                    message.contains("BLE", ignoreCase = true) ->
+                        "蓝牙扫描异常，请确认手机蓝牙已开启"
+                    else -> message.take(60)
+                }
+                showHomeStatus(friendly)
             }
         }
     }
@@ -7091,21 +7219,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         title: String,
         buildContent: (LinearLayout, android.app.Dialog) -> Unit
     ) {
-        appDialog?.dismiss()
+        dismissAppDialogImmediately()
         sheetClimateTempView = null
         sheetKeyStatusView = null
         sheetKeyActionButton = null
 
-        var exitAnimStarted = false
+        var bypassImmediate = false
         var sheetRootView: View? = null
         val dialog = object : android.app.Dialog(this@MainActivity, com.chery.carplus.R.style.Theme_CarPlus_BottomSheetDialog) {
             override fun dismiss() {
                 val target = sheetRootView
-                if (!isShowing || target == null || exitAnimStarted || MotionSpec.isBypassingSheetDismiss(this)) {
-                    super.dismiss()
+                if (!isShowing || target == null || bypassImmediate || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
                     return
                 }
-                exitAnimStarted = true
                 MotionSpec.dismissSheetAnimated(target, this) {
                     if (appDialog === this) {
                         applySheetDepthRecede(false)
@@ -7167,8 +7294,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
         }
         dismissAppDialogSync = {
-            exitAnimStarted = true
-            if (dialog.isShowing) dialog.dismiss()
+            bypassImmediate = true
+            outer.animate().cancel()
+            MotionSpec.dismissSheetImmediately(dialog)
         }
         appDialog = dialog
         dialog.show()
@@ -7267,9 +7395,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
     private fun sheetCircleButton(label: String, onClick: () -> Unit): TextView =
-        text(label, 24f, TEXT_PRIMARY, Typeface.BOLD).apply {
+        text(label, 22f, TEXT_PRIMARY, Typeface.BOLD).apply {
             gravity = Gravity.CENTER
-            background = rounded(BTN_SECONDARY, 24f)
+            background = rounded(ThemeTokens.BTN_SECONDARY, 22f, ThemeTokens.BTN_SECONDARY_BORDER, 0.9f)
             isClickable = true
             isFocusable = true
             MotionSpec.attachPressPhysics(this, pressedScale = 0.90f)
