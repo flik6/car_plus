@@ -53,7 +53,7 @@ import kotlin.math.roundToInt
  * number in "关于 Qiri+".
  *
  * Structured into 3 clean layers following DESIGN_SYSTEM.md (Minimalist Automotive Dark):
- * 1. Compact live status overview card (云端 / 蓝牙 / 车辆 / 3D / 模式 + masked identity)
+ * 1. Compact live status overview card (云端 / 蓝牙 / 车辆 / 3D / 无感 + live channel pill + masked identity)
  * 2. Categorized 3-column concentric action grids (状态与同步 / 蓝牙诊断 / 控车测试 / 会话与数据)
  * 3. Sliding-segmented inspection & live log panel (状态快照 / 蓝牙TLV / 运行日志)
  *    with shared-axis transitions, smooth collapsible sections, and filter chips.
@@ -72,7 +72,6 @@ class DebugDiagnosticsScreen(
     private val onRequestBlePermissions: () -> Boolean,
     private val onPreviewPairingDrawer: (pin: String, deviceName: String, address: String) -> Unit,
     private val onBack: () -> Unit,
-    private val isDemoModeProvider: () -> Boolean = { false },
     private val vehicleCountProvider: () -> Int = { 1 },
     private val onRefreshNow: (() -> Unit)? = null,
     private val onFetchVehicles: (() -> Unit)? = null,
@@ -132,7 +131,6 @@ class DebugDiagnosticsScreen(
         val telemetry: VehicleTelemetry?,
         val modelName: String,
         val plateNo: String,
-        val isDemoMode: Boolean,
         val vehicleCount: Int,
         val resolvedModelKey: String,
         val exactModelMatch: Boolean,
@@ -175,9 +173,9 @@ class DebugDiagnosticsScreen(
     private var overviewModelTv: TextView? = null
     private var overviewPlateTv: TextView? = null
     private var overviewCountTv: TextView? = null
-    private var overviewModePill: LinearLayout? = null
-    private var overviewModeDot: View? = null
-    private var overviewModeTv: TextView? = null
+    private var overviewLinkPill: LinearLayout? = null
+    private var overviewLinkDot: View? = null
+    private var overviewLinkTv: TextView? = null
     private var overviewAutoPill: TextView? = null
     private var overviewMetaTv: TextView? = null
     private val statusMetrics = HashMap<String, StatusMetricRefs>()
@@ -254,9 +252,9 @@ class DebugDiagnosticsScreen(
             overviewModelTv = null
             overviewPlateTv = null
             overviewCountTv = null
-            overviewModePill = null
-            overviewModeDot = null
-            overviewModeTv = null
+            overviewLinkPill = null
+            overviewLinkDot = null
+            overviewLinkTv = null
             overviewAutoPill = null
             overviewMetaTv = null
             inspectSegBar = null
@@ -322,25 +320,25 @@ class DebugDiagnosticsScreen(
         leftCluster.addView(countTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         headerRow.addView(leftCluster, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
-        // Mode Badge (正式 / 演示)
-        val modeDot = statusDot(STATUS_GREEN, sizeDp = 6)
-        val modeTv = text("正式", 10.5f, STATUS_GREEN, Typeface.BOLD).apply {
+        // Live Channel Badge (蓝牙直连 / 云端在线 / 待连接)
+        val linkDot = statusDot(STATUS_GREEN, sizeDp = 6)
+        val linkTv = text("待连接", 10.5f, TEXT_MUTED, Typeface.BOLD).apply {
             includeFontPadding = false
         }
-        val modePill = LinearLayout(context).apply {
+        val linkPill = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             isBaselineAligned = false
-            background = pillDrawable(Color.parseColor("#132C24"), Color.parseColor("#1F4B3C"), 12f)
+            background = pillDrawable(TILE_IDLE_BG, TILE_IDLE_STROKE, 12f)
             setPadding(dp(8), 0, dp(8), 0)
-            addView(modeDot, LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(4) })
-            addView(modeTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            addView(linkDot, LinearLayout.LayoutParams(dp(6), dp(6)).apply { marginEnd = dp(4) })
+            addView(linkTv, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         }
-        overviewModeDot = modeDot
-        overviewModeTv = modeTv
-        overviewModePill = modePill
+        overviewLinkDot = linkDot
+        overviewLinkTv = linkTv
+        overviewLinkPill = linkPill
         headerRow.addView(
-            modePill,
+            linkPill,
             LinearLayout.LayoutParams(WRAP_CONTENT, dp(24)).apply { marginStart = dp(8) }
         )
 
@@ -1190,40 +1188,43 @@ class DebugDiagnosticsScreen(
             }
         }
 
-        // Mode pill (正式 / 演示)
-        if (snap.isDemoMode) {
-            overviewModeTv?.text = "演示"
-            overviewModeTv?.setTextColor(STATUS_AMBER)
-            setDotColor(overviewModeDot, STATUS_AMBER)
-            overviewModePill?.background = pillDrawable(Color.parseColor("#332818"), Color.parseColor("#57401C"), 12f)
-        } else {
-            overviewModeTv?.text = "正式"
-            overviewModeTv?.setTextColor(STATUS_GREEN)
-            setDotColor(overviewModeDot, STATUS_GREEN)
-            overviewModePill?.background = pillDrawable(Color.parseColor("#132C24"), Color.parseColor("#1F4B3C"), 12f)
+        // Live channel pill (蓝牙直连 / 云端在线 / 未登录)
+        val cloudOk = snap.profile.accessToken.isNotBlank()
+        val ble = snap.ble
+        when {
+            ble.isSessionReady -> {
+                overviewLinkTv?.text = "蓝牙直连"
+                overviewLinkTv?.setTextColor(STATUS_GREEN)
+                setDotColor(overviewLinkDot, STATUS_GREEN)
+                overviewLinkPill?.background = pillDrawable(Color.parseColor("#132C24"), Color.parseColor("#1F4B3C"), 12f)
+            }
+            cloudOk -> {
+                overviewLinkTv?.text = "云端在线"
+                overviewLinkTv?.setTextColor(ThemeTokens.ACCENT_ACTIVE)
+                setDotColor(overviewLinkDot, ThemeTokens.ACCENT_ACTIVE)
+                overviewLinkPill?.background = pillDrawable(Color.parseColor("#182840"), Color.parseColor("#2A4A73"), 12f)
+            }
+            else -> {
+                overviewLinkTv?.text = "未登录"
+                overviewLinkTv?.setTextColor(ThemeTokens.DANGER)
+                setDotColor(overviewLinkDot, ThemeTokens.DANGER)
+                overviewLinkPill?.background = pillDrawable(Color.parseColor("#331C1E"), Color.parseColor("#5A2A2E"), 12f)
+            }
         }
 
         // Auto-refresh pill & button sync
         syncAutoRefreshControls()
 
         // 5-cell live status strip
-        val cloudOk = snap.isDemoMode || snap.profile.accessToken.isNotBlank()
         updateMetric(
             METRIC_CLOUD,
             label = when {
-                snap.isDemoMode -> "演示"
                 snap.telemetry != null && cloudOk -> "在线"
                 cloudOk -> "就绪"
                 else -> "未登录"
             },
-            dotColor = when {
-                snap.isDemoMode -> STATUS_AMBER
-                cloudOk -> STATUS_GREEN
-                else -> ThemeTokens.DANGER
-            }
+            dotColor = if (cloudOk) STATUS_GREEN else ThemeTokens.DANGER
         )
-
-        val ble = snap.ble
         updateMetric(
             METRIC_BLE,
             label = when {
@@ -1499,7 +1500,6 @@ class DebugDiagnosticsScreen(
         } else {
             val p = profileProvider()
             val msg = when {
-                isDemoModeProvider() -> "演示模式免校验"
                 p.accessToken.isNotBlank() && p.sdkToken.isNotBlank() -> "Token 本地有效"
                 p.accessToken.isNotBlank() -> "AT有效 / SDK缺失"
                 else -> "Token 缺失"
@@ -1596,7 +1596,7 @@ class DebugDiagnosticsScreen(
         val p = snap.profile
         val raw = buildString {
             appendLine("=== Qiri+ Debug Report (Sanitized) ===")
-            appendLine("Mode: ${if (snap.isDemoMode) "DEMO" else "PROD"} (${snap.vehicleCount} vehicles)")
+            appendLine("Vehicles: ${snap.vehicleCount}")
             appendLine("App: v${snap.verName} (Build ${snap.verCode})")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             appendLine("Account: ${formatAccountMobile(p.mobileNo)} / UID=${SensitiveUiText.identifier(p.userId)}")
@@ -1677,7 +1677,6 @@ class DebugDiagnosticsScreen(
             telemetry = telemetry,
             modelName = modelName,
             plateNo = plateNo,
-            isDemoMode = isDemoModeProvider(),
             vehicleCount = vehicleCountProvider().coerceAtLeast(1),
             resolvedModelKey = resolvedKey,
             exactModelMatch = exactMatch,
@@ -1707,7 +1706,7 @@ class DebugDiagnosticsScreen(
         val t = snap.telemetry
         return when (activeTab) {
             InspectTab.SNAPSHOT -> listOf(
-                snap.modelName, snap.plateNo, snap.isDemoMode, snap.vehicleCount,
+                snap.modelName, snap.plateNo, snap.vehicleCount,
                 t?.time, t?.fuelPercent, t?.remainingRangeKm, t?.doorLocked, t?.engineRunning,
                 t?.acOn, t?.trunkOpen, t?.batteryVoltage,
                 ble.stage, ble.scanning, ble.isSessionReady, ble.connectedAddress, ble.currentRssi,
@@ -1815,12 +1814,8 @@ class DebugDiagnosticsScreen(
             }
         }
 
-    private fun formatAccountMobile(raw: String): String {
-        val clean = raw.trim()
-        if (clean.isEmpty()) return SensitiveUiText.MISSING
-        if (clean.equals("demo", ignoreCase = true)) return "demo"
-        return SensitiveUiText.maskPhone(clean, SensitiveUiText.MISSING)
-    }
+    private fun formatAccountMobile(raw: String): String =
+        SensitiveUiText.maskPhone(raw, SensitiveUiText.MISSING)
 
     private fun onlineText(raw: String?): String = when (raw?.trim()?.lowercase(Locale.US)) {
         "1", "true", "online" -> "在线"

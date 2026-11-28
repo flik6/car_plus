@@ -1,276 +1,393 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg_dark"
-    android:orientation="vertical"
     android:padding="@dimen/widget_outer_padding">
 
-    <!-- Top Header: Left Model Name | Right Unified Dual Capsules (exact 24dp height & shared baseline) -->
+    <!-- Logged-In Content: Dual Pills + Hero Range-Only + Frameless 4-Action Dock -->
     <LinearLayout
-        android:id="@+id/widget_header_area"
+        android:id="@+id/widget_content_container"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:baselineAligned="false"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="@dimen/widget_header_inset"
-        android:paddingTop="@dimen/widget_header_inset"
-        android:paddingEnd="@dimen/widget_header_inset">
+        android:layout_height="match_parent"
+        android:orientation="vertical">
 
-        <TextView
-            android:id="@+id/widget_model_name"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:ellipsize="end"
-            android:includeFontPadding="false"
-            android:paddingEnd="8dp"
-            android:singleLine="true"
-            android:text="Qiri+"
-            android:textColor="#FFFFFF"
-            android:textSize="15sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_plate_badge"
-            android:layout_width="wrap_content"
-            android:layout_height="@dimen/widget_pill_height"
-            android:layout_marginEnd="@dimen/widget_pill_gap"
-            android:background="@drawable/widget_pill_bg"
-            android:ellipsize="end"
-            android:fontFeatureSettings="tnum"
-            android:gravity="center"
-            android:includeFontPadding="false"
-            android:paddingStart="@dimen/widget_pill_padding_h"
-            android:paddingEnd="@dimen/widget_pill_padding_h"
-            android:singleLine="true"
-            android:text=""
-            android:textColor="#D1D1D6"
-            android:textSize="10sp"
-            android:visibility="gone" />
-
+        <!-- Top Header: Left Model Name | Right Unified Dual Capsules (exact 24dp height & shared baseline) -->
         <LinearLayout
-            android:id="@+id/widget_btn_refresh"
-            android:layout_width="wrap_content"
-            android:layout_height="@dimen/widget_pill_height"
-            android:background="@drawable/widget_pill_bg"
+            android:id="@+id/widget_header_area"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:baselineAligned="false"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingStart="@dimen/widget_pill_padding_h"
-            android:paddingEnd="@dimen/widget_pill_padding_h">
+            android:paddingStart="@dimen/widget_header_inset"
+            android:paddingTop="@dimen/widget_header_inset"
+            android:paddingEnd="@dimen/widget_header_inset">
 
             <TextView
-                android:id="@+id/widget_update_time"
-                android:layout_width="wrap_content"
-                android:layout_height="match_parent"
-                android:layout_marginEnd="4dp"
-                android:fontFeatureSettings="tnum"
-                android:gravity="center_vertical"
+                android:id="@+id/widget_model_name"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
                 android:includeFontPadding="false"
+                android:paddingEnd="8dp"
                 android:singleLine="true"
-                android:text="待同步"
-                android:textColor="#8E9299"
-                android:textSize="10sp" />
+                android:text="Qiri+"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_plate_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="@dimen/widget_pill_height"
+                android:layout_marginEnd="@dimen/widget_pill_gap"
+                android:background="@drawable/widget_pill_bg"
+                android:ellipsize="end"
+                android:fontFeatureSettings="tnum"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:paddingStart="@dimen/widget_pill_padding_h"
+                android:paddingEnd="@dimen/widget_pill_padding_h"
+                android:singleLine="true"
+                android:text=""
+                android:textColor="#D1D1D6"
+                android:textSize="10sp"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/widget_btn_refresh"
+                android:layout_width="wrap_content"
+                android:layout_height="@dimen/widget_pill_height"
+                android:background="@drawable/widget_pill_bg"
+                android:baselineAligned="false"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="@dimen/widget_pill_padding_h"
+                android:paddingEnd="@dimen/widget_pill_padding_h">
+
+                <TextView
+                    android:id="@+id/widget_update_time"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:layout_marginEnd="4dp"
+                    android:fontFeatureSettings="tnum"
+                    android:gravity="center_vertical"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="待同步"
+                    android:textColor="#8E9299"
+                    android:textSize="10sp" />
+
+                <ImageView
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:layout_gravity="center_vertical"
+                    android:contentDescription="刷新车况"
+                    android:src="@drawable/ic_widget_refresh"
+                    android:tint="#8E9299" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Middle Showcase Row: Left Status & Hero Range | Right Unobstructed Car Preview -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="4dp"
+            android:layout_weight="1"
+            android:baselineAligned="false"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="@dimen/widget_header_inset"
+            android:paddingEnd="@dimen/widget_header_inset">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="0.92"
+                android:orientation="vertical"
+                android:paddingEnd="8dp">
+
+                <TextView
+                    android:id="@+id/widget_status_line"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="状态待同步"
+                    android:textColor="#8E9299"
+                    android:textSize="11.5sp" />
+
+                <TextView
+                    android:id="@+id/widget_fuel_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="5dp"
+                    android:ellipsize="end"
+                    android:fontFeatureSettings="tnum"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="-- km"
+                    android:textColor="#FFFFFF"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/widget_fuel_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:ellipsize="end"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="剩余续航"
+                    android:textColor="#8E9299"
+                    android:textSize="10sp" />
+            </LinearLayout>
 
             <ImageView
-                android:layout_width="12dp"
-                android:layout_height="12dp"
-                android:layout_gravity="center_vertical"
-                android:contentDescription="刷新车况"
-                android:src="@drawable/ic_widget_refresh"
-                android:tint="#8E9299" />
+                android:id="@+id/widget_car_image"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1.28"
+                android:contentDescription="车辆视图"
+                android:scaleType="fitCenter"
+                android:src="@drawable/widget_car_arrizo8" />
+        </LinearLayout>
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginStart="@dimen/widget_header_inset"
+            android:layout_marginEnd="@dimen/widget_header_inset"
+            android:layout_marginBottom="4dp"
+            android:background="#23262D" />
+
+        <!-- Bottom Row: 4 Equal-Width Frameless Labeled Controls (Zero Boxy Frames) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:baselineAligned="false"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/widget_btn_lock"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_lock"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_lock"
+                        android:layout_width="19dp"
+                        android:layout_height="19dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="锁车或解锁"
+                        android:src="@drawable/ic_widget_lock_closed" />
+                </FrameLayout>
+
+                <TextView
+                    android:id="@+id/widget_label_lock"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="解锁"
+                    android:textColor="#8E9299"
+                    android:textSize="10.5sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/widget_btn_ac"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_ac"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_ac"
+                        android:layout_width="19dp"
+                        android:layout_height="19dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="开关空调"
+                        android:src="@drawable/ic_widget_fan" />
+                </FrameLayout>
+
+                <TextView
+                    android:id="@+id/widget_label_ac"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="空调"
+                    android:textColor="#8E9299"
+                    android:textSize="10.5sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/widget_btn_flash"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_flash"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_flash"
+                        android:layout_width="19dp"
+                        android:layout_height="19dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="闪灯寻车"
+                        android:src="@drawable/ic_widget_flash" />
+                </FrameLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="寻车"
+                    android:textColor="#8E9299"
+                    android:textSize="10.5sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/widget_btn_trunk"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null"
+                android:gravity="center"
+                android:orientation="vertical">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_trunk"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_trunk"
+                        android:layout_width="19dp"
+                        android:layout_height="19dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="开关后备箱"
+                        android:src="@drawable/ic_widget_trunk" />
+                </FrameLayout>
+
+                <TextView
+                    android:id="@+id/widget_label_trunk"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:includeFontPadding="false"
+                    android:singleLine="true"
+                    android:text="后备箱"
+                    android:textColor="#8E9299"
+                    android:textSize="10.5sp" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 
-    <!-- Middle Showcase Row: Left Status & Energy | Right Unobstructed Car Preview -->
+    <!-- Logged-Out / Session-Expired Empty State -->
     <LinearLayout
+        android:id="@+id/widget_logged_out_container"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="4dp"
-        android:layout_marginBottom="@dimen/widget_grid_gap"
-        android:layout_weight="1"
+        android:layout_height="match_parent"
         android:baselineAligned="false"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="@dimen/widget_header_inset"
-        android:paddingEnd="@dimen/widget_header_inset">
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:visibility="gone">
 
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:orientation="vertical"
-            android:paddingEnd="12dp">
+            android:paddingEnd="16dp">
 
             <TextView
-                android:id="@+id/widget_status_line"
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:ellipsize="end"
                 android:includeFontPadding="false"
-                android:singleLine="true"
-                android:text="状态待同步"
+                android:text="Qiri+"
                 android:textColor="#8E9299"
-                android:textSize="11.5sp" />
-
-            <TextView
-                android:id="@+id/widget_fuel_text"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:ellipsize="end"
-                android:fontFeatureSettings="tnum"
-                android:includeFontPadding="false"
-                android:singleLine="true"
-                android:text="--% · --km"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp"
+                android:textSize="11.5sp"
                 android:textStyle="bold" />
 
-            <ProgressBar
-                android:id="@+id/widget_fuel_bar"
-                style="?android:attr/progressBarStyleHorizontal"
+            <TextView
+                android:id="@+id/widget_logged_out_title"
                 android:layout_width="match_parent"
-                android:layout_height="4dp"
-                android:layout_marginTop="8dp"
-                android:max="100"
-                android:progress="0"
-                android:progressDrawable="@drawable/widget_fuel_progress" />
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:text="未登录"
+                android:textColor="#FFFFFF"
+                android:textSize="15.5sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_logged_out_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:text="登录账号同步实时车况与远控"
+                android:textColor="#8E9299"
+                android:textSize="11.5sp" />
         </LinearLayout>
 
-        <ImageView
-            android:id="@+id/widget_car_image"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1.15"
-            android:contentDescription="车辆视图"
-            android:scaleType="fitCenter"
-            android:src="@drawable/widget_car_arrizo8" />
+        <TextView
+            android:id="@+id/widget_btn_login"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:background="@drawable/widget_cta_pill_bg"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:singleLine="true"
+            android:text="去登录"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold" />
     </LinearLayout>
 
-    <!-- Bottom Row: 4 Equal-Width Concentric Labeled Controls -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="48dp"
-        android:baselineAligned="false"
-        android:orientation="horizontal">
-
-        <LinearLayout
-            android:id="@+id/widget_btn_lock"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="@dimen/widget_grid_gap"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:id="@+id/widget_icon_lock"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
-                android:contentDescription="锁车或解锁"
-                android:src="@drawable/ic_widget_lock_closed" />
-
-            <TextView
-                android:id="@+id/widget_label_lock"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:includeFontPadding="false"
-                android:singleLine="true"
-                android:text="解锁"
-                android:textColor="#8E9299"
-                android:textSize="10sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/widget_btn_ac"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="@dimen/widget_grid_gap"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:id="@+id/widget_icon_ac"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
-                android:contentDescription="开关空调"
-                android:src="@drawable/ic_widget_fan" />
-
-            <TextView
-                android:id="@+id/widget_label_ac"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:includeFontPadding="false"
-                android:singleLine="true"
-                android:text="空调"
-                android:textColor="#8E9299"
-                android:textSize="10sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/widget_btn_flash"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="@dimen/widget_grid_gap"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:id="@+id/widget_icon_flash"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
-                android:contentDescription="闪灯寻车"
-                android:src="@drawable/ic_widget_flash" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:includeFontPadding="false"
-                android:singleLine="true"
-                android:text="寻车"
-                android:textColor="#8E9299"
-                android:textSize="10sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/widget_btn_trunk"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:id="@+id/widget_icon_trunk"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
-                android:contentDescription="开关后备箱"
-                android:src="@drawable/ic_widget_trunk" />
-
-            <TextView
-                android:id="@+id/widget_label_trunk"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:includeFontPadding="false"
-                android:singleLine="true"
-                android:text="后备箱"
-                android:textColor="#8E9299"
-                android:textSize="10sp" />
-        </LinearLayout>
-    </LinearLayout>
-
-</LinearLayout>
+</FrameLayout>

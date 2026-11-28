@@ -1,6 +1,6 @@
-# Qiri+ Android 设计系统与 UI 工程规范（Design System v3.1）
+# Qiri+ Android 设计系统与 UI 工程规范（Design System v3.2）
 
-> **适用范围**：Qiri+ Android 客户端全量界面、统一车控与 MDI 矢量图标体系、启动图标、车控甲板与长按编辑模式、原生桌面小组件（4 种尺寸）、共享组件套件（`DesignComponents.kt`）、空间连续性与触觉分级（`MotionSpec.kt`）、四类交互容器、多层级导航栈、6 位安全密码、5 行首页信息架构、车辆/驾驶员/地点、手机号与敏感信息脱敏、演示模式（`demo/demo`）、调试诊断界面及系统手动配对规范。
+> **适用范围**：Qiri+ Android 客户端全量界面、统一车控与 MDI 矢量图标体系、启动图标、应用与小组件统一无框车控规范、原生桌面小组件（4 种尺寸、多车型同步、纯续航展示与未登录态）、共享组件套件（`DesignComponents.kt`）、空间连续性与触觉分级（`MotionSpec.kt`）、四类交互容器、多层级导航栈、6 位安全密码、5 行首页信息架构、车辆/驾驶员/地点、手机号与敏感信息脱敏、调试诊断界面及系统手动配对规范。
 > **审美基准**：**Minimalist Automotive Dark（极简暗色汽车美学）** — 深邃中性暗底、克制留白、清晰层级、零装饰线框、高精度同心圆角与网格秩序。
 > **资产边界**：视觉编排仅以行业标杆的克制留白与层级密度为参考；Qiri+ 保留自有 3D GLB 车模、Qiri+ 品牌标识、启动图标、统一单色车控矢量套件及暗色原生实现。
 
@@ -29,7 +29,6 @@
 | `BG_SURFACE` | `#1C1D21` | 底部物理抽屉、居中确认弹窗、小组件遥测数据卡底色 |
 | `BG_POPOVER` | `#202228` | 锚点悬浮下拉菜单、小组件顶部胶囊底色 |
 | `BG_CARD_ELEVATED` | `#252831` | 浮层/次级高亮表面 |
-| `WIDGET_TILE_IDLE` | `#22242A` | 桌面小组件控车按钮常态底色（边框 `0.75dp #2C2F38`） |
 | `BTN_SECONDARY` | `#2B2F3A` | 次级按钮底色（边框 `0.9dp #424858`） |
 | `SEGMENT_TRACK` / `SEGMENT_PILL` | `#13151A` / `#343A48` | 分段控制轨道（边框 `#2D323E`）与滑块（边框 `#4B5368`） |
 | `DIVIDER` | `#282B33` | 应用内 `0.6dp` 列表分割线与未聚焦底线（小组件细线使用 `#262930`） |
@@ -49,7 +48,7 @@
 | 层级 | 背景色 | 描边 / 阴影 | 适用对象 |
 | --- | --- | --- | --- |
 | **L0 画布层** | `#161719` | 无边框、无阴影 | 首页、二级/三级全屏页面、无框列表行 |
-| **L1 卡片/容器层** | `#1C1D21` / `#22242A` | `0.75–1dp` `#262930` / `#2C2F38` | 小组件遥测卡与控车砖、一级车辆/驾驶员概要卡 |
+| **L1 卡片/容器层** | `#1C1D21` | `0.75–1dp` `#262930` | 小组件遥测数据卡、一级车辆/驾驶员概要卡（车控按钮本身保持 L0 无框透底） |
 | **L2 物理抽屉/模态层** | `#1C1D21` | 顶部圆角 `22dp`；同窗 GPU 合成遮罩 `dimAmount 0.58–0.65` | 底部抽屉（`AppBottomSheet`、`SixDigitPinSheet`）、居中确认弹窗（`16dp` 圆角） |
 | **L3 悬浮锚点层** | `#202228` | `0.8dp #2F323B` + `12dp` elevation | 锚点下拉菜单（`AnchoredDropdown`，`12dp` 圆角） |
 
@@ -134,17 +133,12 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 - **进入编辑态**：长按首页顶部 4 枚快捷车控或展开甲板内任意车控按钮 $\rightarrow$ 触发 `HapticLevel.LONG_PRESS_MODE` $\rightarrow$ 自动展开车控甲板并进入编辑态。
 - **退出编辑态**：点击编辑栏右上角 `“完成”` 胶囊（`#3E6AE1`）、下拉收起车控甲板，或触发系统返回键（`exitQuickDeckEditMode()`）。
 
-### 5.2 绝对无方框原则（Frameless Zero-Box Rule）
+### 5.2 全端绝对无方框原则（App + Desktop Widget Unified Frameless Car Control Rule）
 
-车控按钮在常态、按下、长按、编辑态、聚焦态及拖拽态下**严禁出现任何方形/矩形边框、虚线框、填充卡片底色或系统默认矩形焦点高亮**：
+**强制铁律**：无论是**应用内车控栏 / 长按编辑态**，还是**全部 4 款原生桌面小组件（4×1 / 2×2 / 4×2 / 4×3）**，车控按钮在常态、按下、长按、激活、编辑、聚焦及拖拽态下**严禁绘制任何方形或矩形底卡、灰色方块背景、矩形边框、虚线框或系统矩形焦点高亮**：
 
-- `AppComponents.createControlIconButton()` 强制设置：
-  - `background = null`
-  - `foreground = null`
-  - `defaultFocusHighlightEnabled = false`（API 26+）
-  - `clipChildren = false`、`clipToPadding = false`
-- 编辑态中顶部 4 枚槽位与底部候选网格一律保持无框透底，禁用长按二次触发（`isLongClickable = false`）。
-- 底部候选区拖回移除时，**不得**给整个甲板容器绘制矩形外框，而是将编辑栏提示文案高亮为 `#3D9BFF`（`“松手从快捷栏移除”`）。
+- **应用内（`AppComponents.createControlIconButton`）**：强制 `background = null`、`foreground = null`、`defaultFocusHighlightEnabled = false`（API 26+）、`clipChildren = false`、`clipToPadding = false`；编辑态与候选区均保持无框透底，拖回移除时仅将编辑栏提示文案高亮为 `#3D9BFF`（`“松手从快捷栏移除”`）。
+- **桌面小组件（`widget_car_{bar,compact,medium,large}.xml`）**：控车按钮常态 `android:background="@null"` 直接落于暗色画布之上（`19–20dp` `#FFFFFF` 图标 + `10.5sp #8E9299` 标签，热区高度 `>= 44dp`）；激活态仅在图标后方叠放 `32–36dp` **纯圆形（`oval`）** `#3D9BFF` 柔和光晕（`widget_icon_halo_active.xml`：`#263D9BFF` 填充 + `0.75dp #663D9BFF` 细环）并同步将图标与标签着色为 `#3D9BFF`，与端内圆形悬停光晕保持绝对一致的几何语汇。严禁在任何小组件车控按钮上使用圆角矩形或方块底框。
 
 ### 5.3 四列槽位解剖与尺寸规范（Top 4 Bar ↔ Bottom Candidate Grid 1:1 对齐）
 
@@ -172,31 +166,36 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 
 ### 6.1 四款尺寸矩阵
 
-| 规格 | 布局与 Provider | 最小尺寸（`widget_info_*.xml`） | 信息与控件结构 |
+| 规格 | 布局与 Provider | 最小尺寸（`widget_info_*.xml`） | 信息与控件结构（纯续航、无方框车控、多车型联动） |
 | --- | --- | --- | --- |
-| **4×1 极简控车条** | `widget_car_bar.xml` / `CarWidgetBarProvider` | `250 × 56dp`（`resizeMode="horizontal"`） | 左车型+主状态/能源（`weight 1`），右 4 等宽同心图标砖（`weight 1.7`，`20dp` 图标） |
-| **2×2 紧凑车况** | `widget_car_compact.xml` / `CarWidgetCompactProvider` | `130 × 130dp` | 顶栏车型/状态 + 右上 `24dp` 圆形刷新胶囊，中车模 + `4dp` 能源细条，底 2 等宽图标砖（`40dp` 高） |
-| **4×2 经典车控卡** | `widget_car_medium.xml` / `CarWidgetMediumProvider` | `250 × 130dp` | 顶栏车型 + 右上双胶囊（车牌 + 同步时间/刷新），中左状态/续航/进度条 + 右无遮挡车模，底 4 等宽带文字控车砖（`48dp` 高） |
-| **4×3 旗舰仪表盘** | `widget_car_large.xml` / `CarWidgetLargeProvider` | `250 × 210dp` | 顶栏 Row1 车型+双胶囊 & Row2 状态，中展台车模，下统一 3 列遥测数据条，底 5 等宽带文字控车砖（`48dp` 高） |
+| **4×1 极简控车条** | `widget_car_bar.xml` / `CarWidgetBarProvider` | `250 × 56dp`（`resizeMode="horizontal"`） | 左车型+主状态/纯续航（如 `已驻车 · 460 km`）+ 垂直细线，右 4 等宽**无框**图标控车（`20dp` 图标，激活态 `36dp` 圆形光晕） |
+| **2×2 紧凑车况** | `widget_car_compact.xml` / `CarWidgetCompactProvider` | `130 × 130dp` | 顶栏车型/纯续航状态 + 右上 `24dp` 圆形刷新胶囊，中无遮挡实时车型图，细分割线，底 2 等宽**无框**图标控车（`44dp` 高） |
+| **4×2 经典车控卡** | `widget_car_medium.xml` / `CarWidgetMediumProvider` | `250 × 130dp` | 顶栏车型 + 右上双胶囊（车牌 + 同步时间/刷新），中左主状态 + 大字号纯续航（`18sp Bold tnum` 如 `460 km` + `剩余续航` 眉标，无 `%` 与进度条）+ 右无遮挡实时车型图，细分割线，底 4 等宽**无框**带文字控车（`48dp` 高） |
+| **4×3 旗舰仪表盘** | `widget_car_large.xml` / `CarWidgetLargeProvider` | `250 × 210dp` | 顶栏 Row1 车型+双胶囊 & Row2 状态，中展台实时车型图，下统一 3 列遥测数据卡（`剩余续航` / `空调状态` / `总里程`，无 `%`），底 5 等宽**无框**带文字控车（`48dp` 高） |
 
-### 6.2 强制几何、双胶囊与数据栏规范
+### 6.2 强制几何、无框车控、纯续航、多车型与未登录规范
 
 1. **同心圆角与 4dp/8dp 间距（`values/dimens.xml` & `values-v31/dimens.xml`）**：
-   - 全 4 款小组件根节点统一 `android:padding="@dimen/widget_outer_padding"`（`8dp`），网格间距 `@dimen/widget_grid_gap`（`8dp`）。
+   - 全 4 款小组件根节点（`FrameLayout`）统一 `android:padding="@dimen/widget_outer_padding"`（`8dp`），网格间距 `@dimen/widget_grid_gap`（`8dp`）。
    - Pre-API 31：`widget_outer_radius = 24dp`，`widget_inner_radius = 16dp`（$24 - 8 = 16\text{dp}$）；API 31+：`@android:dimen/system_app_widget_background_radius` / `@android:dimen/system_app_widget_inner_radius`。
    - 顶栏设置 `widget_header_inset = 4dp`，使 `24dp` 高右上角胶囊（圆角 `999dp`，实际半径 `12dp`）距外边缘为 $8 + 4 = 12\text{dp}$，满足 $24 - 12 = 12\text{dp}$ 顶部同心。
-2. **右上角双胶囊对齐契约（Medium & Large）**：
-   - `widget_plate_badge`（车牌）与 `widget_btn_refresh`（同步时间 + 刷新图标）必须位于**同一水平单行**（Large 中锁定在 Row 1，禁止跨两行垂直错位）。
-   - 共享严格一致的几何与字阶：`layout_height="@dimen/widget_pill_height"`（`24dp`）、`paddingStart/End="@dimen/widget_pill_padding_h"`（`8dp`）、`layout_marginEnd="@dimen/widget_pill_gap"`（`8dp`，车牌 `GONE` 时自动折叠零残留）、`999dp` 胶囊底（`widget_pill_bg.xml`）、`10sp` `includeFontPadding="false"` `tnum` 文字；`widget_plate_badge` 用 `gravity="center"`，`widget_update_time` 用 `layout_height="match_parent"` + `gravity="center_vertical"` 紧邻居中 `12dp` 刷新图标，确保双胶囊水平中线与文字基线像素级重合。
-   - **强制属性**：所有水平 `LinearLayout` 必须显式声明 `android:baselineAligned="false"`，防止 Android 默认文字基线对齐覆盖 `gravity="center_vertical"` 导致双胶囊上下错位。
-3. **旗舰仪表盘遥测数据栏（Large Telemetry Strip）**：
-   - 承载体 `widget_surface_card`（`#1C1D21`，`0.75dp #262930` 描边，`@dimen/widget_inner_radius`），内含 3 列指标（`油量续航` | `空调状态` | `总里程`）。
-   - **严禁列宽或对齐割裂**：三列严格等权 `layout_weight="1"`，统一居中对齐 `gravity="center_horizontal"`（含所有单元格及其内嵌 `TextView`），统一左右内边距 `6dp`，统一 `1dp × 24dp` `#262930` 垂直细线分隔；标签统一 `10sp #8E9299`，数值统一 `12.5sp Bold #FFFFFF`（空调开启 `#3D9BFF`）+ `tnum` + `4dp` 垂直间距，双基线笔直对齐。
-4. **色彩与动态态一致性（`CarWidgetEngine.kt`）**：
-   - 外壳渐变 `#1A1B1F → #141518`（`1dp #262930` 描边）；控车砖常态 `#22242A`（`0.75dp #2C2F38`），激活态 `#243D9BFF` 填充 + `1dp #803D9BFF` 描边；`COLOR_LABEL_IDLE = #8E9299`，`COLOR_ACTIVE = #3D9BFF`。
-5. **`RemoteViews` 严格兼容性**：
-   - 布局仅允许使用 `@RemoteView` 白名单控件：`LinearLayout`、`FrameLayout`、`TextView`、`ImageView`、`ProgressBar`（分割线必须用 `<FrameLayout>`，**严禁** `<View>`、`Space`、`ConstraintLayout`、`CardView`）。
-   - 图标着色在 XML 使用 `android:tint`、在运行时使用 `RemoteViews.setInt(id, "setColorFilter", color)`。
+2. **全端统一无框车控（严禁方块底框）**：
+   - 彻底移除方形/矩形按钮背景（已删除 `widget_btn_bg.xml` / `widget_btn_bg_active.xml`）；全部小组件控车项常态 `background="@null"`，图标 `#FFFFFF`（`19–20dp`）、标签 `#8E9299`（`10.5sp`）；激活态图标与标签着色 `#3D9BFF` 并在图标后方叠放 `32–36dp` **圆形** `widget_icon_halo_active.xml`（`oval`）。
+3. **纯续航展示原则（Widget Range-Only Rule）**：
+   - 全部 4 款小组件**仅展示剩余续航里程**（如 `460 km` / `-- km`），**严禁出现油量/电量百分比（`%`）或百分比进度条**（已移除 `widget_fuel_progress.xml`）。
+   - `4×1` / `2×2` 状态行展示 `主状态 · 460 km`；`4×2` 中左展示主状态 + `18sp Bold tnum` 续航主值 + `剩余续航`（纯电：`纯电续航`；插混：`综合续航`）；`4×3` 遥测卡首列展示 `剩余续航` / `460 km`。
+4. **多车型实时同步规则（Multi-Vehicle Model Sync）**：
+   - `CarWidgetSnapshot` 持久化 `modelKey`（通过 `VehicleModelRepository.resolveModelKey(modelName)` 解析）；`CarWidgetManager.syncActiveVehicle(...)` 在登录选车或首页切换车辆时**立即**更新 `vin`、`modelKey`、`modelName`、`plateNo` 并清空旧车遥测，同步切换小组件车模渲染（`tiggo8` $\rightarrow$ `widget_car_tiggo8`、`arrizo8` $\rightarrow$ `widget_car_arrizo8`，并支持 `filesDir/widget_models/${modelKey}.png` 扩展缓存图），无需等待慢速轮询。
+5. **未登录 / 登录失效空态规范（Logged-Out & Session-Expired Empty State）**：
+   - 全部 4 款小组件根容器均为 `FrameLayout`，内置互斥双层：`widget_content_container`（登录态）与 `widget_logged_out_container`（未登录/失效态）。
+   - 当无有效云端会话（`accessToken` 为空）、用户退出登录或后台刷新捕获 `401` 会话失效调用 `CarWidgetManager.markLoggedOut(context, expired)` 时，自动隐藏车牌、续航、遥测与车控栏（零隐私泄露、零无效按钮、零假占位数据），展示纯净暗色画布 + 状态文案（`未登录` / `登录已失效`，副标题提示轻触登录）+ 单一 `#3E6AE1` 胶囊按钮（`去登录` / `重新登录`，`widget_cta_pill_bg.xml`），点击整卡或按钮直达登录页。
+6. **右上角双胶囊对齐契约（Medium & Large）**：
+   - `widget_plate_badge` 与 `widget_btn_refresh` 锁定于同一水平单行，共享 `24dp` 高度、`8dp` 水平内边距、`8dp` 间距（车牌 `GONE` 自动折叠）、`999dp` 胶囊底、`10sp tnum` 共享中线与基线；全部水平 `LinearLayout` 强制声明 `android:baselineAligned="false"`。
+7. **旗舰仪表盘遥测数据栏（Large Telemetry Strip）**：
+   - `widget_surface_card`（`#1C1D21`，`0.75dp #262930`，`@dimen/widget_inner_radius`）内三列（`剩余续航` | `空调状态` | `总里程`）严格 `layout_weight="1"`、统一 `center_horizontal` 居中对齐、`1dp × 24dp #262930` 细线分隔与 `tnum` 等宽数字。
+8. **`RemoteViews` 严格兼容性**：
+   - 仅允许 `LinearLayout`、`FrameLayout`、`TextView`、`ImageView`、`ProgressBar`（分割线必须使用 `<FrameLayout>`，严禁 `<View>`、`ConstraintLayout`、`CardView`）。
+   - 图标着色 XML 使用 `android:tint`，运行时使用 `RemoteViews.setInt(id, "setColorFilter", color)`；圆形光晕通过 `setInt(haloId, "setBackgroundResource", if (active) R.drawable.widget_icon_halo_active else 0)` 切换。
 
 ---
 
@@ -318,7 +317,7 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 | 字段 | 统一调用接口与默认掩码规则 | 缺失占位 |
 | --- | --- | --- |
 | **手机号 / 账号手机** | `SensitiveUiText.maskPhone(raw)`：**前 3 后 2，隐藏中间 6 位**（标准 11 位：`13812345678` $\rightarrow$ `138******78`；含 `+86` 前缀保留为 `+86 138******78`；后端返回的旧式 4 星掩码自动重掩为 6 星；非标准长度 $\ge 6$ 保留前 3 后 2，长度 $= 5$ 保留前 2 后 2，长度 $\le 4$ 统一遮为 `••••`） | `""` / `—` |
-| **混合账号名 / 昵称兜底** | `SensitiveUiText.maskIfPhone(raw)`：仅当形似手机号时应用 `maskPhone`，非手机号（如 `demo`、昵称）原样保留 | `""` / `—` |
+| **混合账号名 / 昵称兜底** | `SensitiveUiText.maskIfPhone(raw)`：仅当形似手机号时应用 `maskPhone`，非手机号昵称原样保留 | `""` / `—` |
 | **诊断文本 / 运行日志** | `SensitiveUiText.maskPhonesInText(text)`：对展示、复制、导出的文本中内嵌手机号统一脱敏为 `138******78` | 原文 |
 | 车架号 VIN、发动机号、ICCID、SN | `SensitiveUiText.identifier(raw)`：仅保留末四位 `••••` + 末四位（长度 $\le 4$ 全遮为 `••••`） | `—` |
 | 车主姓名 | `SensitiveUiText.personName(raw)`：仅保留首字，其余遮蔽；单字姓名遮为 `•` | `—` |
@@ -334,17 +333,10 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 3. **凭据零展示**：界面、无障碍、剪贴板、日志均不得展示或推导配对验证码。
 4. **失败可恢复**：取消/超时仅更新提示，不执行破坏性重置。
 
-### 10.5 演示模式规范（Demo Mode · `demo` / `demo`）
-
-- **登录入口**：登录页支持账号 `demo`、密码 `demo`（忽略大小写与首尾空白，自动跳过 11 位手机号格式校验），并在“忘记密码”下方提供克制的单行快捷提示 `“演示账号：demo / demo（点击填入）”`，轻触自动切至密码登录并预填凭据，不增加页面杂乱度。
-- **动态全车型覆盖（N 台演示车）**：演示车库由 `VehicleModelRepository.listSupportedModels(context)` 与 `DemoVehicleBackend` 动态构建，**覆盖应用当前支持的全部 N 款 3D 车型**（随 `manifest.json` 车型扩展自动增长），每台演示车具备独立车型名、演示车牌（`皖B·D0001..D000N`）、17 位演示 VIN 及匹配动力形态（燃油 / 插混 / 纯电）的完整遥测数据，左上角车型切换器可平滑切换全部 N 台车模。
-- **全功能离线可交互**：通过 `CheryHttpClient` 演示处理器钩子覆盖车控（锁车/解锁、空调/温控、闪灯、尾箱、启停、车窗、天窗及 3D 联动）、地点与行程轨迹、电子围栏、驾驶员（手机号严格 `138******78` 脱敏）、消息、OTA、设置与调试诊断，全程零网络/蓝牙报错弹窗。
-- **强账号隔离**：`VehicleProfileStore` 以纯内存演示覆盖层隔离演示会话，绝不覆写、污染或清空本机已持久化的真实用户账号、Token、离线蓝牙密钥与设置；退出演示模式即刻还原真实环境。
-
-### 10.6 调试诊断界面规范（`DebugDiagnosticsScreen.kt`）
+### 10.5 调试诊断界面规范（`DebugDiagnosticsScreen.kt`）
 
 - **言简意赅与视觉秩序**：杜绝长段解释文本与混乱堆叠；全部操作按钮文案控制在 `2–6` 字，数值字段启用 `tnum` 等宽数字，零 Emoji。
 - **三段式信息层级**：
-  1. **顶部实时状态概览卡（`18dp` 圆角，`12dp` 内边距）**：单行抬头展示车型、车牌胶囊、车库台数徽标（`N台`）、模式胶囊（`正式` 绿 / `演示` 琥珀）与可点刷新开关（`实时` / `已暂停`）；中段 5 格语义状态条（`云端` / `蓝牙` / `车辆` / `3D` / `无感`）；底栏脱敏身份摘要（`账号 138******78 · VIN ••••XXXX · vX.Y.Z`）。
+  1. **顶部实时状态概览卡（`18dp` 圆角，`12dp` 内边距）**：单行抬头展示车型、车牌胶囊、车库台数徽标（`N台`）、实时通道胶囊（`蓝牙直连` 绿 / `云端在线` 蓝 / `未登录` 红）与可点刷新开关（`实时` / `已暂停`）；中段 5 格语义状态条（`云端` / `蓝牙` / `车辆` / `3D` / `无感`）；底栏脱敏身份摘要（`账号 138******78 · VIN ••••XXXX · vX.Y.Z`）。
   2. **四组分类操作网格（每组 3 列等宽、`42dp` 高、`10dp` 同心内圆角，共 24 项动作）**：`状态与同步`、`蓝牙诊断`、`控车测试`（复用统一单色车控矢量图标 + `MEDIUM_CONFIRM` 触觉）、`会话与数据`（含校验 Token、同步配置、复制诊断、导出脱敏日志、清空日志、暂停/恢复刷新）。
   3. **底部检视与日志面板（`状态快照` | `蓝牙TLV` | `运行日志`）**：采用 `MotionSpec.createSlidingSegmentedBar` + `transitionContainer` 水平共享轴切换、原地差量刷新（告别定时 `removeAllViews()` 闪烁与丢滚动位置）、折叠快照卡（`animateExpandCollapse`）、6 阶段 GATT 握手胶囊条与日志过滤胶囊（`animatePanelSwitch`），全部展示/复制/导出内容强制经 `SensitiveUiText.maskPhonesInText` 脱敏且不暴露配对 PIN。

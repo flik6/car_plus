@@ -157,50 +157,6 @@ class VehicleProfileStore(context: Context) {
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val lock: Any get() = storeLock
 
-    @Volatile
-    private var demoModeActive: Boolean = false
-    private val demoProfiles: MutableList<VehicleProfile> = mutableListOf()
-    private var demoActiveVin: String = ""
-
-    fun isDemoMode(): Boolean = demoModeActive
-
-    /**
-     * Activates an isolated in-memory profile session for Demo Mode.
-     * Real persisted SharedPreferences profiles, tokens, and BLE keys are never touched.
-     */
-    fun enterDemoMode(profiles: List<VehicleProfile>, activeVin: String = "") = synchronized(lock) {
-        demoProfiles.clear()
-        demoProfiles.addAll(profiles)
-        demoActiveVin = activeVin.trim().uppercase(Locale.US)
-            .takeIf { v -> demoProfiles.any { it.vin.equals(v, ignoreCase = true) } }
-            ?: demoProfiles.firstOrNull()?.vin.orEmpty()
-        demoModeActive = true
-    }
-
-    /**
-     * Dynamically merges additional demo vehicles (e.g. after remote manifest discovery)
-     * without disturbing the currently active demo VIN or real persisted storage.
-     */
-    fun syncDemoProfiles(profiles: List<VehicleProfile>) = synchronized(lock) {
-        if (!demoModeActive) return@synchronized
-        val existingByVin = demoProfiles.associateBy { it.vin.uppercase(Locale.US) }
-        val merged = profiles.map { incoming ->
-            existingByVin[incoming.vin.uppercase(Locale.US)] ?: incoming
-        }
-        demoProfiles.clear()
-        demoProfiles.addAll(merged)
-        if (demoActiveVin.isBlank() || demoProfiles.none { it.vin.equals(demoActiveVin, ignoreCase = true) }) {
-            demoActiveVin = demoProfiles.firstOrNull()?.vin.orEmpty()
-        }
-    }
-
-    /** Leaves Demo Mode cleanly, restoring full access to untouched real persisted profiles. */
-    fun exitDemoMode() = synchronized(lock) {
-        demoModeActive = false
-        demoProfiles.clear()
-        demoActiveVin = ""
-    }
-
     private fun readAccountDraftLocked(): VehicleProfile? {
         val raw = prefs.getString(KEY_ACCOUNT_DRAFT, "").orEmpty().trim()
         if (raw.isBlank()) return null
@@ -224,7 +180,6 @@ class VehicleProfileStore(context: Context) {
     }
 
     fun listProfiles(): List<VehicleProfile> = synchronized(lock) {
-        if (demoModeActive) return@synchronized demoProfiles.toList()
         ensureSeedLocked()
         readProfilesLocked()
     }
@@ -236,11 +191,6 @@ class VehicleProfileStore(context: Context) {
      * seeding any test vehicle into persistent storage.
      */
     fun getActiveProfile(): VehicleProfile = synchronized(lock) {
-        if (demoModeActive) {
-            return@synchronized demoProfiles.firstOrNull { it.vin.equals(demoActiveVin, ignoreCase = true) }
-                ?: demoProfiles.firstOrNull()
-                ?: emptyProfile()
-        }
         ensureSeedLocked()
         val profiles = readProfilesLocked()
         val activeVin = prefs.getString(KEY_ACTIVE_VIN, "").orEmpty()
@@ -279,11 +229,6 @@ class VehicleProfileStore(context: Context) {
 
     fun setActiveVin(vin: String): VehicleProfile? {
         synchronized(lock) {
-            if (demoModeActive) {
-                val match = demoProfiles.firstOrNull { it.vin.equals(vin, ignoreCase = true) } ?: return null
-                demoActiveVin = match.vin
-                return match
-            }
             ensureSeedLocked()
             val match = readProfilesLocked().firstOrNull { it.vin.equals(vin, ignoreCase = true) }
                 ?: return null
@@ -297,29 +242,6 @@ class VehicleProfileStore(context: Context) {
         activate: Boolean = true,
         preserveExistingPinIfBlank: Boolean = true
     ): VehicleProfile = synchronized(lock) {
-        if (demoModeActive) {
-            val existingForVin = demoProfiles.firstOrNull { it.vin.equals(profile.vin.trim(), ignoreCase = true) }
-            val resolvedPin = profile.controlPin.trim().ifBlank {
-                if (preserveExistingPinIfBlank) existingForVin?.controlPin?.trim().orEmpty() else ""
-            }
-            val normalized = profile.copy(
-                vin = profile.vin.trim().uppercase(Locale.US),
-                controlPin = resolvedPin,
-                updatedAt = System.currentTimeMillis()
-            )
-            if (normalized.vin.isNotBlank()) {
-                val idx = demoProfiles.indexOfFirst { it.vin.equals(normalized.vin, ignoreCase = true) }
-                if (idx >= 0) {
-                    demoProfiles[idx] = normalized
-                } else {
-                    demoProfiles.add(normalized)
-                }
-                if (activate || demoActiveVin.isBlank()) {
-                    demoActiveVin = normalized.vin
-                }
-            }
-            return@synchronized normalized
-        }
         val existingList = readProfilesLocked()
         val existingForVin = existingList.firstOrNull { it.vin.equals(profile.vin.trim(), ignoreCase = true) }
         val resolvedPin = profile.controlPin.trim().ifBlank {
@@ -415,10 +337,6 @@ class VehicleProfileStore(context: Context) {
      * key material and deviceId fallback UUID (used on 0406 session expiry).
      */
     fun clearTokensPreserveOfflineKeys() = synchronized(lock) {
-        if (demoModeActive) {
-            exitDemoMode()
-            return@synchronized
-        }
         val profiles = readProfilesLocked().map {
             it.copy(accessToken = "", sdkToken = "", updatedAt = System.currentTimeMillis())
         }
@@ -434,16 +352,6 @@ class VehicleProfileStore(context: Context) {
     fun updateControlPin(vin: String, newPin: String): VehicleProfile? = synchronized(lock) {
         val targetVin = vin.trim().uppercase(Locale.US)
         if (targetVin.isBlank()) return@synchronized null
-        if (demoModeActive) {
-            val index = demoProfiles.indexOfFirst { it.vin.equals(targetVin, ignoreCase = true) }
-            if (index < 0) return@synchronized null
-            val updated = demoProfiles[index].copy(
-                controlPin = newPin.trim(),
-                updatedAt = System.currentTimeMillis()
-            )
-            demoProfiles[index] = updated
-            return@synchronized updated
-        }
         val profiles = readProfilesLocked().toMutableList()
         val index = profiles.indexOfFirst { it.vin.equals(targetVin, ignoreCase = true) }
         if (index < 0) return@synchronized null
@@ -460,13 +368,6 @@ class VehicleProfileStore(context: Context) {
     }
 
     fun deleteProfile(vin: String) = synchronized(lock) {
-        if (demoModeActive) {
-            demoProfiles.removeAll { it.vin.equals(vin, ignoreCase = true) }
-            if (demoActiveVin.equals(vin, ignoreCase = true)) {
-                demoActiveVin = demoProfiles.firstOrNull()?.vin.orEmpty()
-            }
-            return@synchronized
-        }
         if (vin.isBlank()) {
             writeAccountDraftLocked(null)
             return@synchronized
@@ -485,10 +386,6 @@ class VehicleProfileStore(context: Context) {
 
     /** Removes every persisted profile and account-only draft while keeping stable fallback device UUID. */
     fun clearAllProfiles() = synchronized(lock) {
-        if (demoModeActive) {
-            exitDemoMode()
-            return@synchronized
-        }
         val fallbackUuid = prefs.getString(KEY_FALLBACK_DEVICE_UUID, "").orEmpty()
         prefs.edit().apply {
             clear()

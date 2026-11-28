@@ -66,7 +66,6 @@ import com.chery.carplus.cloud.CheryDeviceBindingRequiredException
 import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CheryLoginResult
 import com.chery.carplus.cloud.CherySessionExpiredException
-import com.chery.carplus.cloud.DemoVehicleBackend
 import com.chery.carplus.cloud.InGeekCloudProvisioner
 import com.chery.carplus.cloud.RemoteCommand
 import com.chery.carplus.cloud.RemoteCommandResult
@@ -464,10 +463,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var sheetKeyActionButton: TextView? = null
 
     // Live state
-    private var demoBackend: DemoVehicleBackend? = null
-    private var savedRealVehicleMeta: Map<String, String>? = null
-    private val isDemoMode: Boolean
-        get() = ::profileStore.isInitialized && profileStore.isDemoMode() && demoBackend != null
     private var currentProfile: VehicleProfile? = null
     private var activeTelemetry: VehicleTelemetry? = null
     private var sessionVehiclePin = ""
@@ -1043,6 +1038,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             sessionVehiclePin = active.controlPin
             showHomeScreen()
         } else {
+            CarWidgetManager.markLoggedOut(this, expired = false)
             showWelcomeScreen()
         }
     }
@@ -1856,27 +1852,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         page.addView(forgotBtn, lp(top = dp(10)))
 
-        val demoHintBtn = text("演示账号：demo / demo（点击填入）", 12.5f, ThemeTokens.TEXT_SUB).apply {
-            gravity = Gravity.CENTER
-            minHeight = dp(44)
-            alpha = 0.85f
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-            isClickable = true
-            isFocusable = true
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.96f, haptic = false)
-            setOnClickListener {
-                AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
-                if (loginUsesSms) {
-                    setLoginMode(false)
-                }
-                loginMobileInput?.setText(DemoVehicleBackend.DEMO_ACCOUNT)
-                loginPasswordInput?.setText(DemoVehicleBackend.DEMO_PASSWORD)
-                loginPasswordInput?.setSelection(DemoVehicleBackend.DEMO_PASSWORD.length)
-                hideLoginError()
-            }
-        }
-        page.addView(demoHintBtn, lp(top = dp(4)))
-
         setLoginMode(startWithSms)
     }
 
@@ -1972,15 +1947,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun submitLogin() {
         if (loginBusy) return
         val mobile = loginMobileInput?.text?.toString()?.trim().orEmpty()
-        val secret = if (loginUsesSms) {
-            loginSmsInput?.text?.toString()?.trim().orEmpty()
-        } else {
-            loginPasswordInput?.text?.toString().orEmpty()
-        }
-        if (DemoVehicleBackend.isDemoCredentials(mobile, secret)) {
-            enterDemoSession()
-            return
-        }
         if (loginUsesSms) {
             if (!isValidMobile(mobile)) {
                 showLoginError("请输入正确的 11 位手机号")
@@ -1990,82 +1956,16 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             showLoginError("请输入手机号或账号")
             return
         }
+        val secret = if (loginUsesSms) {
+            loginSmsInput?.text?.toString()?.trim().orEmpty()
+        } else {
+            loginPasswordInput?.text?.toString().orEmpty()
+        }
         if (secret.isBlank()) {
             showLoginError(if (loginUsesSms) "请输入短信验证码" else "请输入登录密码")
             return
         }
         performLogin(mobile, secret, loginUsesSms)
-    }
-
-    private fun enterDemoSession() {
-        smsCountdownJob?.cancel()
-        setLoginBusy(false)
-        hideLoginError()
-
-        // Snapshot real cached vehicle metadata once so exiting Demo Mode restores real user state untouched
-        if (savedRealVehicleMeta == null) {
-            savedRealVehicleMeta = mapOf(
-                KEY_MODEL_NAME to uiPrefs.getString(KEY_MODEL_NAME, "").orEmpty(),
-                KEY_PLATE_NO to uiPrefs.getString(KEY_PLATE_NO, "").orEmpty(),
-                KEY_ENGINE_TYPE to uiPrefs.getString(KEY_ENGINE_TYPE, "").orEmpty(),
-                KEY_AIR_TYPE to uiPrefs.getString(KEY_AIR_TYPE, "").orEmpty(),
-                KEY_SUNROOF_TYPE to uiPrefs.getString(KEY_SUNROOF_TYPE, "").orEmpty(),
-                KEY_TEMP_LO to uiPrefs.getString(KEY_TEMP_LO, "").orEmpty(),
-                KEY_TEMP_HI to uiPrefs.getString(KEY_TEMP_HI, "").orEmpty(),
-                KEY_OPEN_AIR to uiPrefs.getString(KEY_OPEN_AIR, "").orEmpty(),
-                KEY_VEHICLE_SN to uiPrefs.getString(KEY_VEHICLE_SN, "").orEmpty(),
-                KEY_VEHICLE_ICCID to uiPrefs.getString(KEY_VEHICLE_ICCID, "").orEmpty()
-            )
-        }
-
-        val models = VehicleModelRepository.listSupportedModels(this)
-        val backend = DemoVehicleBackend(models, profileStore.defaultDeviceId())
-        demoBackend = backend
-        httpClient.demoServiceHandler = { serviceType, data, _ ->
-            backend.handleService(serviceType, data)
-        }
-        httpClient.demoReverseGeocodeHandler = { lat, lon ->
-            backend.reverseGeocode(lat, lon)
-        }
-        httpClient.demoSearchPoiHandler = { query, biasLat, biasLon ->
-            backend.searchPoi(query, biasLat, biasLon)
-        }
-
-        val profiles = backend.buildProfiles()
-        val firstVin = profiles.firstOrNull()?.vin.orEmpty()
-        profileStore.enterDemoMode(profiles, firstVin)
-
-        val summaries = backend.listVehicleSummaries()
-        managementScreens.rememberVehicleSummaries(summaries, DemoVehicleBackend.DEMO_ACCESS_TOKEN)
-        summaries.firstOrNull()?.let { persistVehicleMetadata(it) }
-
-        val active = profileStore.getActiveProfile()
-        currentProfile = active
-        sessionVehiclePin = DemoVehicleBackend.DEMO_PIN
-        cloudTripTrackEnabled = true
-        lastKnownAntiTheftEnabled = true
-        bleConnected = true
-        bleNearby = false
-
-        showHomeScreen()
-        showHomeStatus("已进入演示模式（共 ${models.size} 款车型，点击左上角可切换）")
-
-        // Dynamically sync remote manifest so if additional 3D models are published, Demo Mode adds them live
-        lifecycleScope.launch {
-            val latestModels = withContext(Dispatchers.IO) {
-                runCatching { VehicleModelRepository.refreshCatalogFromRemote(this@MainActivity) }
-                    .getOrDefault(models)
-            }
-            if (!isDemoMode || demoBackend !== backend) return@launch
-            if (latestModels.size > backend.vehicleCount()) {
-                val updatedProfiles = backend.syncModels(latestModels)
-                profileStore.syncDemoProfiles(updatedProfiles)
-                managementScreens.rememberVehicleSummaries(
-                    backend.listVehicleSummaries(),
-                    DemoVehicleBackend.DEMO_ACCESS_TOKEN
-                )
-            }
-        }
     }
 
     private fun performLogin(
@@ -2144,8 +2044,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 managementScreens.rememberVehicleSummaries(vehicles, saved.accessToken)
                 if (primary != null) {
                     persistVehicleMetadata(primary)
+                    val primaryName = vehicleModelName(primary)
+                    CarWidgetManager.syncActiveVehicle(
+                        context = this@MainActivity,
+                        vin = saved.vin,
+                        modelName = primaryName,
+                        plateNo = primary.plateNo.trim(),
+                        modelKey = VehicleModelRepository.resolveModelKey(primaryName),
+                        engineType = primary.engineType.trim(),
+                        telemetry = null
+                    )
                 } else {
                     clearVehicleMetadata()
+                    CarWidgetStateStore.clear(this@MainActivity)
+                    CarWidgetManager.updateAllWidgets(this@MainActivity)
                 }
                 cloudTripTrackEnabled = primary?.isTracksOpen ?: user.isTracksOpen
                 currentProfile = saved
@@ -2418,26 +2330,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         quickDeckTileViews.clear()
         configureSystemBars(BG_HOME)
         contentFrame.setBackgroundColor(BG_HOME)
-        val demoActiveNow = isDemoMode
-        bleConnected = if (demoActiveNow) true else bleController.isSessionReady()
-        bleNearby = if (demoActiveNow) false else bleController.isVehicleNearby
-        activeTelemetry = if (demoActiveNow) {
-            demoBackend?.telemetryFor(profileStore.getActiveProfile().vin)
-        } else {
-            null
-        }
+        bleConnected = bleController.isSessionReady()
+        bleNearby = bleController.isVehicleNearby
+        activeTelemetry = null
         geocodeJob?.cancel()
         lastGeocodedKey = ""
-        lastGeocodedAddress = if (demoActiveNow) {
-            activeTelemetry?.let { t ->
-                val lat = t.latitude
-                val lon = t.longitude
-                if (lat != null && lon != null) demoBackend?.reverseGeocode(lat, lon) else null
-            }
-        } else {
-            null
-        }
-        lastGeocodeSettled = demoActiveNow
+        lastGeocodedAddress = null
+        lastGeocodeSettled = false
         lastGeocodeFailedAtMs = 0L
 
         val profile = profileStore.getActiveProfile().also { currentProfile = it }
@@ -2667,16 +2566,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
 
         refreshHomeHeaderAndRows()
-        if (!isDemoMode) {
-            if (!PassiveEntryRuntime.isServiceRunning()) {
-                startProximityWhenPermitted()
-            }
-            startPeriodicHomeRefresh()
-            startForegroundBleRssiPolling()
-            startLiveDeviceLocationUpdates()
-            if (hasAllBlePermissionsGranted()) {
-                maybeRequestDeviceLocationPermissionOnce()
-            }
+        if (!PassiveEntryRuntime.isServiceRunning()) {
+            startProximityWhenPermitted()
+        }
+        startPeriodicHomeRefresh()
+        startForegroundBleRssiPolling()
+        startLiveDeviceLocationUpdates()
+        if (hasAllBlePermissionsGranted()) {
+            maybeRequestDeviceLocationPermissionOnce()
         }
         syncCloudVehicleMeta()
         refreshTelemetry(silent = true)
@@ -2699,6 +2596,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             val matched = vehicles.firstOrNull { it.vin.equals(profile.vin, ignoreCase = true) }
                 ?: vehicles.firstOrNull()
             matched?.isTracksOpen?.let { cloudTripTrackEnabled = it }
+            if (matched != null) {
+                persistVehicleMetadata(matched)
+                val resolvedName = vehicleModelName(matched)
+                CarWidgetManager.syncActiveVehicle(
+                    context = this@MainActivity,
+                    vin = matched.vin.trim().uppercase(Locale.US),
+                    modelName = resolvedName,
+                    plateNo = matched.plateNo.trim(),
+                    modelKey = VehicleModelRepository.resolveModelKey(resolvedName),
+                    engineType = matched.engineType.trim(),
+                    telemetry = activeTelemetry
+                )
+            }
         }
     }
 
@@ -2825,6 +2735,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             val displayName = vehicleModelName(chosen)
             persistVehicleMetadata(chosen)
+            CarWidgetManager.syncActiveVehicle(
+                context = this@MainActivity,
+                vin = saved.vin,
+                modelName = displayName,
+                plateNo = chosen.plateNo.trim(),
+                modelKey = VehicleModelRepository.resolveModelKey(displayName),
+                engineType = chosen.engineType.trim(),
+                telemetry = null
+            )
             cloudTripTrackEnabled = chosen.isTracksOpen ?: cloudTripTrackEnabled
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
@@ -2915,6 +2834,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             val displayName = vehicleModelName(chosen)
             persistVehicleMetadata(chosen)
+            CarWidgetManager.syncActiveVehicle(
+                context = this@MainActivity,
+                vin = saved.vin,
+                modelName = displayName,
+                plateNo = chosen.plateNo.trim(),
+                modelKey = VehicleModelRepository.resolveModelKey(displayName),
+                engineType = chosen.engineType.trim(),
+                telemetry = null
+            )
             cloudTripTrackEnabled = chosen.isTracksOpen ?: cloudTripTrackEnabled
             currentProfile = saved
             sessionVehiclePin = saved.controlPin
@@ -3222,11 +3150,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val profile = profileStore.getActiveProfile()
         if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
             Toast.makeText(this, "当前暂无有效车辆信息", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (isDemoMode) {
-            sessionVehiclePin = DemoVehicleBackend.DEMO_PIN
-            onPinReady(DemoVehicleBackend.DEMO_PIN)
             return
         }
         val cachedPin = profile.controlPin.trim().ifBlank { sessionVehiclePin.trim() }
@@ -4665,12 +4588,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun onChannelBadgeTapped() {
-        if (isDemoMode) {
-            bleConnected = !bleConnected
-            updateSecurityRow()
-            showHomeStatus(if (bleConnected) "演示模式 · 模拟手机钥匙已连接" else "演示模式 · 模拟手机钥匙已断开")
-            return
-        }
         val profile = profileStore.getActiveProfile()
         if (bleConnected || bleController.isSessionReady()) {
             showHomeStatus("手机钥匙已连接")
@@ -5959,7 +5876,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             plateNo = plateNo,
             telemetry = telemetry,
             cabinTempC = cabinTemp,
-            primaryStatus = primaryMotionState
+            primaryStatus = primaryMotionState,
+            modelKey = VehicleModelRepository.resolveModelKey(modelName)
         )
         consumePendingShortcutActionIfReady()
         consumePendingSharedPoiIfReady()
@@ -6351,27 +6269,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
         val localProfiles = profileStore.listProfiles().filter { it.vin.isNotBlank() }
-        val demoSummariesByVin = if (isDemoMode) {
-            demoBackend?.listVehicleSummaries()?.associateBy { it.vin.uppercase(Locale.US) }.orEmpty()
-        } else {
-            emptyMap()
-        }
         val initialItems = localProfiles.map { p ->
             val vinKey = p.vin.trim().uppercase(Locale.US)
             val isCurrent = vinKey.equals(activeVin, ignoreCase = true)
-            val demoSummary = demoSummariesByVin[vinKey]
             SwitchableVehicleItem(
                 vin = vinKey,
-                displayName = demoSummary?.let { vehicleModelName(it) }
-                    ?: if (isCurrent && cachedModelName.isNotBlank()) cachedModelName else p.bleName.ifBlank { "我的座驾" },
-                plateNo = demoSummary?.plateNo?.trim() ?: if (isCurrent) cachedPlateNo else "",
+                displayName = if (isCurrent && cachedModelName.isNotBlank()) cachedModelName else p.bleName.ifBlank { "我的座驾" },
+                plateNo = if (isCurrent) cachedPlateNo else "",
                 localProfile = p,
-                cloudSummary = demoSummary
+                cloudSummary = null
             )
         }
         presentDropdown(initialItems)
 
-        if (activeProfile.accessToken.isNotBlank() && !isDemoMode) {
+        if (activeProfile.accessToken.isNotBlank()) {
             lifecycleScope.launch {
                 val cloudVehicles = runCatching {
                     withContext(Dispatchers.IO) {
@@ -6538,11 +6449,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     }
 
                     val list = merged.values.toList()
-                    statusHint.text = if (isDemoMode) {
-                        "共 ${list.size} 款演示车型，点击切换"
-                    } else {
-                        "共 ${list.size} 辆已绑定车辆，点击切换"
-                    }
+                    statusHint.text = "共 ${list.size} 辆已绑定车辆，点击切换"
                     renderVehicles(list)
                 }.onFailure {
                     statusHint.text = "已显示本机车辆（云端列表同步失败）"
@@ -6608,34 +6515,31 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             bleNearby = false
             lastPairingPin = ""
 
-            carVisual?.modelKey = if (isDemoMode) {
-                demoBackend?.setActiveVin(item.vin)
-                demoBackend?.modelKeyForVin(item.vin) ?: item.displayName.ifBlank { "arrizo8" }
-            } else {
-                item.displayName.ifBlank { "arrizo8" }
-            }
-            if (isDemoMode) {
-                activeTelemetry = demoBackend?.telemetryFor(item.vin)
-                lastGeocodedAddress = activeTelemetry?.let { t ->
-                    val lat = t.latitude
-                    val lon = t.longitude
-                    if (lat != null && lon != null) demoBackend?.reverseGeocode(lat, lon) else null
-                }
-                lastGeocodeSettled = true
-                bleConnected = true
-                bleNearby = false
-            }
+            val resolvedName = cloud?.let { vehicleModelName(it) }
+                ?.takeIf { it.isNotBlank() }
+                ?: item.displayName.ifBlank { "我的座驾" }
+            val resolvedPlate = cloud?.plateNo?.trim().orEmpty().ifBlank { item.plateNo.trim() }
+            val resolvedModelKey = VehicleModelRepository.resolveModelKey(resolvedName)
+            CarWidgetManager.syncActiveVehicle(
+                context = this@MainActivity,
+                vin = saved.vin,
+                modelName = resolvedName,
+                plateNo = resolvedPlate,
+                modelKey = resolvedModelKey,
+                engineType = cloud?.engineType?.trim().orEmpty(),
+                telemetry = null
+            )
+
+            carVisual?.modelKey = resolvedName.ifBlank { "arrizo8" }
             dialog?.dismiss()
             homeHeaderView?.let { hdr ->
                 MotionSpec.animatePanelSwitch(hdr, direction = 0)
             }
             refreshHomeHeaderAndRows()
-            if (!isDemoMode) {
-                startProximityWhenPermitted()
-                refreshTelemetry(silent = false)
-                if (!hasCompleteKeyMaterial(saved)) {
-                    launchCloudProvision(saved, automatic = true)
-                }
+            startProximityWhenPermitted()
+            refreshTelemetry(silent = false)
+            if (!hasCompleteKeyMaterial(saved)) {
+                launchCloudProvision(saved, automatic = true)
             }
             showHomeStatus("已切换至 ${item.displayName}")
         }
@@ -7213,24 +7117,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             return
         }
 
-        if (isDemoMode) {
-            val updated = demoBackend?.applyQuickCommand(
-                vin = profile.vin,
-                actionKey = actionKey,
-                temperatureCelsius = temperatureCelsius,
-                extraParams = extraParams
-            )
-            if (updated != null) {
-                activeTelemetry = updated
-            } else {
-                applyOptimisticAction(actionKey)
-            }
-            carVisual?.triggerActionFeedback(actionKey)
-            refreshHomeHeaderAndRows()
-            showHomeStatus("演示已完成：$label")
-            return
-        }
-
         val requirePinEveryTime = uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true)
         val hasAdvancedHttpParams = extraParams.keys.any {
             it in setOf("airPM", "frontDefrost", "rearDefrost", "driverHeating", "passengerHeating", "driverVent", "passengerVent", "controlTime")
@@ -7582,12 +7468,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun refreshTelemetry(silent: Boolean, forceRestart: Boolean = false) {
         val profile = profileStore.getActiveProfile()
         if (profile.vin.isBlank() || profile.accessToken.isBlank()) return
-        if (isDemoMode) {
-            activeTelemetry = demoBackend?.telemetryFor(profile.vin)
-            refreshHomeHeaderAndRows()
-            if (!silent) showHomeStatus("演示车况已更新")
-            return
-        }
         if (forceRestart) {
             telemetryJob?.cancel()
         } else if (telemetryJob?.isActive == true) {
@@ -7641,10 +7521,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun launchCloudProvision(profile: VehicleProfile, automatic: Boolean) {
-        if (isDemoMode) {
-            if (!automatic) showHomeStatus("演示模式 · 模拟数字钥匙已就绪")
-            return
-        }
         if (provisioningActive) return
         if (profile.userId.isBlank() || profile.mobileNo.isBlank()) {
             if (!automatic) showHomeStatus("账号信息不完整，无法拉取数字钥匙")
@@ -7711,77 +7587,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun logoutToWelcome() {
-        if (isDemoMode) {
-            exitDemoSessionAndReturnToWelcome()
-            return
-        }
         clearActiveSessionAndUiState(preserveOfflineKeys = false)
         SettingsScreen.clearCachedAccountProfile(this)
-        CarWidgetStateStore.clear(this)
-        CarWidgetManager.updateAllWidgets(this)
-        showWelcomeScreen()
-    }
-
-    private fun exitDemoSessionAndReturnToWelcome() {
-        // Leave Demo Mode cleanly without modifying real saved user accounts, tokens, BLE keys, or passive entry
-        httpClient.demoServiceHandler = null
-        httpClient.demoReverseGeocodeHandler = null
-        httpClient.demoSearchPoiHandler = null
-        demoBackend = null
-        profileStore.exitDemoMode()
-
-        // Restore real cached vehicle metadata snapshot if any
-        val snapshot = savedRealVehicleMeta
-        savedRealVehicleMeta = null
-        if (snapshot != null) {
-            uiPrefs.edit().apply {
-                snapshot.forEach { (k, v) ->
-                    if (v.isBlank()) remove(k) else putString(k, v)
-                }
-            }.apply()
-        } else {
-            clearVehicleMetadata()
-        }
-
-        pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
-        pendingResumeBleRunnable = null
-        cancelPendingEntrancePreview()
-        deckExpandAnimator?.cancel()
-        deckHeightAnimator?.cancel()
-        telemetryJob?.cancel()
-        postActionRefreshJob?.cancel()
-        geocodeJob?.cancel()
-        stopStatusAutoHide()
-        vehicleSwitcherPopup?.dismiss()
-        vehicleSwitcherPopup = null
-        dismissTopPairingPinDrawer(immediate = true)
-        dismissAppDialogImmediately()
-        if (::featureSheets.isInitialized) featureSheets.dismissAll()
-        if (::managementScreens.isInitialized) managementScreens.dismissAll()
-        if (::passiveEntrySheets.isInitialized) passiveEntrySheets.dismiss()
-        settingsScreen?.dismissTransientOverlays()
-        settingsScreen?.cancelBackgroundJobs()
-        settingsScreen = null
-        settingsRootView?.let { contentFrame.removeView(it) }
-        securityOverlayView?.let { contentFrame.removeView(it) }
-        locationOverlayDestroy?.invoke()
-        locationOverlayDestroy = null
-        locationOverlayView?.let { contentFrame.removeView(it) }
-        messagesOverlayView?.let { contentFrame.removeView(it) }
-        settingsRootView = null
-        securityOverlayView = null
-        locationOverlayView = null
-        messagesOverlayView = null
-        clearSubpageOverlayStack()
-        carVisual?.onHostPause()
-        carVisual = null
-        homeRootView = null
-        currentProfile = null
-        activeTelemetry = null
-        sessionVehiclePin = ""
-        bleConnected = false
-        bleNearby = false
-        lastPairingPin = ""
+        CarWidgetManager.markLoggedOut(this, expired = false)
         showWelcomeScreen()
     }
 
@@ -7791,7 +7599,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
      * while preserving offline BLE key material, shows a clear prompt, and redirects to login.
      */
     private fun handleSessionExpired(reason: String) {
-        if (isDemoMode) return
         if (handlingSessionExpired) return
         val alreadyAtAuthScreen = (
             currentScreen == Screen.PRIVACY_CONSENT ||
@@ -7800,10 +7607,12 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             ) && subpageOverlayStack.isEmpty()
         if (alreadyAtAuthScreen) {
             httpClient.clearSession()
+            CarWidgetManager.markLoggedOut(this, expired = true)
             return
         }
         handlingSessionExpired = true
         clearActiveSessionAndUiState(preserveOfflineKeys = true)
+        CarWidgetManager.markLoggedOut(this, expired = true)
         Toast.makeText(
             this,
             reason.ifBlank { "登录已失效，请重新登录" },
@@ -7950,10 +7759,19 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             currentProfile = switched
             sessionVehiclePin = switched.controlPin
             clearVehicleMetadata()
+            val fallbackName = remaining.bleName.ifBlank { "我的座驾" }
             uiPrefs.edit()
-                .putString(KEY_MODEL_NAME, remaining.bleName.ifBlank { "我的座驾" })
+                .putString(KEY_MODEL_NAME, fallbackName)
                 .apply()
             activeTelemetry = null
+            CarWidgetManager.syncActiveVehicle(
+                context = this,
+                vin = switched.vin,
+                modelName = fallbackName,
+                plateNo = "",
+                modelKey = VehicleModelRepository.resolveModelKey(fallbackName),
+                telemetry = null
+            )
             refreshHomeHeaderAndRows()
             startProximityWhenPermitted()
             syncCloudVehicleMeta()
@@ -8064,7 +7882,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun startProximityWhenPermitted() {
-        if (isDemoMode) return
         if (currentScreen != Screen.HOME && currentScreen != Screen.SECURITY) return
         if (!ensureBlePermissions()) return
         val profile = profileStore.getActiveProfile()
@@ -8390,76 +8207,46 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             lastPairingPinProvider = { lastPairingPin },
             requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
             antiTheftEnabledProvider = { lastKnownAntiTheftEnabled },
-            onRequestBlePermissions = { if (isDemoMode) true else ensureBlePermissions() },
+            onRequestBlePermissions = { ensureBlePermissions() },
             onPreviewPairingDrawer = { pin, _, _ ->
                 showTopPairingPinDrawer(pin = pin)
             },
             onBack = { popSubpageOverlay() },
-            isDemoModeProvider = { isDemoMode },
             vehicleCountProvider = {
-                if (isDemoMode) {
-                    demoBackend?.vehicleCount() ?: 0
-                } else {
-                    profileStore.listProfiles().count { it.vin.isNotBlank() }
-                }
+                profileStore.listProfiles().count { it.vin.isNotBlank() }
             },
             onRefreshNow = {
                 refreshTelemetry(silent = false, forceRestart = true)
             },
             onFetchVehicles = {
                 syncCloudVehicleMeta()
-                val msg = if (isDemoMode) {
-                    "演示车辆已同步（${demoBackend?.vehicleCount() ?: 0} 辆）"
-                } else {
-                    "已触发云端车辆列表同步"
-                }
-                showHomeStatus(msg)
+                showHomeStatus("已触发云端车辆列表同步")
             },
             onReload3dModel = {
                 carVisual?.let { view ->
-                    val targetKey = if (isDemoMode) {
-                        demoBackend?.modelKeyForVin(profileStore.getActiveProfile().vin) ?: view.modelKey
-                    } else {
-                        view.modelKey
-                    }
+                    val targetKey = view.modelKey
                     view.modelKey = targetKey
                     view.playEntranceAnimation()
                 }
                 showHomeStatus("已触发 3D 车模重载")
             },
             onReconnectBle = {
-                if (isDemoMode) {
-                    bleConnected = true
-                    updateSecurityRow()
-                    showHomeStatus("演示模式 · 模拟蓝牙已连接")
-                } else {
-                    onChannelBadgeTapped()
-                }
+                onChannelBadgeTapped()
             },
             onReadBleStatus = {
-                if (isDemoMode) {
-                    refreshTelemetry(silent = false)
-                } else {
-                    val rssiSent = bleController.requestRemoteRssi()
-                    refreshTelemetry(silent = false, forceRestart = true)
-                    showHomeStatus(if (rssiSent) "已请求蓝牙信号与实时车况" else "蓝牙未连接，已触发云端车况读取")
-                }
+                val rssiSent = bleController.requestRemoteRssi()
+                refreshTelemetry(silent = false, forceRestart = true)
+                showHomeStatus(if (rssiSent) "已请求蓝牙信号与实时车况" else "蓝牙未连接，已触发云端车况读取")
             },
             onOpenPassiveEntry = {
                 passiveEntrySheets.showPassiveEntryConfigSheet()
             },
             onDisconnectBle = {
-                if (isDemoMode) {
-                    bleConnected = false
-                    updateSecurityRow()
-                    showHomeStatus("演示模式 · 模拟蓝牙已断开")
-                } else {
-                    bleController.resetTargetAndDisconnect()
-                    bleConnected = false
-                    bleNearby = false
-                    updateSecurityRow()
-                    showHomeStatus("已断开蓝牙连接")
-                }
+                bleController.resetTargetAndDisconnect()
+                bleConnected = false
+                bleNearby = false
+                updateSecurityRow()
+                showHomeStatus("已断开蓝牙连接")
             },
             onTriggerCarControl = { actionKey ->
                 handleDebugCarControl(actionKey)
@@ -8529,10 +8316,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun validateCurrentSessionToken(onResult: (ok: Boolean, summary: String) -> Unit) {
-        if (isDemoMode) {
-            onResult(true, "演示会话有效（离线沙箱，共 ${demoBackend?.vehicleCount() ?: 0} 款车型）")
-            return
-        }
         val active = profileStore.getActiveProfile()
         if (active.accessToken.isBlank()) {
             onResult(false, "未检测到云端令牌")

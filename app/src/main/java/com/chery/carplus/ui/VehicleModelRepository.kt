@@ -121,8 +121,8 @@ object VehicleModelRepository {
 
     /**
      * Returns all supported 3D vehicle models (built-in catalog merged with any cached
-     * remote `manifest.json` entries). Preserves deterministic order so Demo Mode and
-     * diagnostics automatically expose all N supported models as new GLBs are added.
+     * remote `manifest.json` entries). Preserves deterministic order so widgets and
+     * diagnostics automatically recognize all supported models as new GLBs are added.
      */
     fun listSupportedModels(context: Context? = null): List<ModelCatalogEntry> {
         val merged = LinkedHashMap<String, ModelCatalogEntry>()

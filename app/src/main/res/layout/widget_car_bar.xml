@@ -1,126 +1,228 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg_dark"
-    android:baselineAligned="false"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
     android:padding="@dimen/widget_outer_padding">
 
-    <!-- Left: Vehicle Identity + Compact Status & Energy -->
+    <!-- Logged-In Content: Frameless Car Controls + Range-Only Status -->
     <LinearLayout
-        android:id="@+id/widget_header_area"
-        android:layout_width="0dp"
+        android:id="@+id/widget_content_container"
+        android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_weight="1"
-        android:gravity="center_vertical"
-        android:orientation="vertical"
-        android:paddingStart="8dp"
-        android:paddingEnd="8dp">
-
-        <TextView
-            android:id="@+id/widget_model_name"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:includeFontPadding="false"
-            android:singleLine="true"
-            android:text="Qiri+"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_status_line"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:ellipsize="end"
-            android:fontFeatureSettings="tnum"
-            android:includeFontPadding="false"
-            android:singleLine="true"
-            android:text="状态待同步"
-            android:textColor="#8E9299"
-            android:textSize="11sp" />
-    </LinearLayout>
-
-    <!-- Right: 4 Equal-Width Concentric Control Tiles -->
-    <LinearLayout
-        android:layout_width="0dp"
-        android:layout_height="match_parent"
-        android:layout_weight="1.7"
         android:baselineAligned="false"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <FrameLayout
-            android:id="@+id/widget_btn_lock"
+        <!-- Left: Vehicle Identity + Compact Status & Range-Only -->
+        <LinearLayout
+            android:id="@+id/widget_header_area"
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="@dimen/widget_grid_gap"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg">
+            android:layout_weight="1.05"
+            android:gravity="center_vertical"
+            android:orientation="vertical"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp">
 
-            <ImageView
-                android:id="@+id/widget_icon_lock"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_gravity="center"
-                android:contentDescription="锁车或解锁"
-                android:src="@drawable/ic_widget_lock_closed" />
-        </FrameLayout>
+            <TextView
+                android:id="@+id/widget_model_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:text="Qiri+"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
 
-        <FrameLayout
-            android:id="@+id/widget_btn_ac"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="@dimen/widget_grid_gap"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg">
-
-            <ImageView
-                android:id="@+id/widget_icon_ac"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_gravity="center"
-                android:contentDescription="开关空调"
-                android:src="@drawable/ic_widget_fan" />
-        </FrameLayout>
-
-        <FrameLayout
-            android:id="@+id/widget_btn_flash"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="@dimen/widget_grid_gap"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg">
-
-            <ImageView
-                android:id="@+id/widget_icon_flash"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_gravity="center"
-                android:contentDescription="闪灯寻车"
-                android:src="@drawable/ic_widget_flash" />
-        </FrameLayout>
+            <TextView
+                android:id="@+id/widget_status_line"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:fontFeatureSettings="tnum"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:text="状态待同步"
+                android:textColor="#8E9299"
+                android:textSize="11sp" />
+        </LinearLayout>
 
         <FrameLayout
-            android:id="@+id/widget_btn_trunk"
+            android:layout_width="1dp"
+            android:layout_height="24dp"
+            android:background="#262930" />
+
+        <!-- Right: 4 Equal-Width Frameless Controls (Zero Boxy Frames; Circular Active Halo Only) -->
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="@drawable/widget_btn_bg">
+            android:layout_weight="1.65"
+            android:baselineAligned="false"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="4dp">
 
-            <ImageView
-                android:id="@+id/widget_icon_trunk"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_gravity="center"
-                android:contentDescription="开关后备箱"
-                android:src="@drawable/ic_widget_trunk" />
-        </FrameLayout>
+            <FrameLayout
+                android:id="@+id/widget_btn_lock"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_lock"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:layout_gravity="center"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_lock"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="锁车或解锁"
+                        android:src="@drawable/ic_widget_lock_closed" />
+                </FrameLayout>
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/widget_btn_ac"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_ac"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:layout_gravity="center"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_ac"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="开关空调"
+                        android:src="@drawable/ic_widget_fan" />
+                </FrameLayout>
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/widget_btn_flash"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_flash"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:layout_gravity="center"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_flash"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="闪灯寻车"
+                        android:src="@drawable/ic_widget_flash" />
+                </FrameLayout>
+            </FrameLayout>
+
+            <FrameLayout
+                android:id="@+id/widget_btn_trunk"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null">
+
+                <FrameLayout
+                    android:id="@+id/widget_halo_trunk"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:layout_gravity="center"
+                    android:background="@null">
+
+                    <ImageView
+                        android:id="@+id/widget_icon_trunk"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="开关后备箱"
+                        android:src="@drawable/ic_widget_trunk" />
+                </FrameLayout>
+            </FrameLayout>
+        </LinearLayout>
     </LinearLayout>
 
-</LinearLayout>
+    <!-- Logged-Out / Session-Expired Empty State -->
+    <LinearLayout
+        android:id="@+id/widget_logged_out_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:baselineAligned="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="8dp"
+        android:paddingEnd="4dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingEnd="12dp">
+
+            <TextView
+                android:id="@+id/widget_logged_out_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:text="Qiri+ · 未登录"
+                android:textColor="#FFFFFF"
+                android:textSize="13.5sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_logged_out_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:text="轻触登录查看车况与远控"
+                android:textColor="#8E9299"
+                android:textSize="10.5sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/widget_btn_login"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:background="@drawable/widget_cta_pill_bg"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:singleLine="true"
+            android:text="去登录"
+            android:textColor="#FFFFFF"
+            android:textSize="11.5sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+</FrameLayout>

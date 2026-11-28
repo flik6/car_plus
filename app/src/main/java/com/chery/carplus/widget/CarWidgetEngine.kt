@@ -6,6 +6,8 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Build
 import android.os.Handler
@@ -21,11 +23,13 @@ import com.chery.carplus.cloud.VehicleTelemetry
 import com.chery.carplus.profile.VehicleProfileStore
 import com.chery.carplus.ui.MainActivity
 import com.chery.carplus.ui.VehicleDisplayNames
+import com.chery.carplus.ui.VehicleModelRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -42,6 +46,7 @@ enum class CarWidgetStyle(val layoutRes: Int) {
 
 data class CarWidgetSnapshot(
     val vin: String = "",
+    val modelKey: String = "arrizo8",
     val modelName: String = "Qiri+",
     val plateNo: String = "",
     val fuelPercent: Int = 0,
@@ -60,7 +65,9 @@ data class CarWidgetSnapshot(
     val cabinTempC: Int = Int.MIN_VALUE,
     val primaryStatus: String = "状态待同步",
     val updatedAtMs: Long = 0L,
-    val transientHint: String = ""
+    val transientHint: String = "",
+    val loggedIn: Boolean = false,
+    val sessionExpired: Boolean = false
 ) {
     val powertrain: VehiclePowertrain
         get() = VehiclePowertrain.fromEngineTypeCode(powertrainCode)
@@ -70,6 +77,7 @@ data class CarWidgetSnapshot(
 object CarWidgetStateStore {
     private const val PREFS_NAME = "carplus_widget_state"
     private const val KEY_VIN = "vin"
+    private const val KEY_MODEL_KEY = "model_key"
     private const val KEY_MODEL_NAME = "model_name"
     private const val KEY_PLATE_NO = "plate_no"
     private const val KEY_FUEL_PERCENT = "fuel_percent"
@@ -89,13 +97,27 @@ object CarWidgetStateStore {
     private const val KEY_PRIMARY_STATUS = "primary_status"
     private const val KEY_UPDATED_AT = "updated_at_ms"
     private const val KEY_TRANSIENT_HINT = "transient_hint"
+    private const val KEY_LOGGED_IN = "logged_in"
+    private const val KEY_SESSION_EXPIRED = "session_expired"
 
     fun load(context: Context): CarWidgetSnapshot {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val vin = prefs.getString(KEY_VIN, "").orEmpty()
+        val modelName = prefs.getString(KEY_MODEL_NAME, "Qiri+").orEmpty()
+            .let { if (it.isBlank() || it == "CarPlus") "Qiri+" else it }
+        val savedModelKey = prefs.getString(KEY_MODEL_KEY, "").orEmpty()
+        val resolvedModelKey = savedModelKey.ifBlank {
+            CarWidgetManager.resolveWidgetModelKey(modelName = modelName, vin = vin)
+        }
+        val loggedIn = if (prefs.contains(KEY_LOGGED_IN)) {
+            prefs.getBoolean(KEY_LOGGED_IN, false)
+        } else {
+            vin.isNotBlank()
+        }
         return CarWidgetSnapshot(
-            vin = prefs.getString(KEY_VIN, "").orEmpty(),
-            modelName = prefs.getString(KEY_MODEL_NAME, "Qiri+").orEmpty()
-                .let { if (it.isBlank() || it == "CarPlus") "Qiri+" else it },
+            vin = vin,
+            modelKey = resolvedModelKey,
+            modelName = modelName,
             plateNo = prefs.getString(KEY_PLATE_NO, "").orEmpty(),
             fuelPercent = prefs.getInt(KEY_FUEL_PERCENT, 0).coerceIn(0, 100),
             hasFuelData = prefs.getBoolean(KEY_HAS_FUEL, false),
@@ -113,14 +135,20 @@ object CarWidgetStateStore {
             cabinTempC = prefs.getInt(KEY_CABIN_TEMP, Int.MIN_VALUE),
             primaryStatus = prefs.getString(KEY_PRIMARY_STATUS, "状态待同步").orEmpty().ifBlank { "状态待同步" },
             updatedAtMs = prefs.getLong(KEY_UPDATED_AT, 0L),
-            transientHint = prefs.getString(KEY_TRANSIENT_HINT, "").orEmpty()
+            transientHint = prefs.getString(KEY_TRANSIENT_HINT, "").orEmpty(),
+            loggedIn = loggedIn,
+            sessionExpired = prefs.getBoolean(KEY_SESSION_EXPIRED, false)
         )
     }
 
     fun save(context: Context, snapshot: CarWidgetSnapshot) {
+        val resolvedKey = snapshot.modelKey.trim().lowercase(Locale.US).ifBlank {
+            CarWidgetManager.resolveWidgetModelKey(modelName = snapshot.modelName, vin = snapshot.vin)
+        }
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_VIN, snapshot.vin.trim().uppercase(Locale.US))
+            .putString(KEY_MODEL_KEY, resolvedKey)
             .putString(KEY_MODEL_NAME, snapshot.modelName)
             .putString(KEY_PLATE_NO, snapshot.plateNo)
             .putInt(KEY_FUEL_PERCENT, snapshot.fuelPercent.coerceIn(0, 100))
@@ -140,6 +168,8 @@ object CarWidgetStateStore {
             .putString(KEY_PRIMARY_STATUS, snapshot.primaryStatus)
             .putLong(KEY_UPDATED_AT, snapshot.updatedAtMs)
             .putString(KEY_TRANSIENT_HINT, snapshot.transientHint)
+            .putBoolean(KEY_LOGGED_IN, snapshot.loggedIn)
+            .putBoolean(KEY_SESSION_EXPIRED, snapshot.sessionExpired)
             .apply()
     }
 
@@ -150,10 +180,21 @@ object CarWidgetStateStore {
             .apply()
     }
 
+    fun markLoggedOut(context: Context, expired: Boolean = false) {
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putBoolean(KEY_LOGGED_IN, false)
+            .putBoolean(KEY_SESSION_EXPIRED, expired)
+            .apply()
+    }
+
     fun clear(context: Context) {
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .clear()
+            .putBoolean(KEY_LOGGED_IN, false)
+            .putBoolean(KEY_SESSION_EXPIRED, false)
             .apply()
     }
 }
@@ -178,6 +219,108 @@ object CarWidgetManager {
     private val lastAutoSyncAttemptMs = AtomicLong(0L)
     private val bgSyncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    fun resolveWidgetModelKey(
+        modelName: String,
+        vin: String = "",
+        explicitKey: String = ""
+    ): String {
+        val explicit = explicitKey.trim().lowercase(Locale.US)
+        if (explicit.isNotBlank()) return explicit
+        val cleanName = modelName.trim()
+        if (cleanName.isNotBlank() && !cleanName.equals("Qiri+", ignoreCase = true)) {
+            val resolved = VehicleModelRepository.resolveModelKey(cleanName)
+            if (resolved.isNotBlank()) return resolved
+        }
+        val cleanVin = vin.trim()
+        if (cleanVin.isNotBlank()) {
+            val resolved = VehicleModelRepository.resolveModelKey(cleanVin)
+            if (resolved.isNotBlank()) return resolved
+        }
+        val lower = cleanName.lowercase(Locale.US)
+        return when {
+            lower.contains("瑞虎") || lower.contains("tiggo") -> "tiggo8"
+            else -> "arrizo8"
+        }
+    }
+
+    /**
+     * Immediately switches all desktop widgets to the logged-out or session-expired state,
+     * hiding all vehicle identity, telemetry, and remote controls.
+     */
+    fun markLoggedOut(context: Context, expired: Boolean = false) {
+        val appCtx = context.applicationContext
+        CarWidgetStateStore.markLoggedOut(appCtx, expired = expired)
+        updateAllWidgets(appCtx)
+    }
+
+    /**
+     * Immediately synchronizes the active vehicle identity & 3D-matched widget render
+     * whenever the user logs in or switches vehicles in-app, clearing stale telemetry
+     * from a previous VIN if [telemetry] is not yet available.
+     */
+    fun syncActiveVehicle(
+        context: Context,
+        vin: String,
+        modelName: String,
+        plateNo: String,
+        modelKey: String = "",
+        engineType: String = "",
+        telemetry: VehicleTelemetry? = null,
+        cabinTempC: Double? = null,
+        primaryStatus: String? = null
+    ) {
+        val appCtx = context.applicationContext
+        val rawCurrent = CarWidgetStateStore.load(appCtx)
+        val normalizedVin = vin.trim().uppercase(Locale.US).ifBlank {
+            telemetry?.vin?.trim()?.uppercase(Locale.US).orEmpty()
+        }.ifBlank {
+            VehicleProfileStore(appCtx).getActiveProfile().vin.trim().uppercase(Locale.US)
+        }
+        val sameVehicle = normalizedVin.isNotBlank() &&
+            rawCurrent.vin.equals(normalizedVin, ignoreCase = true)
+        val base = if (sameVehicle) rawCurrent else CarWidgetSnapshot(vin = normalizedVin)
+
+        val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+        val effectiveEngineType = engineType.ifBlank { uiPrefs.getString("engineType", "").orEmpty() }
+        val resolvedModelName = modelName.trim().ifBlank { base.modelName }
+        val resolvedKey = resolveWidgetModelKey(
+            modelName = resolvedModelName,
+            vin = normalizedVin,
+            explicitKey = modelKey
+        )
+        val powertrain = VehiclePowertrain.resolve(effectiveEngineType, resolvedModelName, telemetry)
+        val resolvedPlate = plateNo.trim().ifBlank {
+            telemetry?.licensePlate.orEmpty().trim().ifBlank { if (sameVehicle) base.plateNo else "" }
+        }
+
+        if (telemetry != null) {
+            syncFromTelemetry(
+                context = appCtx,
+                modelName = resolvedModelName,
+                plateNo = resolvedPlate,
+                telemetry = telemetry,
+                cabinTempC = cabinTempC,
+                primaryStatus = primaryStatus,
+                modelKey = resolvedKey
+            )
+            return
+        }
+
+        val next = base.copy(
+            vin = normalizedVin,
+            modelKey = resolvedKey,
+            modelName = resolvedModelName,
+            plateNo = resolvedPlate,
+            powertrainCode = powertrain.code,
+            primaryStatus = primaryStatus ?: if (sameVehicle) base.primaryStatus else "状态待同步",
+            transientHint = "",
+            loggedIn = true,
+            sessionExpired = false
+        )
+        CarWidgetStateStore.save(appCtx, next)
+        updateAllWidgets(appCtx)
+    }
+
     /**
      * Silently refreshes cloud vehicle telemetry when the system triggers periodic
      * widget `onUpdate` (every 30 min) and the cached snapshot is stale (>= 15 min).
@@ -188,22 +331,22 @@ object CarWidgetManager {
         pendingResult: BroadcastReceiver.PendingResult? = null
     ) {
         val appCtx = context.applicationContext
+        val store = VehicleProfileStore(appCtx)
+        val profile = store.getActiveProfile()
+        if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+            pendingResult?.finish()
+            return
+        }
+
         val now = System.currentTimeMillis()
         val snap = CarWidgetStateStore.load(appCtx)
-        if (snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) {
+        if (snap.loggedIn && snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) {
             pendingResult?.finish()
             return
         }
 
         val prevAttempt = lastAutoSyncAttemptMs.get()
         if (now - prevAttempt < 60_000L || !lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) {
-            pendingResult?.finish()
-            return
-        }
-
-        val store = VehicleProfileStore(appCtx)
-        val profile = store.getActiveProfile()
-        if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
             pendingResult?.finish()
             return
         }
@@ -228,6 +371,7 @@ object CarWidgetManager {
                             store.getActiveProfile().accessToken == profile.accessToken
                         ) {
                             store.clearTokensPreserveOfflineKeys()
+                            markLoggedOut(appCtx, expired = true)
                         }
                     }.getOrNull() ?: return@withTimeoutOrNull
 
@@ -259,7 +403,8 @@ object CarWidgetManager {
         plateNo: String,
         telemetry: VehicleTelemetry?,
         cabinTempC: Double? = null,
-        primaryStatus: String? = null
+        primaryStatus: String? = null,
+        modelKey: String = ""
     ) {
         val rawCurrent = CarWidgetStateStore.load(context)
         val targetVin = telemetry?.vin?.trim()?.uppercase(Locale.US)
@@ -273,6 +418,11 @@ object CarWidgetManager {
         val uiPrefs = context.applicationContext.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
         val cachedEngineType = uiPrefs.getString("engineType", "").orEmpty()
         val resolvedModel = modelName.ifBlank { current.modelName }
+        val resolvedKey = resolveWidgetModelKey(
+            modelName = resolvedModel,
+            vin = targetVin.ifBlank { current.vin },
+            explicitKey = modelKey
+        )
         val powertrain = VehiclePowertrain.resolve(cachedEngineType, resolvedModel, telemetry)
         val fuel = telemetry?.fuelPercent
         val battery = telemetry?.batteryPercent
@@ -287,6 +437,7 @@ object CarWidgetManager {
         }
         val next = CarWidgetSnapshot(
             vin = targetVin.ifBlank { current.vin },
+            modelKey = resolvedKey,
             modelName = resolvedModel,
             plateNo = plateNo.ifBlank { telemetry?.licensePlate.orEmpty().ifBlank { current.plateNo } },
             fuelPercent = fuel?.roundToInt()?.coerceIn(0, 100) ?: current.fuelPercent,
@@ -305,7 +456,9 @@ object CarWidgetManager {
             cabinTempC = cabinTempC?.roundToInt() ?: current.cabinTempC,
             primaryStatus = resolvedStatus,
             updatedAtMs = if (telemetry != null) System.currentTimeMillis() else current.updatedAtMs,
-            transientHint = ""
+            transientHint = "",
+            loggedIn = true,
+            sessionExpired = false
         )
         CarWidgetStateStore.save(context, next)
         updateAllWidgets(context)
@@ -348,56 +501,115 @@ object CarWidgetManager {
         }
     }
 
+    private fun hasActiveSession(context: Context, snapshot: CarWidgetSnapshot): Boolean {
+        if (!snapshot.loggedIn) return false
+        val profile = runCatching { VehicleProfileStore(context).getActiveProfile() }.getOrNull()
+        return profile != null && profile.accessToken.isNotBlank()
+    }
+
+    private fun formatRangeText(s: CarWidgetSnapshot): String {
+        val km = when (s.powertrain) {
+            VehiclePowertrain.EV -> if (s.electricRangeKm > 0) s.electricRangeKm else s.rangeKm
+            VehiclePowertrain.PHEV, VehiclePowertrain.ICE -> if (s.rangeKm > 0) s.rangeKm else s.electricRangeKm
+        }
+        return if (km > 0) "$km km" else "-- km"
+    }
+
+    private fun rangeLabelForPowertrain(powertrain: VehiclePowertrain): String = when (powertrain) {
+        VehiclePowertrain.EV -> "纯电续航"
+        VehiclePowertrain.PHEV -> "综合续航"
+        VehiclePowertrain.ICE -> "剩余续航"
+    }
+
+    private fun loadOptionalCachedModelBitmap(context: Context, modelKey: String): Bitmap? {
+        val cleanKey = modelKey.trim().lowercase(Locale.US)
+        if (cleanKey.isBlank()) return null
+        val file = File(File(context.applicationContext.filesDir, "widget_models"), "$cleanKey.png")
+        if (!file.exists() || file.length() <= 0L) return null
+        return runCatching {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+            var sample = 1
+            while (maxDim > 0 && maxDim / sample > 840) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeFile(file.absolutePath, opts)
+        }.getOrNull()
+    }
+
+    private fun bindVehicleImage(context: Context, rv: RemoteViews, modelKey: String) {
+        val cached = loadOptionalCachedModelBitmap(context, modelKey)
+        if (cached != null) {
+            rv.setImageViewBitmap(R.id.widget_car_image, cached)
+            return
+        }
+        val resId = when (modelKey.trim().lowercase(Locale.US)) {
+            "tiggo8" -> R.drawable.widget_car_tiggo8
+            else -> R.drawable.widget_car_arrizo8
+        }
+        rv.setImageViewResource(R.id.widget_car_image, resId)
+    }
+
     private fun buildRemoteViews(
         context: Context,
         style: CarWidgetStyle,
         s: CarWidgetSnapshot
     ): RemoteViews {
         val rv = RemoteViews(context.packageName, style.layoutRes)
+        val openAppPi = buildOpenAppPendingIntent(context)
+
+        // Clean logged-out / session-expired state across all 4 widget sizes
+        if (!hasActiveSession(context, s)) {
+            rv.setViewVisibility(R.id.widget_content_container, View.GONE)
+            rv.setViewVisibility(R.id.widget_logged_out_container, View.VISIBLE)
+            val expired = s.sessionExpired
+            val titleText = when (style) {
+                CarWidgetStyle.BAR -> if (expired) "Qiri+ · 登录已失效" else "Qiri+ · 未登录"
+                else -> if (expired) "登录已失效" else "未登录"
+            }
+            val subtitleText = when (style) {
+                CarWidgetStyle.COMPACT -> if (expired) "轻触重新登录" else "轻触登录查看车况"
+                CarWidgetStyle.BAR -> if (expired) "轻触重新登录恢复同步" else "轻触登录查看车况与远控"
+                CarWidgetStyle.MEDIUM -> if (expired) "账号凭证已过期，请重新登录" else "登录账号同步实时车况与远控"
+                CarWidgetStyle.LARGE -> if (expired) "账号凭证已过期，请重新登录 Qiri+" else "登录 Qiri+ 同步实时车况与远程控车"
+            }
+            val ctaText = if (expired) "重新登录" else "去登录"
+            rv.setTextViewText(R.id.widget_logged_out_title, titleText)
+            rv.setTextViewText(R.id.widget_logged_out_subtitle, subtitleText)
+            rv.setTextViewText(R.id.widget_btn_login, ctaText)
+            rv.setOnClickPendingIntent(R.id.widget_logged_out_container, openAppPi)
+            rv.setOnClickPendingIntent(R.id.widget_btn_login, openAppPi)
+            return rv
+        }
+
+        rv.setViewVisibility(R.id.widget_content_container, View.VISIBLE)
+        rv.setViewVisibility(R.id.widget_logged_out_container, View.GONE)
 
         // Tap header or vehicle image to launch Qiri+ Home
-        val openAppPi = buildOpenAppPendingIntent(context)
         rv.setOnClickPendingIntent(R.id.widget_header_area, openAppPi)
         if (style != CarWidgetStyle.BAR) {
+            bindVehicleImage(context, rv, s.modelKey)
             rv.setOnClickPendingIntent(R.id.widget_car_image, openAppPi)
         }
 
         // Model Name
         rv.setTextViewText(R.id.widget_model_name, s.modelName)
 
-        // Status Line (transient feedback takes priority while executing command)
-        val primaryBarPercent = when (s.powertrain) {
-            VehiclePowertrain.EV -> if (s.hasBatteryData) s.batteryPercent else -1
-            VehiclePowertrain.PHEV -> when {
-                s.hasBatteryData -> s.batteryPercent
-                s.hasFuelData -> s.fuelPercent
-                else -> -1
-            }
-            VehiclePowertrain.ICE -> if (s.hasFuelData) s.fuelPercent else -1
-        }
+        // Range-only display (strictly zero % across all 4 widget styles)
+        val rangeStr = formatRangeText(s)
         val statusText = if (s.transientHint.isNotBlank()) {
             s.transientHint
         } else {
             when (style) {
-                CarWidgetStyle.BAR, CarWidgetStyle.COMPACT -> {
-                    val energyPart = when (s.powertrain) {
-                        VehiclePowertrain.EV -> if (s.hasBatteryData) "电 ${s.batteryPercent}%" else "--%"
-                        VehiclePowertrain.PHEV -> when {
-                            s.hasBatteryData && s.hasFuelData -> "电${s.batteryPercent}% 油${s.fuelPercent}%"
-                            s.hasBatteryData -> "电 ${s.batteryPercent}%"
-                            s.hasFuelData -> "油 ${s.fuelPercent}%"
-                            else -> "--%"
-                        }
-                        VehiclePowertrain.ICE -> if (s.hasFuelData) "${s.fuelPercent}%" else "--%"
-                    }
-                    "${s.primaryStatus} · $energyPart"
-                }
+                CarWidgetStyle.BAR, CarWidgetStyle.COMPACT -> "${s.primaryStatus} · $rangeStr"
                 CarWidgetStyle.MEDIUM, CarWidgetStyle.LARGE -> s.primaryStatus
             }
         }
         rv.setTextViewText(R.id.widget_status_line, statusText)
 
-        // Exact sync timestamp placed right beside the Refresh button (never freezes on "刚刚更新")
+        // Exact sync timestamp beside the Refresh button (MEDIUM & LARGE)
         if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
             val timeLabel = if (s.transientHint.startsWith("正在刷新")) {
                 "刷新中..."
@@ -405,53 +617,20 @@ object CarWidgetManager {
                 formatSyncTimestamp(s.updatedAtMs)
             }
             rv.setTextViewText(R.id.widget_update_time, timeLabel)
-        }
 
-        // Fuel / Battery Bar (COMPACT & MEDIUM)
-        if (style == CarWidgetStyle.COMPACT || style == CarWidgetStyle.MEDIUM) {
-            rv.setProgressBar(R.id.widget_fuel_bar, 100, if (primaryBarPercent >= 0) primaryBarPercent else 0, false)
-        }
-
-        // Plate badge & detailed energy text (MEDIUM & LARGE)
-        if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
             if (s.plateNo.isNotBlank()) {
                 rv.setViewVisibility(R.id.widget_plate_badge, View.VISIBLE)
                 rv.setTextViewText(R.id.widget_plate_badge, s.plateNo)
             } else {
                 rv.setViewVisibility(R.id.widget_plate_badge, View.GONE)
             }
-            val rangeStr = if (s.rangeKm > 0) "${s.rangeKm}km" else "--km"
-            val energyDetail = when (s.powertrain) {
-                VehiclePowertrain.EV -> {
-                    val batStr = if (s.hasBatteryData) "电 ${s.batteryPercent}%" else "--%"
-                    val evRange = if (s.electricRangeKm > 0) "${s.electricRangeKm}km" else rangeStr
-                    "$batStr · $evRange"
-                }
-                VehiclePowertrain.PHEV -> {
-                    val parts = mutableListOf<String>()
-                    if (s.hasBatteryData) parts += "电 ${s.batteryPercent}%"
-                    if (s.hasFuelData) parts += "油 ${s.fuelPercent}%"
-                    if (parts.isEmpty()) parts += "--%"
-                    parts += rangeStr
-                    parts.joinToString(" · ")
-                }
-                VehiclePowertrain.ICE -> {
-                    val fuelStr = if (s.hasFuelData) "${s.fuelPercent}%" else "--%"
-                    "$fuelStr · $rangeStr"
-                }
-            }
-            rv.setTextViewText(R.id.widget_fuel_text, energyDetail)
+
+            rv.setTextViewText(R.id.widget_fuel_label, rangeLabelForPowertrain(s.powertrain))
+            rv.setTextViewText(R.id.widget_fuel_text, rangeStr)
         }
 
         // Large Dashboard extra telemetry cells
         if (style == CarWidgetStyle.LARGE) {
-            val energyLabel = when (s.powertrain) {
-                VehiclePowertrain.EV -> "电量续航"
-                VehiclePowertrain.PHEV -> "油电续航"
-                VehiclePowertrain.ICE -> "油量续航"
-            }
-            rv.setTextViewText(R.id.widget_fuel_label, energyLabel)
-
             val climateStr = when {
                 s.acOn && s.cabinTempC != Int.MIN_VALUE -> "开启 · ${s.cabinTempC}°C"
                 s.acOn -> "已开启"
@@ -474,7 +653,7 @@ object CarWidgetManager {
             rv.setOnClickPendingIntent(R.id.widget_btn_refresh, buildActionPendingIntent(context, CMD_REFRESH, 100))
         }
 
-        // Control 1: Lock / Unlock (ALL 4 styles)
+        // Control 1: Lock / Unlock (frameless; circular halo only when active)
         val unlocked = !s.doorLocked
         rv.setImageViewResource(
             R.id.widget_icon_lock,
@@ -482,9 +661,9 @@ object CarWidgetManager {
         )
         rv.setInt(R.id.widget_icon_lock, "setColorFilter", if (unlocked) COLOR_ACTIVE else COLOR_WHITE)
         rv.setInt(
-            R.id.widget_btn_lock,
+            R.id.widget_halo_lock,
             "setBackgroundResource",
-            if (unlocked) R.drawable.widget_btn_bg_active else R.drawable.widget_btn_bg
+            if (unlocked) R.drawable.widget_icon_halo_active else 0
         )
         rv.setOnClickPendingIntent(R.id.widget_btn_lock, buildActionPendingIntent(context, CMD_TOGGLE_LOCK, 101))
         if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
@@ -492,12 +671,12 @@ object CarWidgetManager {
             rv.setTextColor(R.id.widget_label_lock, if (unlocked) COLOR_ACTIVE else COLOR_LABEL_IDLE)
         }
 
-        // Control 2: Climate AC (ALL 4 styles)
+        // Control 2: Climate AC (frameless; circular halo only when active)
         rv.setInt(R.id.widget_icon_ac, "setColorFilter", if (s.acOn) COLOR_ACTIVE else COLOR_WHITE)
         rv.setInt(
-            R.id.widget_btn_ac,
+            R.id.widget_halo_ac,
             "setBackgroundResource",
-            if (s.acOn) R.drawable.widget_btn_bg_active else R.drawable.widget_btn_bg
+            if (s.acOn) R.drawable.widget_icon_halo_active else 0
         )
         rv.setOnClickPendingIntent(R.id.widget_btn_ac, buildActionPendingIntent(context, CMD_TOGGLE_AC, 102))
         if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
@@ -508,13 +687,14 @@ object CarWidgetManager {
         // Controls 3 & 4: Find Car + Trunk (BAR, MEDIUM, LARGE)
         if (style != CarWidgetStyle.COMPACT) {
             rv.setInt(R.id.widget_icon_flash, "setColorFilter", COLOR_WHITE)
+            rv.setInt(R.id.widget_halo_flash, "setBackgroundResource", 0)
             rv.setOnClickPendingIntent(R.id.widget_btn_flash, buildActionPendingIntent(context, CMD_FIND_CAR, 103))
 
             rv.setInt(R.id.widget_icon_trunk, "setColorFilter", if (s.trunkOpen) COLOR_ACTIVE else COLOR_WHITE)
             rv.setInt(
-                R.id.widget_btn_trunk,
+                R.id.widget_halo_trunk,
                 "setBackgroundResource",
-                if (s.trunkOpen) R.drawable.widget_btn_bg_active else R.drawable.widget_btn_bg
+                if (s.trunkOpen) R.drawable.widget_icon_halo_active else 0
             )
             rv.setOnClickPendingIntent(R.id.widget_btn_trunk, buildActionPendingIntent(context, CMD_TOGGLE_TRUNK, 104))
             if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
@@ -527,9 +707,9 @@ object CarWidgetManager {
         if (style == CarWidgetStyle.LARGE) {
             rv.setInt(R.id.widget_icon_engine, "setColorFilter", if (s.engineRunning) COLOR_ACTIVE else COLOR_WHITE)
             rv.setInt(
-                R.id.widget_btn_engine,
+                R.id.widget_halo_engine,
                 "setBackgroundResource",
-                if (s.engineRunning) R.drawable.widget_btn_bg_active else R.drawable.widget_btn_bg
+                if (s.engineRunning) R.drawable.widget_icon_halo_active else 0
             )
             rv.setOnClickPendingIntent(R.id.widget_btn_engine, buildActionPendingIntent(context, CMD_TOGGLE_ENGINE, 105))
             rv.setTextViewText(R.id.widget_label_engine, if (s.engineRunning) "熄火" else "启动")
@@ -585,6 +765,7 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
         val profile = store.getActiveProfile()
 
         if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+            CarWidgetManager.markLoggedOut(appCtx, expired = false)
             launchAppForAction(appCtx, cmd)
             return
         }
@@ -658,8 +839,7 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                             if (store.getActiveProfile().accessToken == profile.accessToken) {
                                 store.clearTokensPreserveOfflineKeys()
                             }
-                            CarWidgetStateStore.setTransientHint(appCtx, "")
-                            CarWidgetManager.updateAllWidgets(appCtx)
+                            CarWidgetManager.markLoggedOut(appCtx, expired = true)
                             mainHandler.post {
                                 Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
                                 launchAppForAction(appCtx, cmd, needPinCache = false)
@@ -729,8 +909,7 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                         if (store.getActiveProfile().accessToken == profile.accessToken) {
                             store.clearTokensPreserveOfflineKeys()
                         }
-                        CarWidgetStateStore.setTransientHint(appCtx, "")
-                        CarWidgetManager.updateAllWidgets(appCtx)
+                        CarWidgetManager.markLoggedOut(appCtx, expired = true)
                         mainHandler.post {
                             Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
                             launchAppForAction(appCtx, cmd, needPinCache = false)
@@ -788,7 +967,6 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                             Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show()
                         }
                     } else {
-                        // Command succeeded but active VIN changed mid-flight; clear any stale hint on matching snapshot.
                         if (CarWidgetStateStore.load(appCtx).vin.equals(profile.vin, ignoreCase = true)) {
                             CarWidgetStateStore.setTransientHint(appCtx, "")
                             CarWidgetManager.updateAllWidgets(appCtx)
