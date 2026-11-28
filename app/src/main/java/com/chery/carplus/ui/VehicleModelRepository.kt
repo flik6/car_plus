@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap
 object VehicleModelRepository {
 
     private const val PREFS_NAME = "car3d_model_cache_v1"
+    private const val KEY_CACHED_MANIFEST_JSON = "cached_manifest_json"
     private const val CACHE_DIR_NAME = "car3d_models"
     private const val MANIFEST_CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L
     private const val CONNECT_TIMEOUT_MS = 8_000
@@ -107,6 +108,9 @@ object VehicleModelRepository {
 
     private val perKeyLocks = ConcurrentHashMap<String, Any>()
 
+    @Volatile
+    private var dynamicCatalog: Map<String, ModelCatalogEntry> = FALLBACK_CATALOG
+
     fun cacheDir(context: Context): File {
         val dir = File(context.applicationContext.filesDir, CACHE_DIR_NAME)
         if (!dir.exists()) {
@@ -116,13 +120,53 @@ object VehicleModelRepository {
     }
 
     /**
+     * Returns all supported 3D vehicle models (built-in catalog merged with any cached
+     * remote `manifest.json` entries). Preserves deterministic order so Demo Mode and
+     * diagnostics automatically expose all N supported models as new GLBs are added.
+     */
+    fun listSupportedModels(context: Context? = null): List<ModelCatalogEntry> {
+        val merged = LinkedHashMap<String, ModelCatalogEntry>()
+        FALLBACK_CATALOG.forEach { (k, v) -> merged[k] = v }
+        val persisted = context?.let { readCachedManifest(it.applicationContext) }.orEmpty()
+        persisted.forEach { (k, v) -> merged[k] = v }
+        dynamicCatalog.forEach { (k, v) ->
+            if (!merged.containsKey(k)) merged[k] = v
+        }
+        dynamicCatalog = LinkedHashMap(merged)
+        return merged.values.toList()
+    }
+
+    /**
+     * Fetches the latest remote `manifest.json`, caches it locally, and returns the
+     * full merged list of all supported 3D vehicle models.
+     */
+    fun refreshCatalogFromRemote(context: Context): List<ModelCatalogEntry> {
+        val appCtx = context.applicationContext
+        val remote = fetchRemoteManifest(appCtx)
+        if (!remote.isNullOrEmpty()) {
+            val merged = LinkedHashMap<String, ModelCatalogEntry>()
+            FALLBACK_CATALOG.forEach { (k, v) -> merged[k] = v }
+            remote.forEach { (k, v) -> merged[k] = v }
+            dynamicCatalog = merged
+            return merged.values.toList()
+        }
+        return listSupportedModels(appCtx)
+    }
+
+    /**
      * Resolves any vehicle display name or internal Chery platform code to a concrete
-     * 3D model key. Dedicated models (`arrizo8`, `tiggo8`) match directly; other models
-     * fall back to the closest body silhouette (SUV -> `tiggo8`, sedan/unknown -> `arrizo8`).
+     * 3D model key. Dedicated models (`arrizo8`, `tiggo8`, plus any dynamically discovered
+     * manifest models) match directly; other models fall back to the closest body silhouette.
      */
     fun resolveModelKey(rawHint: String?): String {
         val raw = rawHint.orEmpty().trim().lowercase(Locale.US)
         if (raw.isBlank()) return "arrizo8"
+        val catalog = dynamicCatalog
+        if (catalog.containsKey(raw)) return raw
+        catalog.values.firstOrNull { entry ->
+            val dn = entry.displayName.trim().lowercase(Locale.US)
+            dn.isNotBlank() && (raw == dn || raw.contains(dn))
+        }?.let { return it.key }
         if (raw == "tiggo8" || TIGGO8_EXACT_KEYWORDS.any { raw.contains(it) }) {
             return "tiggo8"
         }
@@ -138,6 +182,13 @@ object VehicleModelRepository {
     fun isExactModelMatch(rawHint: String?): Boolean {
         val raw = rawHint.orEmpty().trim().lowercase(Locale.US)
         if (raw.isBlank()) return true
+        val catalog = dynamicCatalog
+        if (catalog.containsKey(raw)) return true
+        if (catalog.values.any { entry ->
+                val dn = entry.displayName.trim().lowercase(Locale.US)
+                dn.isNotBlank() && (raw == dn || raw.contains(dn))
+            }
+        ) return true
         return raw == "tiggo8" ||
             raw == "arrizo8" ||
             TIGGO8_EXACT_KEYWORDS.any { raw.contains(it) } ||
@@ -145,10 +196,13 @@ object VehicleModelRepository {
     }
 
     fun displayNameForKey(key: String): String {
-        return FALLBACK_CATALOG[key]?.displayName ?: when (key) {
-            "tiggo8" -> "瑞虎8"
-            else -> "艾瑞泽8"
-        }
+        val norm = key.trim().lowercase(Locale.US)
+        return dynamicCatalog[norm]?.displayName
+            ?: FALLBACK_CATALOG[norm]?.displayName
+            ?: when (norm) {
+                "tiggo8" -> "瑞虎8"
+                else -> "艾瑞泽8"
+            }
     }
 
     data class ModelCacheDebugInfo(
@@ -164,7 +218,7 @@ object VehicleModelRepository {
     fun getDebugCacheStatus(context: Context): List<ModelCacheDebugInfo> {
         val appCtx = context.applicationContext
         val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return FALLBACK_CATALOG.values.map { entry ->
+        return listSupportedModels(appCtx).map { entry ->
             val file = getCachedModelFile(appCtx, entry.key)
             ModelCacheDebugInfo(
                 key = entry.key,
@@ -242,8 +296,9 @@ object VehicleModelRepository {
                 )
             }
 
-            val remoteCatalog = fetchRemoteManifest()
+            val remoteCatalog = fetchRemoteManifest(appCtx)
             val entry = remoteCatalog?.get(key)
+                ?: dynamicCatalog[key]
                 ?: FALLBACK_CATALOG[key]
                 ?: FALLBACK_CATALOG.getValue("arrizo8")
 
@@ -287,7 +342,7 @@ object VehicleModelRepository {
 
         val lock = perKeyLocks.getOrPut(key) { Any() }
         synchronized(lock) {
-            val remoteCatalog = fetchRemoteManifest()
+            val remoteCatalog = fetchRemoteManifest(appCtx)
                 ?: return BackgroundUpdateResult(checked = false, updated = false, key = key)
             markManifestChecked(appCtx, key)
 
@@ -327,7 +382,16 @@ object VehicleModelRepository {
             .apply()
     }
 
-    private fun fetchRemoteManifest(): Map<String, ModelCatalogEntry>? {
+    private fun readCachedManifest(context: Context): Map<String, ModelCatalogEntry> {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_CACHED_MANIFEST_JSON, "")
+            .orEmpty()
+            .trim()
+        if (raw.isBlank()) return emptyMap()
+        return runCatching { parseManifestJson(raw) }.getOrDefault(emptyMap())
+    }
+
+    private fun fetchRemoteManifest(context: Context? = null): Map<String, ModelCatalogEntry>? {
         for (base in CDN_BASES) {
             val urlStr = "$base/manifest.json"
             val parsed = runCatching {
@@ -342,7 +406,18 @@ object VehicleModelRepository {
                 try {
                     if (conn.responseCode !in 200..299) return@runCatching null
                     val body = conn.inputStream.bufferedReader().use { it.readText() }
-                    parseManifestJson(body)
+                    val map = parseManifestJson(body)
+                    if (map.isNotEmpty()) {
+                        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                            ?.edit()
+                            ?.putString(KEY_CACHED_MANIFEST_JSON, body)
+                            ?.apply()
+                        val merged = LinkedHashMap<String, ModelCatalogEntry>()
+                        FALLBACK_CATALOG.forEach { (k, v) -> merged[k] = v }
+                        map.forEach { (k, v) -> merged[k] = v }
+                        dynamicCatalog = merged
+                    }
+                    map
                 } finally {
                     conn.disconnect()
                 }

@@ -1,6 +1,6 @@
-# Qiri+ Android 设计系统与 UI 工程规范（Design System v3.0）
+# Qiri+ Android 设计系统与 UI 工程规范（Design System v3.1）
 
-> **适用范围**：Qiri+ Android 客户端全量界面、统一车控与 MDI 矢量图标体系、车控甲板与长按编辑模式、原生桌面小组件（4 种尺寸）、共享组件套件（`DesignComponents.kt`）、动效与触觉分级（`MotionSpec.kt`）、四类交互容器、多层级导航栈、6 位安全密码、5 行首页信息架构、车辆/驾驶员/地点、隐私脱敏及系统手动配对规范。
+> **适用范围**：Qiri+ Android 客户端全量界面、统一车控与 MDI 矢量图标体系、启动图标、车控甲板与长按编辑模式、原生桌面小组件（4 种尺寸）、共享组件套件（`DesignComponents.kt`）、空间连续性与触觉分级（`MotionSpec.kt`）、四类交互容器、多层级导航栈、6 位安全密码、5 行首页信息架构、车辆/驾驶员/地点、手机号与敏感信息脱敏、演示模式（`demo/demo`）、调试诊断界面及系统手动配对规范。
 > **审美基准**：**Minimalist Automotive Dark（极简暗色汽车美学）** — 深邃中性暗底、克制留白、清晰层级、零装饰线框、高精度同心圆角与网格秩序。
 > **资产边界**：视觉编排仅以行业标杆的克制留白与层级密度为参考；Qiri+ 保留自有 3D GLB 车模、Qiri+ 品牌标识、启动图标、统一单色车控矢量套件及暗色原生实现。
 
@@ -122,7 +122,7 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 | **通用操作（8 项 · MDI）** | `CALENDAR`、`CLOCK`、`CHECK`、`CHECK_CIRCLE`、`SWAP_CAR`、`ADD_ICON`、`CLOSE_ICON`、`LOG_OUT` | Pictogrammers MDI `24 × 24` 填充路径 |
 
 **图标 Do / Don't**：
-- **Do**：新增任何车控图标必须落入 `24×24` 视口、`~18u` 安全区、`1.65u` 圆头描边，并在 `AppIcons.kt` 与 `ic_widget_*.xml` 保持同源路径。
+- **Do**：新增任何车控图标必须落入 `24×24` 视口、`~18u` 安全区、`1.65u` 圆头描边，并在 `AppIcons.kt` 与 `ic_widget_*.xml` 保持同源路径；应用启动图标（Day/Night 自适应图标与各密度 PNG）恒定保持黑底 `#050505` + 纯白 `#FFFFFF` Qiri+ 标识，浅色模式下严禁反转为白底。
 - **Don't**：严禁混入 Emoji、位图 PNG 图标、多色渐变图标、实心填充车控图标，或超出 `1.65u` 的粗细混搭。
 
 ---
@@ -213,8 +213,8 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 7. **`AnchoredDropdown`（`AppComponents.showAnchoredDropdown`）**：`BG_POPOVER (#202228)`、`12dp` 圆角、`0.8dp #2F323B` 边框、`12dp` elevation，紧贴锚点展开（`scale 0.92 → 1.0`，`180ms EASE_OUT_EXPO`）。
 8. **`ControlIconButton`（`AppComponents.createControlIconButton`）**：无边框单色车控图标按钮（详见 §5）。
 9. **`AppActionButton`（`AppComponents.createActionButton`）**：`PRIMARY`（`minHeight 46dp`、`12dp` 圆角、`#3E6AE1`）、`SECONDARY`（`minHeight 44dp`、`11dp` 圆角、`#2B2F3A` + `0.9dp #424858`）、`DANGER_TEXT`（`minHeight 48dp`、无框透底、`#F87171`）。
-10. **`ConfirmDialog`（`AppComponents.showConfirmDialog`）**：居中模态卡（`BG_SURFACE`、`16dp` 圆角、`22dp` 内边距、`scale 0.94 → 1.0`，`220ms`），最多 2 个操作按钮。
-11. **`AppBottomSheet`**：`BG_SURFACE (#1C1D21)`、顶部 `22dp` 圆角、顶部 `38dp × 4dp` `#444854` 拖拽手柄、GPU 合成同窗遮罩、支持下拉关闭、**无冗余“关闭”文字按钮**。
+10. **`ConfirmDialog`（`AppComponents.showConfirmDialog`）**：居中模态卡（`BG_SURFACE`、`16dp` 圆角、`22dp` 内边距），通过 `AppSystemInsets.installModalContent` 挂载同窗 GPU 合成遮罩，入场 `MotionSpec.animateModalEnter`（`scale 0.94 → 1.0` + `+12dp → 0` 上浮，`220ms EASE_OUT_EXPO`），退场 `MotionSpec.dismissModalAnimated`（精确镜像回缩 + 遮罩淡出，`160ms EASE_STANDARD`），最多 2 个操作按钮。
+11. **`AppBottomSheet`**：`BG_SURFACE (#1C1D21)`、统一顶部 `22dp` 圆角、顶部 `38dp × 4dp` `#444854` 拖拽手柄、同窗 GPU 合成遮罩、支持 1:1 跟手下拉关闭与弹簧回弹、**无冗余“关闭”文字按钮**。
 12. **`AppEmptyState`（`AppComponents.createEmptyState`）**：居中 `36dp` MDI 图标（`#5C606A`）+ `15sp` 主文案 + 可选 `13sp` 说明文案。
 
 ### 7.1 四类交互容器唯一白名单
@@ -233,12 +233,29 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 
 ---
 
-## 8. 动效节奏、触觉分级与数据刷新（`MotionSpec` & `AppHaptics`）
+## 8. 空间连续性、触觉分级与数据刷新（`MotionSpec` & `AppHaptics`）
 
-### 8.1 动效曲线与时长
+### 8.1 空间连续性规范（Spatial Continuity）
 
-- **标准曲线**：`EASE_OUT_EXPO (0.22, 1, 0.36, 1)`、`EASE_STANDARD (0.2, 0, 0, 1)`、`EASE_SPRING_RELEASE (0.22, 1.12, 0.36, 1)`。
-- **时长基线**：按压 `90ms` / 弹簧回弹 `160ms`；编辑态悬停 `100ms`；下拉菜单 `180ms`；页面切换入场 `240ms` / 退场 `160ms`；底部抽屉入场 `260ms` / 退场 `170ms`；确认弹窗 `220ms`；错误水平抖动 `360ms`；地图轨迹回放 `1200ms`。
+界面切换必须保持明确的空间方向、深度层级与进退对称性，严禁生硬跳变（`visibility` 瞬切）或无退场动画的窗口闪烁消失：
+
+- **标准曲线**：`EASE_OUT_EXPO (0.22, 1, 0.36, 1)`（入场减速落位）、`EASE_STANDARD (0.2, 0, 0, 1)`（退场利落收束）、`EASE_SPRING_RELEASE (0.22, 1.12, 0.36, 1)`（按压回弹）。
+- **核心场景转场矩阵**：
+
+| 场景 | 统一 API | 空间连续性规范 |
+| --- | --- | --- |
+| **登录 / 欢迎页 → 首页** | 离场层水平滑出 | 首页（含 3D WebView `DrawGLFunctor`）保持恒等变换挂载，认证层在其上方 `-28dp` 水平滑淡离场（`240ms EASE_OUT_EXPO`），零跳帧 |
+| **二级 / 三级全屏覆盖页入出栈** | `MotionSpec.animateSubpageEnter` / `animateSubpageExit` | 进栈：新页面沿共享 X 轴自 `+20%` 宽滑入（`260ms EASE_OUT_EXPO`），底层页面同步 `-28dp` 视差 + `0.975×` 景深后退（`alpha 0.86`）；返回：严格镜像右滑退出（`200ms`）并同步恢复底层景深（`240ms`） |
+| **容器内子页切换（如设置子页 / 诊断页签）** | `MotionSpec.transitionContainer(host, view, dir)` | 前进（`dir > 0`）：新视图 `+22%` 宽 + `0.985→1.0` 缩放滑入（`260ms`），旧视图 `-12%` 宽 + `0.98×` 缩放离场（`200ms`）；后退（`dir < 0`）严格反向镜像 |
+| **底部物理抽屉** | `AppSystemInsets.installBottomSheetContent` + `animateSheetEnter` / `dismissSheetAnimated` | 统一 `22dp` 顶部圆角 + 同窗 GPU 合成遮罩；入场 `+64dp → 0`（`260ms`）；支持 1:1 跟手下拉与速度阈值关闭；退场完整滑出屏幕底部（`200ms`） |
+| **居中模态弹窗** | `AppSystemInsets.installModalContent` + `animateModalEnter` / `dismissModalAnimated` | 入场 `0.94 → 1.0` 缩放 + `+12dp → 0` 轻浮 + 同窗遮罩淡入（`220ms EASE_OUT_EXPO`）；关闭/点击遮罩/返回键一律执行 `1.0 → 0.94` + `+10dp` 下沉 + 遮罩淡出镜像退场（`160ms EASE_STANDARD`） |
+| **分段栏 / 切车抬头 / 过滤切换** | `MotionSpec.createSlidingSegmentedBar` + `animatePanelSwitch` | 胶囊滑块沿 X 轴连续平移（`220ms`），内容区沿对应方向 `±18dp`（或垂直 `+10dp`）轻滑入场（`200ms`） |
+| **折叠面板展开 / 收起** | `MotionSpec.animateExpandCollapse` | 面板平滑显隐与轻位移动效（展开 `200ms` / 收起 `150ms`），同步驱动指示箭头 `180°` 旋转 |
+| **微交互按压与错误反馈** | `attachPressPhysics` / `shakeError` | 按压 `90ms` / 回弹 `160ms`；编辑态悬停 `100ms`；下拉菜单 `180ms`；错误阻尼抖动 `360ms`；轨迹回放 `1200ms` |
+
+**空间连续性 Do / Don't**：
+- **Do**：同级切换用滑动胶囊 + `animatePanelSwitch`，层级深入用共享 X 轴推入与底层景深联动，模态弹窗一律走 `installModalContent` + `dismissModalAnimated` 确保进退对称；高频刷新的调试/状态面板必须原地更新（禁止周期性 `removeAllViews()` 破坏滚动位置与动画）。
+- **Don't**：严禁直接调用无退场动画的原生弹窗 `dismiss()` 导致闪退，严禁在二级页面返回时与进栈方向不一致。
 
 ### 8.2 触觉震动反馈分级规范（`AppHaptics.perform(view, level)`）
 
@@ -296,15 +313,18 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 
 - 每车仅一张概要卡，整卡为唯一入口；仅呈现车型、车牌（缺失为 `未设置车牌号`）、单一状态与右侧 `CHEVRON_RIGHT`，不堆叠 VIN、仿真车牌或次级按钮；按压 `0.98×` 缩放。
 
-### 10.3 敏感字段脱敏与密码输入
+### 10.3 手机号与敏感字段脱敏规范（`SensitiveUiText`）
 
-| 字段 | 默认展示掩码 | 缺失占位 |
+| 字段 | 统一调用接口与默认掩码规则 | 缺失占位 |
 | --- | --- | --- |
-| 车架号 VIN、发动机号、ICCID、SN | `••••` + 末四位（长度 $\le 4$ 全遮为 `••••`） | `—` |
-| 车主姓名 | 仅保留首字，其余遮蔽；单字姓名遮为 `•` | `—` |
-| 购车时间 | 仅保留四位年份 | `—` |
+| **手机号 / 账号手机** | `SensitiveUiText.maskPhone(raw)`：**前 3 后 2，隐藏中间 6 位**（标准 11 位：`13812345678` $\rightarrow$ `138******78`；含 `+86` 前缀保留为 `+86 138******78`；后端返回的旧式 4 星掩码自动重掩为 6 星；非标准长度 $\ge 6$ 保留前 3 后 2，长度 $= 5$ 保留前 2 后 2，长度 $\le 4$ 统一遮为 `••••`） | `""` / `—` |
+| **混合账号名 / 昵称兜底** | `SensitiveUiText.maskIfPhone(raw)`：仅当形似手机号时应用 `maskPhone`，非手机号（如 `demo`、昵称）原样保留 | `""` / `—` |
+| **诊断文本 / 运行日志** | `SensitiveUiText.maskPhonesInText(text)`：对展示、复制、导出的文本中内嵌手机号统一脱敏为 `138******78` | 原文 |
+| 车架号 VIN、发动机号、ICCID、SN | `SensitiveUiText.identifier(raw)`：仅保留末四位 `••••` + 末四位（长度 $\le 4$ 全遮为 `••••`） | `—` |
+| 车主姓名 | `SensitiveUiText.personName(raw)`：仅保留首字，其余遮蔽；单字姓名遮为 `•` | `—` |
+| 购车时间 | `SensitiveUiText.year(raw)`：仅保留四位年份 | `—` |
 
-- 脱敏规则同步覆盖可见文本、`contentDescription` 与剪贴板（复制时提示“已脱敏”）；仅在用户主动进入编辑态时展示可编辑明文。
+- **严格禁令**：全应用（首页、设置、个人资料、驾驶员/远程授权、车辆信息、调试诊断、复制与导出日志）严禁出现未脱敏手机号或旧式 `3+4+4` 四星掩码；脱敏同步覆盖可见文本、`contentDescription` 与剪贴板（复制时提示“已脱敏”）；仅在用户主动进入编辑/短信验证表单输入时允许编辑明文。
 - 登录密码字段统一关闭联想建议并应用 `PasswordTransformationMethod`，确保所有输入与自动填充均以圆点呈现。
 
 ### 10.4 系统手动蓝牙配对原则
@@ -313,3 +333,18 @@ $$R_{\text{inner}} = \max\left(0,\; R_{\text{outer}} - P_{\text{outer}}\right)$$
 2. **状态如实反馈**：仅呈现 `未配对 / 配对中 / 已连接 / 失败或超时`，不与锁止或驻车态混淆。
 3. **凭据零展示**：界面、无障碍、剪贴板、日志均不得展示或推导配对验证码。
 4. **失败可恢复**：取消/超时仅更新提示，不执行破坏性重置。
+
+### 10.5 演示模式规范（Demo Mode · `demo` / `demo`）
+
+- **登录入口**：登录页支持账号 `demo`、密码 `demo`（忽略大小写与首尾空白，自动跳过 11 位手机号格式校验），并在“忘记密码”下方提供克制的单行快捷提示 `“演示账号：demo / demo（点击填入）”`，轻触自动切至密码登录并预填凭据，不增加页面杂乱度。
+- **动态全车型覆盖（N 台演示车）**：演示车库由 `VehicleModelRepository.listSupportedModels(context)` 与 `DemoVehicleBackend` 动态构建，**覆盖应用当前支持的全部 N 款 3D 车型**（随 `manifest.json` 车型扩展自动增长），每台演示车具备独立车型名、演示车牌（`皖B·D0001..D000N`）、17 位演示 VIN 及匹配动力形态（燃油 / 插混 / 纯电）的完整遥测数据，左上角车型切换器可平滑切换全部 N 台车模。
+- **全功能离线可交互**：通过 `CheryHttpClient` 演示处理器钩子覆盖车控（锁车/解锁、空调/温控、闪灯、尾箱、启停、车窗、天窗及 3D 联动）、地点与行程轨迹、电子围栏、驾驶员（手机号严格 `138******78` 脱敏）、消息、OTA、设置与调试诊断，全程零网络/蓝牙报错弹窗。
+- **强账号隔离**：`VehicleProfileStore` 以纯内存演示覆盖层隔离演示会话，绝不覆写、污染或清空本机已持久化的真实用户账号、Token、离线蓝牙密钥与设置；退出演示模式即刻还原真实环境。
+
+### 10.6 调试诊断界面规范（`DebugDiagnosticsScreen.kt`）
+
+- **言简意赅与视觉秩序**：杜绝长段解释文本与混乱堆叠；全部操作按钮文案控制在 `2–6` 字，数值字段启用 `tnum` 等宽数字，零 Emoji。
+- **三段式信息层级**：
+  1. **顶部实时状态概览卡（`18dp` 圆角，`12dp` 内边距）**：单行抬头展示车型、车牌胶囊、车库台数徽标（`N台`）、模式胶囊（`正式` 绿 / `演示` 琥珀）与可点刷新开关（`实时` / `已暂停`）；中段 5 格语义状态条（`云端` / `蓝牙` / `车辆` / `3D` / `无感`）；底栏脱敏身份摘要（`账号 138******78 · VIN ••••XXXX · vX.Y.Z`）。
+  2. **四组分类操作网格（每组 3 列等宽、`42dp` 高、`10dp` 同心内圆角，共 24 项动作）**：`状态与同步`、`蓝牙诊断`、`控车测试`（复用统一单色车控矢量图标 + `MEDIUM_CONFIRM` 触觉）、`会话与数据`（含校验 Token、同步配置、复制诊断、导出脱敏日志、清空日志、暂停/恢复刷新）。
+  3. **底部检视与日志面板（`状态快照` | `蓝牙TLV` | `运行日志`）**：采用 `MotionSpec.createSlidingSegmentedBar` + `transitionContainer` 水平共享轴切换、原地差量刷新（告别定时 `removeAllViews()` 闪烁与丢滚动位置）、折叠快照卡（`animateExpandCollapse`）、6 阶段 GATT 握手胶囊条与日志过滤胶囊（`animatePanelSwitch`），全部展示/复制/导出内容强制经 `SensitiveUiText.maskPhonesInText` 脱敏且不暴露配对 PIN。

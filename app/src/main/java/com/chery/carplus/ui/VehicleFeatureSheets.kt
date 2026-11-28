@@ -951,7 +951,9 @@ internal class VehicleFeatureSheets(
                         )
                     } else {
                         list.forEachIndexed { idx, item ->
-                            val title = item.receiverName.ifBlank { maskMobile(item.receiverMobile).ifBlank { "被授权人" } }
+                            val title = SensitiveUiText.maskIfPhone(item.receiverName).ifBlank {
+                                SensitiveUiText.maskPhone(item.receiverMobile).ifBlank { "被授权人" }
+                            }
                             val range = formatAuthDateRange(item.startTime, item.endTime)
                             val (statusLabel, isActive) = formatAuthStatus(item.status)
                             val row = AppComponents.createListRow(
@@ -992,7 +994,9 @@ internal class VehicleFeatureSheets(
         profile: VehicleProfile,
         onReload: () -> Unit
     ) {
-        val name = item.receiverName.ifBlank { maskMobile(item.receiverMobile).ifBlank { "被授权人" } }
+        val name = SensitiveUiText.maskIfPhone(item.receiverName).ifBlank {
+            SensitiveUiText.maskPhone(item.receiverMobile).ifBlank { "被授权人" }
+        }
         showModalDialog("远程授权详情") { box, dialog ->
             val infoTv = text(
                 listOf(
@@ -3000,7 +3004,9 @@ internal class VehicleFeatureSheets(
         profile: VehicleProfile,
         onReload: () -> Unit
     ): LinearLayout = cardBox().apply {
-        val title = item.receiverName.ifBlank { item.receiverMobile.ifBlank { "授权人 #${item.keyId}" } }
+        val title = SensitiveUiText.maskIfPhone(item.receiverName).ifBlank {
+            SensitiveUiText.maskPhone(item.receiverMobile).ifBlank { "授权人 #${item.keyId}" }
+        }
         addView(text(title, 15f, TEXT_PRIMARY, Typeface.BOLD))
         val sub = listOfNotNull(
             item.authorityDesc.takeIf { it.isNotBlank() },
@@ -3057,7 +3063,7 @@ internal class VehicleFeatureSheets(
                     }
                 }.getOrDefault(item)
                 tv.text = listOf(
-                    "被授权账号：${detail.receiverMobile.ifBlank { detail.receiverName }}",
+                    "被授权账号：${SensitiveUiText.maskPhone(detail.receiverMobile).ifBlank { SensitiveUiText.maskIfPhone(detail.receiverName).ifBlank { SensitiveUiText.MISSING } }}",
                     "授权编号：${detail.keyId}",
                     "开始时间：${detail.startTime.ifBlank { "--" }}",
                     "结束时间：${detail.endTime.ifBlank { "--" }}",
@@ -3169,7 +3175,7 @@ internal class VehicleFeatureSheets(
             val meta = listOfNotNull(
                 plate.takeIf { it.isNotBlank() },
                 maskedVin(profile.vin),
-                maskMobile(profile.mobileNo).takeIf { it.isNotBlank() }
+                SensitiveUiText.maskPhone(profile.mobileNo).takeIf { it.isNotBlank() }
             ).joinToString("  ·  ")
             infoBox.addView(text(meta, 13f, TEXT_SUB), lp(top = dp(6)))
             body.addView(infoBox, lp(top = dp(10)))
@@ -4726,7 +4732,7 @@ internal class VehicleFeatureSheets(
             }
         }.apply {
             orientation = LinearLayout.VERTICAL
-            background = topRounded(CARD_MODAL, 20f)
+            background = topRounded(CARD_MODAL, 22f)
             setPadding(dp(20), dp(12), dp(20), dp(24))
         }
         val handle = View(context).apply { background = rounded(Color.rgb(72, 74, 82), 2f) }
@@ -4773,32 +4779,34 @@ internal class VehicleFeatureSheets(
 
     private fun showModalDialog(title: String, build: (LinearLayout, Dialog) -> Unit) {
         secondaryDialog?.dismiss()
-        val dialog = Dialog(context)
+        var modalCardRef: View? = null
+        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
+            override fun dismiss() {
+                val target = modalCardRef
+                if (!isShowing || target == null || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
+                } else {
+                    MotionSpec.dismissModalAnimated(target, this)
+                }
+            }
+        }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val scroll = ScrollView(context).apply { isVerticalScrollBarEnabled = false }
         val box = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(CARD_MODAL, 14f, Color.rgb(52, 54, 62), 0.7f)
+            background = rounded(CARD_MODAL, 16f, Color.rgb(52, 54, 62), 0.7f)
             setPadding(dp(22), dp(22), dp(22), dp(22))
         }
         box.addView(text(title, 18f, TEXT_PRIMARY, Typeface.BOLD))
         build(box, dialog)
         scroll.addView(box, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        modalCardRef = scroll
 
-        dialog.setContentView(scroll)
-        dialog.window?.apply {
-            setWindowAnimations(0)
-            setBackgroundDrawableResource(android.R.color.transparent)
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setDimAmount(0.75f)
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            setLayout((context.resources.displayMetrics.widthPixels * 0.90f).roundToInt(), WRAP_CONTENT)
-            setGravity(Gravity.CENTER)
-        }
+        AppSystemInsets.installModalContent(dialog, scroll, dimAmount = 0.68f, horizontalMarginDp = 20f)
         dialog.setOnDismissListener { if (secondaryDialog === dialog) secondaryDialog = null }
         secondaryDialog = dialog
         dialog.show()
-        MotionSpec.animateModalEnter(box)
+        MotionSpec.animateModalEnter(scroll)
     }
 
     private fun segmentedBar(
@@ -4819,15 +4827,7 @@ internal class VehicleFeatureSheets(
     )
 
     private fun animateTabContent(container: View) {
-        container.animate().cancel()
-        container.alpha = 0f
-        container.translationY = dpF(8f)
-        container.animate()
-            .alpha(1f)
-            .translationY(0f)
-            .setDuration(180L)
-            .setInterpolator(MotionSpec.EASE_OUT_EXPO)
-            .start()
+        MotionSpec.animatePanelSwitch(container)
     }
 
     private fun messageCard(item: ZyhlMessageItem, onClick: () -> Unit): LinearLayout = cardBox().apply {
@@ -4974,9 +4974,6 @@ internal class VehicleFeatureSheets(
         val v = vin.trim().uppercase(Locale.US)
         return if (v.length >= 10) v.take(3) + "***" + v.takeLast(4) else v.ifBlank { "--" }
     }
-
-    private fun maskMobile(mobile: String): String =
-        if (mobile.length >= 7) mobile.take(3) + "****" + mobile.takeLast(4) else mobile
 
     private fun friendlyErrorMessage(err: Throwable?, fallback: String): String {
         val raw = err?.message.orEmpty().trim()

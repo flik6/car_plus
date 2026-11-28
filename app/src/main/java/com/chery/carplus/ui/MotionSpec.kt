@@ -172,11 +172,11 @@ object MotionSpec {
     }
 
     /**
-     * Spatial-continuity container transition:
-     * - direction > 0: forward slide-in from +28dp + fade
-     * - direction < 0: backward slide-in from -24dp + fade
-     * - direction == 0: subtle +14dp vertical rise + fade
-     * Smoothly fades out previous child(ren) before removing them.
+     * Spatial-continuity container transition along a shared horizontal (or vertical) axis:
+     * - direction > 0: forward shared-axis push (incoming +22% width & 0.985->1 scale; outgoing -12% & 0.98 scale)
+     * - direction < 0: exact reverse mirror (incoming -14% width & 0.98->1 scale; outgoing +22% right slide)
+     * - direction == 0: subtle +14dp vertical glide + fade
+     * Smoothly transitions previous child(ren) out before removing them.
      */
     fun transitionContainer(
         container: FrameLayout,
@@ -195,14 +195,25 @@ object MotionSpec {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         )
-        newContent.animate().cancel()
-        newContent.alpha = 0f
-        newContent.translationX = when {
-            direction > 0 -> dp(ctx, 28f)
-            direction < 0 -> -dp(ctx, 24f)
+        val widthPx = container.width.takeIf { it > 0 }?.toFloat()
+            ?: ctx.resources.displayMetrics.widthPixels.toFloat()
+        val enterShiftX = when {
+            direction > 0 -> (widthPx * 0.22f).coerceAtLeast(dp(ctx, 72f))
+            direction < 0 -> -(widthPx * 0.14f).coerceAtLeast(dp(ctx, 44f))
             else -> 0f
         }
+        val enterScale = when {
+            direction > 0 -> 0.985f
+            direction < 0 -> 0.98f
+            else -> 1f
+        }
+
+        newContent.animate().cancel()
+        newContent.alpha = 0f
+        newContent.translationX = enterShiftX
         newContent.translationY = if (direction == 0) dp(ctx, 14f) else 0f
+        newContent.scaleX = enterScale
+        newContent.scaleY = enterScale
 
         container.addView(newContent, params)
 
@@ -210,15 +221,18 @@ object MotionSpec {
             .alpha(1f)
             .translationX(0f)
             .translationY(0f)
-            .setDuration(240L)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(if (direction > 0) 260L else if (direction < 0) 240L else 220L)
             .setInterpolator(EASE_OUT_EXPO)
             .start()
 
         val exitShiftX = when {
-            direction > 0 -> -dp(ctx, 16f)
-            direction < 0 -> dp(ctx, 16f)
+            direction > 0 -> -(widthPx * 0.12f).coerceAtLeast(dp(ctx, 36f))
+            direction < 0 -> (widthPx * 0.22f).coerceAtLeast(dp(ctx, 72f))
             else -> 0f
         }
+        val exitScale = if (direction > 0) 0.98f else 1f
 
         for (old in outgoing) {
             old.isClickable = false
@@ -227,10 +241,180 @@ object MotionSpec {
             old.animate()
                 .alpha(0f)
                 .translationX(exitShiftX)
-                .setDuration(160L)
+                .scaleX(exitScale)
+                .scaleY(exitScale)
+                .setDuration(200L)
                 .setInterpolator(EASE_STANDARD)
                 .withEndAction {
                     container.removeView(old)
+                }
+                .start()
+        }
+    }
+
+    /**
+     * Full-screen overlay subpage push (Level-2 / Level-3 navigation):
+     * slides [incoming] in along the shared horizontal axis while gently receding [underlying]
+     * with parallax (-28dp) and Z-depth scale (0.975f) for tactile spatial continuity.
+     */
+    fun animateSubpageEnter(incoming: View, underlying: View? = null) {
+        val ctx = incoming.context
+        val widthPx = (incoming.parent as? View)?.width?.takeIf { it > 0 }?.toFloat()
+            ?: ctx.resources.displayMetrics.widthPixels.toFloat()
+        val startX = (widthPx * 0.20f).coerceAtLeast(dp(ctx, 84f))
+
+        incoming.animate().cancel()
+        incoming.alpha = 0f
+        incoming.translationX = startX
+        incoming.scaleX = 0.99f
+        incoming.scaleY = 0.99f
+        incoming.animate()
+            .alpha(1f)
+            .translationX(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(260L)
+            .setInterpolator(EASE_OUT_EXPO)
+            .setListener(null)
+            .start()
+
+        underlying?.let { under ->
+            under.animate().cancel()
+            under.animate()
+                .translationX(-dp(ctx, 28f))
+                .scaleX(0.975f)
+                .scaleY(0.975f)
+                .alpha(0.86f)
+                .setDuration(260L)
+                .setInterpolator(EASE_OUT_EXPO)
+                .setListener(null)
+                .start()
+        }
+    }
+
+    /**
+     * Reverse mirror of [animateSubpageEnter]: slides [outgoing] smoothly rightward while restoring
+     * [underlying] back to neutral resting depth, then invokes [onEnd] cleanly (with watchdog safety).
+     */
+    fun animateSubpageExit(
+        outgoing: View,
+        underlying: View? = null,
+        onEnd: () -> Unit
+    ) {
+        val ctx = outgoing.context
+        val widthPx = (outgoing.parent as? View)?.width?.takeIf { it > 0 }?.toFloat()
+            ?: ctx.resources.displayMetrics.widthPixels.toFloat()
+        val exitX = (widthPx * 0.24f).coerceAtLeast(dp(ctx, 96f))
+
+        underlying?.let { under ->
+            under.animate().cancel()
+            under.animate()
+                .translationX(0f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .alpha(1f)
+                .setDuration(240L)
+                .setInterpolator(EASE_OUT_EXPO)
+                .setListener(null)
+                .start()
+        }
+
+        outgoing.isClickable = false
+        outgoing.isFocusable = false
+        outgoing.animate().cancel()
+
+        var finished = false
+        var fallback: Runnable? = null
+        val finishOnce = {
+            if (!finished) {
+                finished = true
+                fallback?.let(outgoing::removeCallbacks)
+                fallback = null
+                onEnd()
+            }
+        }
+        val watchdog = Runnable { finishOnce() }
+        fallback = watchdog
+        outgoing.postDelayed(watchdog, 280L)
+
+        outgoing.animate()
+            .translationX(exitX)
+            .alpha(0f)
+            .setDuration(200L)
+            .setInterpolator(EASE_STANDARD)
+            .setListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    outgoing.animate().setListener(null)
+                    finishOnce()
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    outgoing.animate().setListener(null)
+                    finishOnce()
+                }
+            })
+            .start()
+    }
+
+    /**
+     * Directional spatial glide for switching segmented tab panels or inline view content:
+     * `direction > 0` enters from +18dp right, `direction < 0` from -18dp left, `0` from +10dp below.
+     */
+    fun animatePanelSwitch(container: View, direction: Int = 0) {
+        val ctx = container.context
+        container.animate().cancel()
+        container.alpha = 0f
+        container.translationX = when {
+            direction > 0 -> dp(ctx, 18f)
+            direction < 0 -> -dp(ctx, 18f)
+            else -> 0f
+        }
+        container.translationY = if (direction == 0) dp(ctx, 10f) else 0f
+        container.animate()
+            .alpha(1f)
+            .translationX(0f)
+            .translationY(0f)
+            .setDuration(200L)
+            .setInterpolator(EASE_OUT_EXPO)
+            .setListener(null)
+            .start()
+    }
+
+    /**
+     * Smooth collapsible section transition with optional 180-degree chevron rotation.
+     */
+    fun animateExpandCollapse(content: View, expanded: Boolean, chevron: View? = null) {
+        chevron?.let { ch ->
+            ch.animate().cancel()
+            ch.animate()
+                .rotation(if (expanded) 180f else 0f)
+                .setDuration(200L)
+                .setInterpolator(EASE_OUT_EXPO)
+                .start()
+        }
+        content.animate().cancel()
+        if (expanded) {
+            content.visibility = View.VISIBLE
+            content.alpha = 0f
+            content.translationY = -dp(content.context, 8f)
+            content.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(200L)
+                .setInterpolator(EASE_OUT_EXPO)
+                .setListener(null)
+                .start()
+        } else {
+            if (content.visibility != View.VISIBLE) return
+            content.animate()
+                .alpha(0f)
+                .translationY(-dp(content.context, 6f))
+                .setDuration(150L)
+                .setInterpolator(EASE_STANDARD)
+                .withEndAction {
+                    content.visibility = View.GONE
+                    content.translationY = 0f
+                    content.alpha = 1f
                 }
                 .start()
         }
@@ -619,20 +803,120 @@ object MotionSpec {
         }
     }
 
+    private fun findModalScrim(modalView: View): View? {
+        var cur: View? = modalView.parent as? View
+        while (cur != null) {
+            val found = (cur as? ViewGroup)?.findViewWithTag<View>(AppSystemInsets.TAG_MODAL_SCRIM)
+            if (found != null) return found
+            cur = cur.parent as? View
+        }
+        return null
+    }
+
     /**
-     * Centered modal dialog entrance: subtle 0.94 -> 1.0 scale + fade in 220ms.
+     * Centered modal dialog entrance: synchronized scrim fade + subtle 0.94 -> 1.0 scale
+     * + gentle 12dp upward settle in 220ms EASE_OUT_EXPO.
      */
     fun animateModalEnter(modalView: View) {
+        findModalScrim(modalView)?.let { scrim ->
+            scrim.animate().cancel()
+            scrim.alpha = 0f
+            scrim.animate()
+                .alpha(1f)
+                .setDuration(200L)
+                .setInterpolator(EASE_OUT_EXPO)
+                .start()
+        }
         modalView.animate().cancel()
         modalView.scaleX = 0.94f
         modalView.scaleY = 0.94f
+        modalView.translationY = dp(modalView.context, 12f)
         modalView.alpha = 0f
         modalView.animate()
             .scaleX(1f)
             .scaleY(1f)
+            .translationY(0f)
             .alpha(1f)
             .setDuration(220L)
             .setInterpolator(EASE_OUT_EXPO)
+            .setListener(null)
+            .start()
+    }
+
+    /**
+     * Centered modal dialog exit: smooth reverse mirror of [animateModalEnter] (1.0 -> 0.94 scale,
+     * +10dp downward settle, alpha -> 0, synchronized scrim fade) over 160ms EASE_STANDARD.
+     */
+    fun dismissModalAnimated(
+        modalView: View,
+        dialog: Dialog,
+        onDismissStart: () -> Unit = {}
+    ) {
+        if (dismissingDialogs[dialog] == true) return
+        dismissingDialogs[dialog] = true
+        onDismissStart()
+
+        val scrim = findModalScrim(modalView)
+        scrim?.isClickable = false
+
+        val hostActivity = findHostActivity(dialog.context)
+        if (hostActivity != null && (hostActivity.isFinishing || hostActivity.isDestroyed)) {
+            scrim?.animate()?.cancel()
+            modalView.animate().cancel()
+            dismissSheetImmediately(dialog)
+            return
+        }
+
+        scrim?.let {
+            it.animate().cancel()
+            it.animate()
+                .alpha(0f)
+                .setDuration(150L)
+                .setInterpolator(EASE_STANDARD)
+                .start()
+        }
+
+        modalView.animate().cancel()
+        var finalized = false
+        var fallbackRunnable: Runnable? = null
+        val finalizeDismiss = {
+            if (!finalized) {
+                finalized = true
+                fallbackRunnable?.let(modalView::removeCallbacks)
+                fallbackRunnable = null
+                bypassDismissDialogs[dialog] = true
+                try {
+                    if (dialog.isShowing) {
+                        runCatching { dialog.dismiss() }
+                    }
+                } finally {
+                    bypassDismissDialogs.remove(dialog)
+                    dismissingDialogs.remove(dialog)
+                }
+            }
+        }
+        val watchdog = Runnable { finalizeDismiss() }
+        fallbackRunnable = watchdog
+        modalView.postDelayed(watchdog, 260L)
+
+        modalView.animate()
+            .scaleX(0.94f)
+            .scaleY(0.94f)
+            .translationY(dp(modalView.context, 10f))
+            .alpha(0f)
+            .setDuration(160L)
+            .setInterpolator(EASE_STANDARD)
+            .setListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    modalView.animate().setListener(null)
+                    finalizeDismiss()
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    modalView.animate().setListener(null)
+                    finalizeDismiss()
+                }
+            })
             .start()
     }
 

@@ -519,6 +519,15 @@ class CheryHttpClient(
     var onSessionExpired: ((String) -> Unit)? = null
 
     @Volatile
+    var demoServiceHandler: ((serviceType: String, data: JSONObject, globalId: String) -> JSONObject?)? = null
+
+    @Volatile
+    var demoReverseGeocodeHandler: ((lat: Double, lon: Double) -> String?)? = null
+
+    @Volatile
+    var demoSearchPoiHandler: ((query: String, biasLat: Double?, biasLon: Double?) -> List<PoiSearchResult>?)? = null
+
+    @Volatile
     private var sessionGlobalId: String = ""
 
     @Volatile
@@ -2427,6 +2436,7 @@ class CheryHttpClient(
     fun reverseGeocodeApproxAddress(lat: Double, lon: Double): String? {
         if (!lat.isFinite() || !lon.isFinite() || (lat == 0.0 && lon == 0.0)) return null
         if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) return null
+        demoReverseGeocodeHandler?.invoke(lat, lon)?.let { return it }
         val cacheKey = String.format(Locale.US, "%.3f,%.3f", lat, lon)
         reverseGeocodeCache[cacheKey]?.let { return it }
 
@@ -2551,6 +2561,7 @@ class CheryHttpClient(
     ): List<PoiSearchResult> {
         val clean = query.trim()
         if (clean.isBlank()) return emptyList()
+        demoSearchPoiHandler?.invoke(clean, biasLat, biasLon)?.let { return it }
         val encoded = java.net.URLEncoder.encode(clean, "UTF-8")
         val viewboxPart = if (biasLat != null && biasLon != null && (biasLat != 0.0 || biasLon != 0.0)) {
             val (wLat, wLon) = gcjToWgsApprox(biasLat, biasLon)
@@ -4120,6 +4131,13 @@ class CheryHttpClient(
         data: JSONObject,
         globalId: String
     ): ZyhlResponse {
+        demoServiceHandler?.invoke(serviceType, data, globalId)?.let { demoEnvelope ->
+            return ZyhlResponse(
+                envelope = demoEnvelope,
+                rawBody = demoEnvelope.toString(),
+                gateway = "demo://local"
+            )
+        }
         if (!isUnauthenticatedService(serviceType)) {
             require(globalId.isNotBlank()) { "accessToken/globalId is required for service $serviceType" }
         }

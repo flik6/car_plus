@@ -213,21 +213,15 @@ internal class VehicleManagementScreens(
      * Level-1 minimalist driver card: essential identity, status, mobile, permission & validity only.
      * All management actions (toggle 905, edit 903, records 137, danger revoke 904) live in Level 2.
      */
-    private fun maskDriverPhone(raw: String): String {
-        val clean = raw.trim()
-        if (clean.isBlank()) return SensitiveUiText.MISSING
-        if (clean.length >= 6) {
-            return clean.take(3) + "*".repeat(clean.length - 5) + clean.takeLast(2)
-        }
-        return "*".repeat(clean.length.coerceAtLeast(4))
-    }
+    private fun maskDriverPhone(raw: String): String =
+        SensitiveUiText.maskPhone(raw, emptyFallback = SensitiveUiText.MISSING)
 
     private fun buildDriverSummaryCard(
         item: VehicleAuthorizationItem,
         vin: String,
         onChanged: () -> Unit
     ): LinearLayout {
-        val granteeName = item.receiverAccountName.ifBlank {
+        val granteeName = SensitiveUiText.maskIfPhone(item.receiverAccountName).ifBlank {
             item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
         }
         val isControlLevel = item.levelFlag == "1" || item.authority == "1"
@@ -322,7 +316,7 @@ internal class VehicleManagementScreens(
         onChanged: () -> Unit
     ) {
         var currentEnabled = item.enabled
-        var currentName = item.receiverAccountName.ifBlank {
+        var currentName = SensitiveUiText.maskIfPhone(item.receiverAccountName).ifBlank {
             item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
         }
         var currentStart = formatAuthTime(item.startTime).takeUnless { it == "--" }.orEmpty()
@@ -846,7 +840,7 @@ internal class VehicleManagementScreens(
         item: VehicleAuthorizationItem,
         vin: String
     ) {
-        val granteeName = item.receiverAccountName.ifBlank {
+        val granteeName = SensitiveUiText.maskIfPhone(item.receiverAccountName).ifBlank {
             item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
         }
 

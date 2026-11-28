@@ -119,6 +119,90 @@ object AppSystemInsets {
     }
 
     const val TAG_SHEET_SCRIM = "carplus_sheet_scrim"
+    const val TAG_MODAL_SCRIM = "carplus_modal_scrim"
+
+    /**
+     * Installs a centered modal [modalView] inside an edge-to-edge full-window container with
+     * an in-window GPU-composited scrim ([TAG_MODAL_SCRIM]) so enter and exit transitions
+     * (`MotionSpec.animateModalEnter` / `MotionSpec.dismissModalAnimated`) stay in 1:1 lockstep.
+     */
+    fun installModalContent(
+        dialog: Dialog,
+        modalView: View,
+        dimAmount: Float = 0.62f,
+        horizontalMarginDp: Float = 24f,
+        cancelOnOutsideTap: Boolean = true
+    ) {
+        val density = dialog.context.resources.displayMetrics.density
+        val horizPadPx = (horizontalMarginDp * density).roundToInt()
+        val vertPadPx = (24f * density).roundToInt()
+
+        val backdrop = FrameLayout(dialog.context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+        }
+        val scrimAlpha = (dimAmount.coerceIn(0f, 1f) * 255f).roundToInt()
+        val scrimView = View(dialog.context).apply {
+            tag = TAG_MODAL_SCRIM
+            setBackgroundColor(Color.argb(scrimAlpha, 0, 0, 0))
+            isClickable = cancelOnOutsideTap
+            isFocusable = false
+            if (cancelOnOutsideTap) {
+                setOnClickListener { dialog.dismiss() }
+            }
+        }
+        backdrop.addView(
+            scrimView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val centerWrapper = FrameLayout(dialog.context).apply {
+            setPadding(horizPadPx, vertPadPx, horizPadPx, vertPadPx)
+        }
+        modalView.isClickable = true
+        modalView.isFocusable = true
+        centerWrapper.addView(
+            modalView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
+        )
+        backdrop.addView(
+            centerWrapper,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        dialog.setContentView(backdrop)
+
+        dialog.window?.apply {
+            setWindowAnimations(0)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0f)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            applyEdgeToEdge(this, Color.TRANSPARENT)
+        }
+
+        ViewCompat.setOnApplyWindowInsetsListener(backdrop) { _, insets ->
+            val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            centerWrapper.setPadding(
+                horizPadPx + sysBars.left,
+                vertPadPx + sysBars.top,
+                horizPadPx + sysBars.right,
+                vertPadPx + max(sysBars.bottom, ime.bottom)
+            )
+            insets
+        }
+        backdrop.post { ViewCompat.requestApplyInsets(backdrop) }
+    }
 
     /**
      * Installs [sheetView] inside a full-bleed edge-to-edge bottom sheet Dialog (Theme_CarPlus_BottomSheetDialog)
@@ -1110,7 +1194,8 @@ object AppComponents {
     }
 
     /**
-     * Unified minimalist centered 2-action confirmation dialog.
+     * Unified minimalist centered 2-action confirmation dialog with synchronized
+     * enter and exit spatial continuity.
      */
     fun showConfirmDialog(
         context: Context,
@@ -1121,7 +1206,17 @@ object AppComponents {
         dangerConfirm: Boolean = false,
         onConfirm: () -> Unit
     ): Dialog {
-        val dialog = Dialog(context)
+        var cardRef: View? = null
+        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
+            override fun dismiss() {
+                val target = cardRef
+                if (!isShowing || target == null || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
+                } else {
+                    MotionSpec.dismissModalAnimated(target, this)
+                }
+            }
+        }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
 
         val card = LinearLayout(context).apply {
@@ -1134,6 +1229,7 @@ object AppComponents {
             }
             setPadding(dp(context, 22f), dp(context, 22f), dp(context, 22f), dp(context, 18f))
         }
+        cardRef = card
 
         card.addView(
             TextView(context).apply {
@@ -1197,24 +1293,7 @@ object AppComponents {
         )
         card.addView(btnRow)
 
-        val wrapper = FrameLayout(context).apply {
-            setPadding(dp(context, 24f), 0, dp(context, 24f), 0)
-            addView(
-                card,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER
-                )
-            )
-        }
-
-        dialog.setContentView(wrapper)
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-            setDimAmount(0.62f)
-        }
+        AppSystemInsets.installModalContent(dialog, card, dimAmount = 0.62f, horizontalMarginDp = 24f)
         dialog.show()
         MotionSpec.animateModalEnter(card)
         return dialog

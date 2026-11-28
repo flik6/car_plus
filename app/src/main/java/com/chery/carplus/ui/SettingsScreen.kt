@@ -431,7 +431,9 @@ class SettingsScreen(
         val identityCol = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
         }
-        val displayTitle = account.nickname.ifBlank { account.username.ifBlank { "Qiri+ 车主" } }
+        val displayTitle = account.nickname.ifBlank {
+            SensitiveUiText.maskIfPhone(account.username).ifBlank { "Qiri+ 车主" }
+        }
         identityCol.addView(
             text(displayTitle, 17.5f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 maxLines = 1
@@ -441,7 +443,7 @@ class SettingsScreen(
         )
 
         val subLine = buildString {
-            val masked = maskMobile(account.mobile)
+            val masked = SensitiveUiText.maskPhone(account.mobile)
             if (masked.isNotBlank()) append(masked)
             if (account.region.isNotBlank()) {
                 if (isNotEmpty()) append(" · ")
@@ -770,12 +772,12 @@ class SettingsScreen(
         // Inputs created before avatar callback so dirty check can read all fields.
         // Username and mobile are cloud account identifiers (read-only).
         val nicknameInput = buildBorderlessInput("请输入昵称", savedSnapshot.nickname, InputType.TYPE_CLASS_TEXT)
-        val usernameInput = buildBorderlessInput("未设置", savedSnapshot.username, InputType.TYPE_CLASS_TEXT).apply {
+        val usernameInput = buildBorderlessInput("未设置", SensitiveUiText.maskIfPhone(savedSnapshot.username), InputType.TYPE_CLASS_TEXT).apply {
             isEnabled = false
             isFocusable = false
             setTextColor(ThemeTokens.TEXT_SUB)
         }
-        val mobileInput = buildBorderlessInput("未绑定", maskMobile(savedSnapshot.mobile), InputType.TYPE_CLASS_PHONE).apply {
+        val mobileInput = buildBorderlessInput("未绑定", SensitiveUiText.maskPhone(savedSnapshot.mobile), InputType.TYPE_CLASS_PHONE).apply {
             isEnabled = false
             isFocusable = false
             setTextColor(ThemeTokens.TEXT_SUB)
@@ -1930,9 +1932,6 @@ class SettingsScreen(
     private fun toast(message: String) {
         Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
     }
-
-    private fun maskMobile(mobile: String): String =
-        if (mobile.length >= 7) mobile.take(3) + "****" + mobile.takeLast(4) else mobile
 
     private fun formatBytes(bytes: Long): String {
         if (bytes <= 0L) return "--"
