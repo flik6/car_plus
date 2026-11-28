@@ -907,12 +907,22 @@ object AppComponents {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(dp(context, 4f), dp(context, 8f), dp(context, 4f), dp(context, 8f))
+            background = null
+            foreground = null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                defaultFocusHighlightEnabled = false
+            }
+            clipChildren = false
+            clipToPadding = false
+            setPadding(dp(context, 4f), dp(context, 6f), dp(context, 4f), dp(context, 6f))
             alpha = if (dimmed) 0.42f else 1f
         }
 
         val iconBoxSize = dp(context, (sizeDp + 14).toFloat())
-        val iconFrame = FrameLayout(context)
+        val iconFrame = FrameLayout(context).apply {
+            tag = "control_icon_frame"
+            background = null
+        }
 
         val iconView = AppIconView(
             context,
@@ -937,9 +947,9 @@ object AppComponents {
             }
             iconFrame.addView(
                 dot,
-                FrameLayout.LayoutParams(dp(context, 10f), dp(context, 10f), Gravity.TOP or Gravity.END).apply {
-                    topMargin = dp(context, 2f)
-                    marginEnd = dp(context, 2f)
+                FrameLayout.LayoutParams(dp(context, 8f), dp(context, 8f), Gravity.TOP or Gravity.END).apply {
+                    topMargin = dp(context, 3f)
+                    marginEnd = dp(context, 3f)
                 }
             )
         }
@@ -960,7 +970,7 @@ object AppComponents {
             root.addView(
                 labelTv,
                 LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     topMargin = dp(context, 5f)

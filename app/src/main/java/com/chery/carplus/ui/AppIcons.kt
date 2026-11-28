@@ -15,9 +15,10 @@ import kotlin.math.min
 
 /**
  * Unified CarPlus Automotive & UI Vector Icon System:
- * - Vehicle control icons are unified from `base.apk.1` (`com.xiaote`) automotive vector geometry
- *   onto a single strict drawing spec: 24x24 viewport, uniform 1.65u monochrome stroke,
- *   `Cap.ROUND` / `Join.ROUND`, and centered ~18u optical live area.
+ * - Vehicle control icons combine `base.apk.1` (`com.xiaote`) and `download.zip` (`iconfont`)
+ *   automotive vector geometry normalized onto a single strict drawing spec:
+ *   24x24 viewport, uniform 1.65u monochrome stroke (`Cap.ROUND` / `Join.ROUND`),
+ *   and centered ~18u optical live area.
  * - Home-screen widget drawables (`res/drawable/ic_widget_*.xml`) share the exact same pathData
  *   and stroke specification so in-app controls and desktop widgets are pixel-identical.
  * - Utility & navigation icons use crisp 24x24 Material Design Icon (MDI) paths.
@@ -54,7 +55,7 @@ enum class AppIconType(val svgPath: String, val customControlGlyph: Boolean = fa
         customControlGlyph = true
     ),
     TAILGATE_CLOSE(
-        "M4,7H12.82C13.26,7 13.69,7.15 14.04,7.41L19.05,11.27C19.63,11.72 19.92,12.45 19.8,13.18L19.28,16.33C19.12,17.29 18.28,18 17.31,18H15 M4,18H10 M12.5,15A2.5,2.5 0 1,0 12.5,20A2.5,2.5 0 1,0 12.5,15Z M17.8,3.6V7.0 M15.9,5.3L17.8,7.2L19.7,5.3",
+        "M3.5,7.2H10.6C11.1,7.2 11.56,7.38 11.94,7.68L15.9,11.1C16.42,11.54 16.68,12.22 16.58,12.9L16.18,15.6C16.02,16.55 15.2,17.25 14.24,17.25H13.0 M3.5,17.25H8.0 M10.5,14.75A2.5,2.5 0 1,0 10.5,19.75A2.5,2.5 0 1,0 10.5,14.75Z M19.9,7.6C20.6,9.8 20.6,12.4 19.9,15.0L18.4,13.5",
         customControlGlyph = true
     ),
     ENGINE_POWER(
@@ -78,15 +79,15 @@ enum class AppIconType(val svgPath: String, val customControlGlyph: Boolean = fa
         customControlGlyph = true
     ),
     SUNROOF_OPEN(
-        "M3.5,18.0L5.2,14.1C5.75,12.85 6.95,12.2 8.3,12.2H9.0 M15.6,12.2H16.0C16.7,12.2 17.35,12.55 17.75,13.15L19.8,16.0C20.25,16.65 20.5,17.2 20.5,18.0 M3.5,18.0H20.5 M6.2,9.8H12.0 M17.2,6.2H12.4 M14.4,4.5L12.4,6.2L14.4,7.9",
+        "M10.4,11.8H9.8C9.05,11.8 8.35,12.14 7.9,12.74L6.45,14.5L4.35,14.95C3.7,15.1 3.25,15.68 3.25,16.35V17.4C3.25,18.0 3.74,18.5 4.35,18.5H5.55C5.85,19.32 6.62,19.85 7.5,19.85C8.38,19.85 9.15,19.32 9.45,18.5H14.55C14.85,19.32 15.62,19.85 16.5,19.85C17.38,19.85 18.15,19.32 18.45,18.5H19.65C20.26,18.5 20.75,18.0 20.75,17.4V14.65C20.75,14.08 20.52,13.54 20.12,13.14L19.1,12.12C18.78,11.88 18.38,11.8 17.98,11.8H16.6 M15.0,9.1H19.6 M15.0,6.3H19.8L17.9,4.4",
         customControlGlyph = true
     ),
     SUNROOF_TILT(
-        "M3.5,18.0L5.2,14.1C5.75,12.85 6.95,12.2 8.3,12.2H9.0 M15.6,12.2H16.0C16.7,12.2 17.35,12.55 17.75,13.15L19.8,16.0C20.25,16.65 20.5,17.2 20.5,18.0 M3.5,18.0H20.5 M15.6,12.2L9.6,9.0 M7.8,6.8L9.6,5.0L11.4,6.8",
+        "M10.4,11.8H9.8C9.05,11.8 8.35,12.14 7.9,12.74L6.45,14.5L4.35,14.95C3.7,15.1 3.25,15.68 3.25,16.35V17.4C3.25,18.0 3.74,18.5 4.35,18.5H5.55C5.85,19.32 6.62,19.85 7.5,19.85C8.38,19.85 9.15,19.32 9.45,18.5H14.55C14.85,19.32 15.62,19.85 16.5,19.85C17.38,19.85 18.15,19.32 18.45,18.5H19.65C20.26,18.5 20.75,18.0 20.75,17.4V14.65C20.75,14.08 20.52,13.54 20.12,13.14L19.1,12.12C18.78,11.88 18.38,11.8 17.98,11.8H16.6 M10.6,11.7L16.2,8.6 M14.8,6.4L16.5,4.6L18.2,6.4",
         customControlGlyph = true
     ),
     SUNROOF_CLOSE(
-        "M3.5,18.0L5.2,14.1C5.75,12.85 6.95,12.2 8.3,12.2H16.0C16.7,12.2 17.35,12.55 17.75,13.15L19.8,16.0C20.25,16.65 20.5,17.2 20.5,18.0 M3.5,18.0H20.5 M12.2,5.0V9.0 M10.2,7.2L12.2,9.2L14.2,7.2",
+        "M10.4,11.8H9.8C9.05,11.8 8.35,12.14 7.9,12.74L6.45,14.5L4.35,14.95C3.7,15.1 3.25,15.68 3.25,16.35V17.4C3.25,18.0 3.74,18.5 4.35,18.5H5.55C5.85,19.32 6.62,19.85 7.5,19.85C8.38,19.85 9.15,19.32 9.45,18.5H14.55C14.85,19.32 15.62,19.85 16.5,19.85C17.38,19.85 18.15,19.32 18.45,18.5H19.65C20.26,18.5 20.75,18.0 20.75,17.4V14.65C20.75,14.08 20.52,13.54 20.12,13.14L19.1,12.12C18.78,11.88 18.38,11.8 17.98,11.8H16.6 M11.0,9.1H15.8 M15.8,6.3H11.0L12.9,4.4",
         customControlGlyph = true
     ),
     CAR_CONTROLS(
