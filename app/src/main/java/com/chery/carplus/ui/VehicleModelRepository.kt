@@ -107,15 +107,23 @@ object VehicleModelRepository {
     )
 
     private val perKeyLocks = ConcurrentHashMap<String, Any>()
+    private val verifiedGlbMeta = ConcurrentHashMap<String, Pair<Long, Long>>()
+
+    @Volatile
+    private var cachedModelsDir: File? = null
 
     @Volatile
     private var dynamicCatalog: Map<String, ModelCatalogEntry> = FALLBACK_CATALOG
 
     fun cacheDir(context: Context): File {
+        cachedModelsDir?.let { existing ->
+            if (existing.isDirectory) return existing
+        }
         val dir = File(context.applicationContext.filesDir, CACHE_DIR_NAME)
         if (!dir.exists()) {
             dir.mkdirs()
         }
+        cachedModelsDir = dir
         return dir
     }
 
@@ -239,6 +247,7 @@ object VehicleModelRepository {
         dir.listFiles()?.forEach { f ->
             if (f.delete()) removed++
         }
+        verifiedGlbMeta.clear()
         appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply()
         return removed
     }
@@ -547,6 +556,7 @@ object VehicleModelRepository {
                         tmpFile.copyTo(finalFile, overwrite = true)
                         tmpFile.delete()
                     }
+                    verifiedGlbMeta[finalFile.absolutePath] = finalFile.length() to finalFile.lastModified()
 
                     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         .edit()
@@ -576,8 +586,21 @@ object VehicleModelRepository {
     }
 
     private fun isValidGlbFile(file: File): Boolean {
-        if (!file.exists() || !file.isFile || file.length() < 1024L) return false
-        return runCatching {
+        if (!file.exists() || !file.isFile) {
+            verifiedGlbMeta.remove(file.absolutePath)
+            return false
+        }
+        val len = file.length()
+        if (len < 1024L) {
+            verifiedGlbMeta.remove(file.absolutePath)
+            return false
+        }
+        val mtime = file.lastModified()
+        val cached = verifiedGlbMeta[file.absolutePath]
+        if (cached != null && cached.first == len && cached.second == mtime) {
+            return true
+        }
+        val valid = runCatching {
             FileInputStream(file).use { fis ->
                 val header = ByteArray(4)
                 fis.read(header) == 4 &&
@@ -587,5 +610,11 @@ object VehicleModelRepository {
                     header[3] == 'F'.code.toByte()
             }
         }.getOrDefault(false)
+        if (valid) {
+            verifiedGlbMeta[file.absolutePath] = len to mtime
+        } else {
+            verifiedGlbMeta.remove(file.absolutePath)
+        }
+        return valid
     }
 }

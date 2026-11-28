@@ -11,6 +11,8 @@ import android.content.Intent
 import android.os.Build
 import com.chery.carplus.profile.VehicleProfile
 import com.chery.carplus.profile.VehicleProfileStore
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class WakeRegistrationResult(
     val ok: Boolean,
@@ -29,6 +31,10 @@ object PassiveEntryWakeManager {
 
     const val ACTION_PASSIVE_SCAN_RESULT = "com.chery.carplus.ble.ACTION_PASSIVE_SCAN_RESULT"
     private const val SCAN_PENDING_INTENT_REQUEST_CODE = 42088
+    private val wakeExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "passive-wake-io").apply { isDaemon = true }
+    }
+    private val restoreInFlight = AtomicBoolean(false)
 
     fun isPendingIntentSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
 
@@ -235,8 +241,28 @@ object PassiveEntryWakeManager {
         )
     }
 
-    fun restoreIfEnabled(context: Context) {
+    /**
+     * Offloads wake-channel restoration (SharedPreferences + VehicleProfileStore +
+     * BluetoothManager/PowerManager/CompanionDeviceManager Binder IPCs) onto a
+     * serialized background thread so Activity.onCreate()/onResume() never stall.
+     */
+    fun restoreIfEnabled(context: Context, onCompleted: (() -> Unit)? = null) {
         val appContext = context.applicationContext
+        if (onCompleted == null && !restoreInFlight.compareAndSet(false, true)) {
+            return
+        }
+        val ownsFlag = (onCompleted == null)
+        wakeExecutor.execute {
+            try {
+                restoreIfEnabledSync(appContext)
+            } finally {
+                if (ownsFlag) restoreInFlight.set(false)
+                onCompleted?.invoke()
+            }
+        }
+    }
+
+    private fun restoreIfEnabledSync(appContext: Context) {
         val activeVin = PassiveEntryStore.getActiveEnabledVin(appContext)
         if (activeVin.isBlank()) {
             PassiveEntryRuntime.updateWakeChannelStatus(

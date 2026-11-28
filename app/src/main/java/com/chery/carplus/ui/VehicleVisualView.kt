@@ -168,6 +168,11 @@ class VehicleVisualView @JvmOverloads constructor(
     private var hasDraggedOnce = false
     private var isDestroyed = false
     private var downloadFailed = false
+    private var stateSyncScheduled = false
+    private val stateSyncRunnable = Runnable {
+        stateSyncScheduled = false
+        flushStateToSceneNow()
+    }
 
     private val webView: OrbitWebView
     private val placeholderView: FrameLayout
@@ -331,8 +336,12 @@ class VehicleVisualView @JvmOverloads constructor(
         }
         addView(fallbackLabel, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
-        // Serve offline HTML/JS via WebViewAssetLoader HTTPS origin
-        webView.loadUrl("https://appassets.androidplatform.net/assets/car3d/index.html")
+        // Defer WebView page load until after the first native UI frame draws so app launch stays 60fps
+        post {
+            if (!isDestroyed) {
+                webView.loadUrl("https://appassets.androidplatform.net/assets/car3d/index.html")
+            }
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -450,25 +459,25 @@ class VehicleVisualView @JvmOverloads constructor(
         placeholderView.isClickable = false
         placeholderView.isFocusable = false
 
-        val hasLocalCache = VehicleModelRepository.getCachedModelFile(context, resolvedKey) != null
         if (isVehicleSwitch) {
             sceneReady = false
             showPlaceholderOverlay(animateIn = true)
-            if (!hasLocalCache) {
-                showDownloadProgress("正在获取 $displayName 3D 车模...", 0, showBar = true)
-            } else {
-                hideDownloadProgress()
-            }
-        } else if (!hasLocalCache) {
-            showPlaceholderOverlay(animateIn = false)
-            showDownloadProgress("正在获取 $displayName 3D 车模...", 0, showBar = true)
-        } else {
-            hideDownloadProgress()
         }
+        hideDownloadProgress()
 
         modelLoadJob?.cancel()
         modelLoadJob = viewScope.launch {
             val result = withContext(Dispatchers.IO) {
+                if (VehicleModelRepository.getCachedModelFile(context, resolvedKey) == null) {
+                    mainHandler.post {
+                        if (!isDestroyed && loadGeneration == gen) {
+                            if (!isVehicleSwitch) {
+                                showPlaceholderOverlay(animateIn = false)
+                            }
+                            showDownloadProgress("正在获取 $displayName 3D 车模...", 0, showBar = true)
+                        }
+                    }
+                }
                 runCatching {
                     VehicleModelRepository.ensureModelReady(
                         context = context,
@@ -503,10 +512,15 @@ class VehicleVisualView @JvmOverloads constructor(
                 activeLoadedUrl = ready.cacheUrl
                 val safeKey = JSONObject.quote(ready.key)
                 val safeUrl = JSONObject.quote(ready.cacheUrl)
-                evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
-                evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
-                pushEntranceStyleToScene()
-                evalJs("window.Car3D && window.Car3D.loadModel($safeKey, $safeUrl, $forceReload);")
+                val safeStyle = JSONObject.quote(entranceStyle)
+                evalJs(
+                    "if(window.Car3D){" +
+                        "window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);" +
+                        "window.Car3D.setExpandedVisibleRatio&&window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);" +
+                        "window.Car3D.setEntranceStyle&&window.Car3D.setEntranceStyle($safeStyle);" +
+                        "window.Car3D.loadModel($safeKey,$safeUrl,$forceReload);" +
+                        "}"
+                )
 
                 // Only check manifest in background when loaded from cache; never re-downloads unless updated
                 if (ready.fromCache) {
@@ -643,7 +657,15 @@ class VehicleVisualView @JvmOverloads constructor(
 
     private fun pushStateToScene() {
         if (isDestroyed || !sceneReady) return
-        pushEntranceStyleToScene()
+        if (!stateSyncScheduled) {
+            stateSyncScheduled = true
+            mainHandler.post(stateSyncRunnable)
+        }
+    }
+
+    private fun flushStateToSceneNow() {
+        if (isDestroyed || !sceneReady) return
+        val safeStyle = JSONObject.quote(entranceStyle)
         val payload = JSONObject().apply {
             put("vehicleLocked", vehicleLocked)
             put("trunkOpen", trunkOpen)
@@ -654,13 +676,25 @@ class VehicleVisualView @JvmOverloads constructor(
             put("climateTemp", climateTemp)
             put("engineRunning", engineRunning)
         }
-        evalJs("window.Car3D && window.Car3D.setState($payload);")
+        webView.evaluateJavascript(
+            "if(window.Car3D){" +
+                "window.Car3D.setEntranceStyle&&window.Car3D.setEntranceStyle($safeStyle);" +
+                "window.Car3D.setState($payload);" +
+                "}",
+            null
+        )
     }
 
     private fun evalJs(script: String) {
-        mainHandler.post {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             if (!isDestroyed) {
                 webView.evaluateJavascript(script, null)
+            }
+        } else {
+            mainHandler.post {
+                if (!isDestroyed) {
+                    webView.evaluateJavascript(script, null)
+                }
             }
         }
     }
@@ -674,6 +708,7 @@ class VehicleVisualView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         isDestroyed = true
+        stateSyncScheduled = false
         modelLoadJob?.cancel()
         bgUpdateJob?.cancel()
         viewScope.cancel()
@@ -734,10 +769,15 @@ class VehicleVisualView @JvmOverloads constructor(
             mainHandler.post {
                 if (isDestroyed || engineReady) return@post
                 engineReady = true
-                evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
-                evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
-                pushEntranceStyleToScene()
-                evalJs("window.Car3D && window.Car3D.resize();")
+                val safeStyle = JSONObject.quote(entranceStyle)
+                evalJs(
+                    "if(window.Car3D){" +
+                        "window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);" +
+                        "window.Car3D.setExpandedVisibleRatio&&window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);" +
+                        "window.Car3D.setEntranceStyle&&window.Car3D.setEntranceStyle($safeStyle);" +
+                        "window.Car3D.resize();" +
+                        "}"
+                )
                 requestModelLoad(modelKey, isVehicleSwitch = false)
             }
         }
@@ -747,13 +787,16 @@ class VehicleVisualView @JvmOverloads constructor(
             mainHandler.post {
                 if (isDestroyed) return@post
                 sceneReady = true
-                evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
-                evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
-                evalJs("window.Car3D && window.Car3D.resize();")
+                val deckJs = if (deckProgress > 0f) "window.Car3D.setDeckProgress($deckProgress);" else ""
+                evalJs(
+                    "if(window.Car3D){" +
+                        "window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);" +
+                        "window.Car3D.setExpandedVisibleRatio&&window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);" +
+                        "window.Car3D.resize();" +
+                        deckJs +
+                        "}"
+                )
                 pushStateToScene()
-                if (deckProgress > 0f) {
-                    evalJs("window.Car3D && window.Car3D.setDeckProgress($deckProgress);")
-                }
                 if (pendingFlash) {
                     pendingFlash = false
                     flashLights()

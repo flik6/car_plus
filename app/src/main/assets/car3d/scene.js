@@ -1855,7 +1855,7 @@
 
         currentRig = setupVehicleRig(container, chassisGroup, model, cfg);
         currentEffects = createInteractiveOverlays(chassisGroup, model, currentRig, cfg, size);
-        resize();
+        resize(true);
 
         if (!hasCustomDemoAngle) {
           startEntranceAnimation();
@@ -1864,7 +1864,7 @@
 
         // Pre-compile WebGL shaders before first visible frame to prevent mid-animation stutter
         try {
-          if (renderer && scene && camera) {
+          if (renderer && scene && camera && !contextLost) {
             renderer.compile(scene, camera);
             renderer.render(scene, camera);
           }
@@ -1875,13 +1875,7 @@
         notifyAndroidReady();
         wakeRenderLoop();
         requestAnimationFrame(function () {
-          requestAnimationFrame(function () {
-            if (renderer && scene && camera && !contextLost) {
-              renderer.render(scene, camera);
-            }
-            notifyAndroidFirstFrame();
-            wakeRenderLoop();
-          });
+          notifyAndroidFirstFrame();
         });
       },
       undefined,
@@ -2186,8 +2180,9 @@
     }
   }
 
-  function resize() {
+  function resize(skipRender) {
     if (!renderer || !camera) return;
+    var noRender = skipRender === true;
     var el = document.getElementById('stage');
     var w = (el && el.clientWidth) || window.innerWidth || 360;
     var h = (el && el.clientHeight) || window.innerHeight || 256;
@@ -2206,10 +2201,12 @@
       orbit.radius = fitR;
     }
     renderer.setSize(w, h, false);
-    if (renderActive && !contextLost && scene) {
+    if (!noRender && renderActive && !contextLost && scene) {
       renderer.render(scene, camera);
     }
-    wakeRenderLoop();
+    if (!noRender) {
+      wakeRenderLoop();
+    }
   }
 
   var contextLost = false;
@@ -2517,7 +2514,7 @@
       return;
     }
 
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2.2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     renderer.setClearColor(BG_HEX, 1);
     renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;

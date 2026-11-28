@@ -378,10 +378,8 @@ object PassiveEntryRuntime {
         val cfg = if (activeVin.isNotBlank()) PassiveEntryStore.load(appContext, activeVin) else null
 
         if (active) {
-            if (snapshot.serviceRunning || cfg?.enabled == true) {
-                if (snapshot.serviceRunning) {
-                    appendLog("App 回到前台，后台无感服务暂停让出蓝牙连接")
-                }
+            if (snapshot.serviceRunning) {
+                appendLog("App 回到前台，后台无感服务暂停让出蓝牙连接")
                 PassiveEntryService.stopService(appContext)
             }
             if (cfg?.enabled == true) {
@@ -489,6 +487,7 @@ object PassiveEntryRuntime {
     }
 
     private fun dispatchSnapshot() {
+        if (listeners.isEmpty()) return
         val snap = snapshot
         mainHandler.post {
             listeners.forEach { it(snap) }

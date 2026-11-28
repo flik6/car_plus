@@ -129,6 +129,10 @@ class SettingsScreen(
     private var progressWidthAnimator: ValueAnimator? = null
     private var profileSaveColorAnim: ValueAnimator? = null
     private var cachedRegionDirectory: CheryHttpClient.RegionDirectory? = null
+    @Volatile
+    private var cachedAvatarCacheKey: String = ""
+    @Volatile
+    private var cachedAvatarBitmap: Bitmap? = null
 
     // Live UI hooks on MAIN page
     private var mainVehicleTrailingTv: TextView? = null
@@ -256,6 +260,8 @@ class SettingsScreen(
         val currentUserId = userInfo.userId.ifBlank { cloudMobile }
         val switchedAccount = currentUserId.isNotBlank() && lastSyncedUserId.isNotBlank() && lastSyncedUserId != currentUserId
         if (switchedAccount) {
+            cachedAvatarCacheKey = ""
+            cachedAvatarBitmap = null
             runCatching { avatarFile().delete() }
             runCatching { pendingAvatarFile().delete() }
             runCatching { cloudAvatarFile().delete() }
@@ -945,6 +951,8 @@ class SettingsScreen(
                         runCatching { staged.copyTo(target, overwrite = true) }
                         runCatching { staged.delete() }
                     }
+                    cachedAvatarCacheKey = ""
+                    cachedAvatarBitmap = null
                 }
             }
 
@@ -2246,21 +2254,6 @@ class SettingsScreen(
     }
 
     private fun buildAvatarView(sizeDp: Int, displayName: String, preferPending: Boolean = false): View {
-        val stagedFile = pendingAvatarFile()
-        val localFile = avatarFile()
-        val cloudFile = cloudAvatarFile()
-        val resolvedFile = when {
-            preferPending && stagedFile.exists() && stagedFile.length() > 0L -> stagedFile
-            localFile.exists() && localFile.length() > 0L -> localFile
-            cloudFile.exists() && cloudFile.length() > 0L -> cloudFile
-            else -> null
-        }
-        val bitmap = if (resolvedFile != null) {
-            runCatching { BitmapFactory.decodeFile(resolvedFile.absolutePath) }.getOrNull()
-        } else {
-            null
-        }
-
         val frame = FrameLayout(activity).apply {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
@@ -2275,18 +2268,66 @@ class SettingsScreen(
             }
         }
 
-        if (bitmap != null) {
-            val iv = ImageView(activity).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                setImageBitmap(bitmap)
-            }
-            frame.addView(iv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        } else {
+        fun renderMonogram() {
             val monogram = displayName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "Q"
             val tv = text(monogram, (sizeDp * 0.38f).coerceAtLeast(18f), ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                 gravity = Gravity.CENTER
             }
+            frame.removeAllViews()
             frame.addView(tv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+
+        fun renderBitmap(bmp: Bitmap) {
+            val iv = ImageView(activity).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setImageBitmap(bmp)
+            }
+            frame.removeAllViews()
+            frame.addView(iv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+
+        val stagedFile = pendingAvatarFile()
+        val localFile = avatarFile()
+        val cloudFile = cloudAvatarFile()
+        val memBmp = cachedAvatarBitmap?.takeIf { !it.isRecycled }
+        if (!preferPending && memBmp != null) {
+            renderBitmap(memBmp)
+        } else {
+            renderMonogram()
+        }
+
+        scope.launch {
+            val decodedPair = withContext(Dispatchers.IO) {
+                val resolvedFile = when {
+                    preferPending && stagedFile.exists() && stagedFile.length() > 0L -> stagedFile
+                    localFile.exists() && localFile.length() > 0L -> localFile
+                    cloudFile.exists() && cloudFile.length() > 0L -> cloudFile
+                    else -> null
+                } ?: return@withContext null
+                val key = "${resolvedFile.absolutePath}:${resolvedFile.lastModified()}:${resolvedFile.length()}"
+                val cached = cachedAvatarBitmap
+                if (key == cachedAvatarCacheKey && cached != null && !cached.isRecycled) {
+                    return@withContext key to cached
+                }
+                val bmp = runCatching { BitmapFactory.decodeFile(resolvedFile.absolutePath) }.getOrNull()
+                    ?: return@withContext null
+                if (!preferPending) {
+                    cachedAvatarCacheKey = key
+                    cachedAvatarBitmap = bmp
+                }
+                key to bmp
+            }
+            if (!MotionSpec.isHostActivityAlive(activity)) return@launch
+            val bmp = decodedPair?.second
+            if (bmp != null && !bmp.isRecycled) {
+                if (bmp !== memBmp || preferPending) {
+                    renderBitmap(bmp)
+                }
+            } else if (memBmp != null && !preferPending) {
+                cachedAvatarCacheKey = ""
+                cachedAvatarBitmap = null
+                renderMonogram()
+            }
         }
         return frame
     }

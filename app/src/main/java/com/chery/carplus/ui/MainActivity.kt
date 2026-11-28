@@ -474,6 +474,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val isPassiveAuto: Boolean
     )
 
+    private var isActivityResumed = false
+    private var pendingStartupServicesRunnable: Runnable? = null
     private var lastPairingPin = ""
     private val pendingBleActionMetaByKey = mutableMapOf<String, ArrayDeque<PendingBleActionMeta>>()
     private val lastPassiveAutoUnlockActiveByVin = mutableMapOf<String, Boolean>()
@@ -587,7 +589,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             tripTrackEnabledProvider = { cloudTripTrackEnabled },
             requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
             onRequirePinEveryTimeChanged = { enabled ->
-                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, enabled).commit()
+                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, enabled).apply()
                 CarWidgetManager.updateAllWidgets(this)
                 showHomeStatus(if (enabled) "已开启每次控车验证 PIN 码" else "已关闭每次控车验证 PIN 码")
             },
@@ -700,7 +702,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
         }
         PassiveEntryRuntime.addListener(passiveRuntimeUiListener)
-        PassiveEntryWakeManager.restoreIfEnabled(this)
 
         AppSystemInsets.applyEdgeToEdge(window, BG_HOME)
         contentFrame = FrameLayout(this).apply {
@@ -1079,13 +1080,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     override fun onResume() {
         super.onResume()
+        isActivityResumed = true
         val passiveWasRunning = PassiveEntryRuntime.isServiceRunning()
         PassiveEntryRuntime.setForegroundAppActive(this, true)
-        if (PassiveEntryStore.getActiveEnabledVin(this).isNotBlank() &&
-            !PassiveEntryRuntime.currentSnapshot().wakeChannelActive
-        ) {
-            PassiveEntryWakeManager.restoreIfEnabled(this)
-        }
         val wasBg = wasBackgrounded
         wasBackgrounded = false
         if (::featureSheets.isInitialized) {
@@ -1097,53 +1094,74 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
-        if (homeVisible) {
-            if (wasBg && !quickDeckExpanded) {
-                carVisual?.playEntranceAnimation()
+        pendingStartupServicesRunnable?.let(contentFrame::removeCallbacks)
+        pendingStartupServicesRunnable = null
+
+        // Defer non-rendering binder IPC (BLE scan, LocationManager, passive wake restore) until
+        // after the current UI frame commits so cold launch & resume render smoothly without stutter.
+        val startupTask = Runnable {
+            pendingStartupServicesRunnable = null
+            if (!isActivityResumed || isFinishing || isDestroyed) return@Runnable
+            if (PassiveEntryStore.getActiveEnabledVin(this).isNotBlank() &&
+                !PassiveEntryRuntime.currentSnapshot().wakeChannelActive
+            ) {
+                PassiveEntryWakeManager.restoreIfEnabled(this)
             }
-            if (passiveWasRunning) {
-                // Allow PassiveEntryService to finish closing its GATT link so T-Box resumes advertising.
-                val task = Runnable {
-                    pendingResumeBleRunnable = null
-                    if ((currentScreen == Screen.HOME || currentScreen == Screen.SECURITY) &&
-                        !wasBackgrounded &&
-                        !isFinishing &&
-                        !isDestroyed &&
-                        lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
-                    ) {
-                        startProximityWhenPermitted()
+            val nowHomeVisible = currentScreen == Screen.HOME && subpageOverlayStack.isEmpty()
+            if (nowHomeVisible) {
+                if (passiveWasRunning) {
+                    // Allow PassiveEntryService to finish closing its GATT link so T-Box resumes advertising.
+                    val task = Runnable {
+                        pendingResumeBleRunnable = null
+                        if ((currentScreen == Screen.HOME || currentScreen == Screen.SECURITY) &&
+                            !wasBackgrounded &&
+                            !isFinishing &&
+                            !isDestroyed &&
+                            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                        ) {
+                            startProximityWhenPermitted()
+                        }
                     }
+                    pendingResumeBleRunnable = task
+                    mainHandler.postDelayed(task, 600L)
+                } else {
+                    startProximityWhenPermitted()
                 }
-                pendingResumeBleRunnable = task
-                mainHandler.postDelayed(task, 600L)
-            } else {
-                startProximityWhenPermitted()
-            }
-            startPeriodicHomeRefresh()
-            startForegroundBleRssiPolling()
-            startLiveDeviceLocationUpdates()
-            refreshTelemetry(silent = true)
-        } else if (currentScreen == Screen.LOCATION && subpageOverlayStack.isEmpty()) {
-            startLiveDeviceLocationUpdates()
-        } else if (currentScreen == Screen.SECURITY) {
-            if (passiveWasRunning) {
-                val task = Runnable {
-                    pendingResumeBleRunnable = null
-                    if ((currentScreen == Screen.HOME || currentScreen == Screen.SECURITY) &&
-                        !wasBackgrounded &&
-                        !isFinishing &&
-                        !isDestroyed &&
-                        lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
-                    ) {
-                        startProximityWhenPermitted()
+                startPeriodicHomeRefresh()
+                startForegroundBleRssiPolling()
+                startLiveDeviceLocationUpdates()
+                if (hasAllBlePermissionsGranted()) {
+                    maybeRequestDeviceLocationPermissionOnce()
+                }
+                refreshTelemetry(silent = true)
+            } else if (currentScreen == Screen.LOCATION && subpageOverlayStack.isEmpty()) {
+                startLiveDeviceLocationUpdates()
+            } else if (currentScreen == Screen.SECURITY) {
+                if (passiveWasRunning) {
+                    val task = Runnable {
+                        pendingResumeBleRunnable = null
+                        if ((currentScreen == Screen.HOME || currentScreen == Screen.SECURITY) &&
+                            !wasBackgrounded &&
+                            !isFinishing &&
+                            !isDestroyed &&
+                            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                        ) {
+                            startProximityWhenPermitted()
+                        }
                     }
+                    pendingResumeBleRunnable = task
+                    mainHandler.postDelayed(task, 600L)
+                } else {
+                    startProximityWhenPermitted()
                 }
-                pendingResumeBleRunnable = task
-                mainHandler.postDelayed(task, 600L)
-            } else {
-                startProximityWhenPermitted()
+                startForegroundBleRssiPolling()
             }
-            startForegroundBleRssiPolling()
+        }
+        pendingStartupServicesRunnable = startupTask
+        contentFrame.post(startupTask)
+
+        if (homeVisible && wasBg && !quickDeckExpanded) {
+            carVisual?.playEntranceAnimation()
         }
         securityPassiveRefreshCallback?.invoke()
         if (::passiveEntrySheets.isInitialized) {
@@ -1160,6 +1178,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     override fun onPause() {
+        isActivityResumed = false
+        pendingStartupServicesRunnable?.let(contentFrame::removeCallbacks)
+        pendingStartupServicesRunnable = null
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
         cancelPendingForegroundPassiveUnlockCheck()
@@ -2626,17 +2647,21 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         )
 
         refreshHomeHeaderAndRows()
-        if (!PassiveEntryRuntime.isServiceRunning()) {
-            startProximityWhenPermitted()
-        }
-        startPeriodicHomeRefresh()
-        startForegroundBleRssiPolling()
-        startLiveDeviceLocationUpdates()
-        if (hasAllBlePermissionsGranted()) {
-            maybeRequestDeviceLocationPermissionOnce()
+        // During cold launch (onCreate), onResume() immediately starts BLE/Location/telemetry once
+        // after the first frame commits; only kick off inline when navigating to Home while resumed.
+        if (isActivityResumed) {
+            if (!PassiveEntryRuntime.isServiceRunning()) {
+                startProximityWhenPermitted()
+            }
+            startPeriodicHomeRefresh()
+            startForegroundBleRssiPolling()
+            startLiveDeviceLocationUpdates()
+            if (hasAllBlePermissionsGranted()) {
+                maybeRequestDeviceLocationPermissionOnce()
+            }
+            refreshTelemetry(silent = true)
         }
         syncCloudVehicleMeta()
-        refreshTelemetry(silent = true)
     }
 
     private fun syncCloudVehicleMeta() {
@@ -3442,7 +3467,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 currentProfile = withContext(Dispatchers.IO) {
                                     profileStore.updateControlPin(profile.vin, pin)
                                 } ?: profileStore.getActiveProfile()
-                                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, targetChecked).commit()
+                                uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, targetChecked).apply()
                                 CarWidgetManager.updateAllWidgets(this@MainActivity)
                                 setChecked(targetChecked, animate = true)
                                 dismiss()

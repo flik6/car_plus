@@ -142,7 +142,7 @@ object PassiveEntryStore {
             } else if (prefs(context).getString(KEY_ACTIVE_VIN, "").equals(normVin, ignoreCase = true)) {
                 remove(KEY_ACTIVE_VIN)
             }
-        }.commit()
+        }.apply()
     }
 
     fun recordTrigger(context: Context, vin: String, summary: String, atMs: Long = System.currentTimeMillis()) {
@@ -158,11 +158,11 @@ object PassiveEntryStore {
         val normVin = vin.trim().uppercase(Locale.US)
         prefs(context).edit().apply {
             if (normVin.isBlank()) remove(KEY_ACTIVE_VIN) else putString(KEY_ACTIVE_VIN, normVin)
-        }.commit()
+        }.apply()
     }
 
     fun clearAll(context: Context) {
-        prefs(context).edit().clear().commit()
+        prefs(context).edit().clear().apply()
     }
 
     fun updateVehicleSafetyHint(

@@ -13,8 +13,13 @@ abstract class BaseCarWidgetProvider(private val style: CarWidgetStyle) : AppWid
         appWidgetIds: IntArray
     ) {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
-        CarWidgetManager.updateWidgetsForStyle(context, appWidgetManager, appWidgetIds, style)
-        CarWidgetManager.triggerBackgroundSyncIfStale(context, pendingResult = goAsync())
+        CarWidgetManager.handleProviderUpdate(
+            context = context,
+            mgr = appWidgetManager,
+            widgetIds = appWidgetIds,
+            style = style,
+            pendingResult = goAsync()
+        )
     }
 
     override fun onAppWidgetOptionsChanged(
@@ -24,7 +29,13 @@ abstract class BaseCarWidgetProvider(private val style: CarWidgetStyle) : AppWid
         newOptions: Bundle
     ) {
         super.onAppWidgetOptionsChanged(context, appWidgetManager, appWidgetId, newOptions)
-        CarWidgetManager.updateWidgetsForStyle(context, appWidgetManager, intArrayOf(appWidgetId), style)
+        CarWidgetManager.updateWidgetsForStyle(
+            context,
+            appWidgetManager,
+            intArrayOf(appWidgetId),
+            style,
+            pendingResult = goAsync()
+        )
     }
 }
 

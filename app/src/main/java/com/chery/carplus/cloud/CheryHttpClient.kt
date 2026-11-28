@@ -4565,90 +4565,6 @@ class CheryHttpClient(
             normalized.contains("bind")
     }
 
-    private fun isPinnedPkicaCertificate(cert: X509Certificate): Boolean {
-        val subjectDn = cert.subjectX500Principal?.name.orEmpty()
-        if (!subjectDn.contains("CN=$DEFAULT_PRIMARY_HOST", ignoreCase = true) ||
-            !subjectDn.contains("O=CHERY", ignoreCase = true)
-        ) {
-            return false
-        }
-        val certSha256 = MessageDigest.getInstance("SHA-256")
-            .digest(cert.encoded)
-            .joinToString("") { "%02X".format(Locale.US, it.toInt() and 0xFF) }
-        if (certSha256.equals(PKICA_CERT_SHA256, ignoreCase = true)) return true
-
-        val spkiSha256 = Base64.encodeToString(
-            MessageDigest.getInstance("SHA-256").digest(cert.publicKey.encoded),
-            Base64.NO_WRAP
-        )
-        return spkiSha256 == PKICA_SPKI_SHA256
-    }
-
-    /**
-     * Scoped TLS trust manager for Chery's private-CA gateway (`pkica.mychery.com:648`).
-     * Validates against the system trust store first, then falls back strictly to Chery's
-     * pinned `pkica.mychery.com` certificate/SPKI with validity & Subject DN checks.
-     * All other HTTPS hosts use the default Android system trust store untouched.
-     */
-    private val pkicaPinnedSslSocketFactory: SSLSocketFactory by lazy {
-        val defaultTmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
-            init(null as KeyStore?)
-        }
-        val systemTm = defaultTmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
-        val pinnedTm = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                systemTm?.checkClientTrusted(chain, authType)
-                    ?: throw CertificateException("No system TrustManager available")
-            }
-
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                if (chain.isNullOrEmpty()) {
-                    throw CertificateException("Empty server certificate chain for $DEFAULT_PRIMARY_HOST")
-                }
-                val systemErr = runCatching {
-                    systemTm?.checkServerTrusted(chain, authType)
-                        ?: throw CertificateException("No system TrustManager available")
-                }.exceptionOrNull()
-                if (systemErr == null) return
-
-                val leaf = chain[0]
-                leaf.checkValidity()
-                if (!isPinnedPkicaCertificate(leaf)) {
-                    throw CertificateException(
-                        "Pinned certificate check failed for $DEFAULT_PRIMARY_HOST: ${leaf.subjectX500Principal?.name}",
-                        systemErr
-                    )
-                }
-            }
-
-            override fun getAcceptedIssuers(): Array<X509Certificate> =
-                systemTm?.acceptedIssuers ?: emptyArray()
-        }
-        val context = SSLContext.getInstance("TLS")
-        context.init(null, arrayOf<TrustManager>(pinnedTm), null)
-        context.socketFactory
-    }
-
-    /**
-     * Standard hostname verification for `pkica.mychery.com:648`, allowing the private
-     * Chery cert (which carries `CN=pkica.mychery.com` without a SAN extension) ONLY
-     * when the peer leaf certificate matches the exact pinned `pkica.mychery.com` cert/SPKI.
-     */
-    private val pkicaHostnameVerifier = HostnameVerifier { hostname, session ->
-        if (!hostname.equals(DEFAULT_PRIMARY_HOST, ignoreCase = true)) {
-            return@HostnameVerifier false
-        }
-        if (HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)) {
-            return@HostnameVerifier true
-        }
-        val leaf = runCatching { session.peerCertificates.firstOrNull() as? X509Certificate }.getOrNull()
-            ?: return@HostnameVerifier false
-        runCatching {
-            leaf.checkValidity()
-            isPinnedPkicaCertificate(leaf)
-        }.getOrDefault(false)
-    }
-
     private data class CommandSpec(
         val instruction: String,
         val paras: JSONObject,
@@ -4790,6 +4706,89 @@ class CheryHttpClient(
             "15BA38205A9A98EBD52EBDA9EA0F54094F7DF0F4EECBB8F1ED6525A77DD07A61"
         private const val PKICA_SPKI_SHA256 =
             "7hrijqG1hr0G1toNYrwyLaY5J4W0fMrZPMe1Qmw2bE8="
+
+        private val lazySystemTrustManager: X509TrustManager? by lazy {
+            runCatching {
+                val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+                tmf.init(null as KeyStore?)
+                tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
+            }.getOrNull()
+        }
+
+        private fun isPinnedPkicaCertificate(cert: X509Certificate): Boolean {
+            val subjectDn = cert.subjectX500Principal?.name.orEmpty()
+            if (!subjectDn.contains("CN=$DEFAULT_PRIMARY_HOST", ignoreCase = true) ||
+                !subjectDn.contains("O=CHERY", ignoreCase = true)
+            ) {
+                return false
+            }
+            val certSha256 = MessageDigest.getInstance("SHA-256")
+                .digest(cert.encoded)
+                .joinToString("") { "%02X".format(Locale.US, it.toInt() and 0xFF) }
+            if (certSha256.equals(PKICA_CERT_SHA256, ignoreCase = true)) return true
+
+            val spkiSha256 = Base64.encodeToString(
+                MessageDigest.getInstance("SHA-256").digest(cert.publicKey.encoded),
+                Base64.NO_WRAP
+            )
+            return spkiSha256 == PKICA_SPKI_SHA256
+        }
+
+        /**
+         * Process-wide lazy TLS socket factory scoped strictly to `pkica.mychery.com:648`.
+         * Fast-paths the verified pinned Chery certificate/SPKI (with `checkValidity()` + Subject DN),
+         * avoiding system CA store traversal & CertPathValidatorException overhead on every handshake,
+         * while still accepting a standard publicly-trusted CA cert if Chery rotates later.
+         */
+        private val pkicaPinnedSslSocketFactory: SSLSocketFactory by lazy {
+            val pinnedTm = object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                    lazySystemTrustManager?.checkClientTrusted(chain, authType)
+                        ?: throw CertificateException("No system TrustManager available")
+                }
+
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                    if (chain.isNullOrEmpty()) {
+                        throw CertificateException("Empty server certificate chain for $DEFAULT_PRIMARY_HOST")
+                    }
+                    val leaf = chain[0]
+                    val pinnedValid = runCatching {
+                        leaf.checkValidity()
+                        isPinnedPkicaCertificate(leaf)
+                    }.getOrDefault(false)
+                    if (pinnedValid) return
+
+                    lazySystemTrustManager?.checkServerTrusted(chain, authType)
+                        ?: throw CertificateException(
+                            "Pinned certificate check failed for $DEFAULT_PRIMARY_HOST: ${leaf.subjectX500Principal?.name}"
+                        )
+                }
+
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+            val context = SSLContext.getInstance("TLS")
+            context.init(null, arrayOf<TrustManager>(pinnedTm), null)
+            context.socketFactory
+        }
+
+        /**
+         * Standard hostname verification for `pkica.mychery.com:648`, allowing Chery's private
+         * CN-only cert ONLY when the peer leaf certificate matches the exact pinned cert/SPKI.
+         */
+        private val pkicaHostnameVerifier = HostnameVerifier { hostname, session ->
+            if (!hostname.equals(DEFAULT_PRIMARY_HOST, ignoreCase = true)) {
+                return@HostnameVerifier false
+            }
+            val leaf = runCatching { session.peerCertificates.firstOrNull() as? X509Certificate }.getOrNull()
+            if (leaf != null) {
+                val pinnedValid = runCatching {
+                    leaf.checkValidity()
+                    isPinnedPkicaCertificate(leaf)
+                }.getOrDefault(false)
+                if (pinnedValid) return@HostnameVerifier true
+            }
+            HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)
+        }
 
         /** Formats Celsius temperature (preserving 0.5°C precision) for `AC_ON` params["temperature"]. */
         fun formatAcTemperatureParam(celsius: Double): String =

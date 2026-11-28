@@ -12,6 +12,7 @@ import android.graphics.RectF
 import android.view.View
 import android.view.animation.LinearInterpolator
 import androidx.core.graphics.PathParser
+import java.util.EnumMap
 import kotlin.math.min
 
 /**
@@ -170,7 +171,6 @@ class AppIconView(
     private val drawPath = Path()
     private var cachedPath: Path? = null
 
-    @SuppressLint("RestrictedApi")
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val availW = (width - paddingLeft - paddingRight).toFloat()
@@ -193,11 +193,7 @@ class AppIconView(
             canvas.rotate(spinAngle, size / 2f, size / 2f)
         }
 
-        val basePath = cachedPath ?: run {
-            val parsed = PathParser.createPathFromPathData(iconType.svgPath) ?: Path()
-            cachedPath = parsed
-            parsed
-        }
+        val basePath = cachedPath ?: getOrParsePath(iconType).also { cachedPath = it }
         scaleMatrix.reset()
         scaleMatrix.setScale(scale, scale)
         drawPath.reset()
@@ -215,6 +211,20 @@ class AppIconView(
     companion object {
         /** Uniform stroke width (in 24x24 viewport units) shared with ic_widget_*.xml. */
         const val CONTROL_STROKE_WIDTH = 1.65f
+
+        private val parsedPathCache = EnumMap<AppIconType, Path>(AppIconType::class.java)
+
+        @SuppressLint("RestrictedApi")
+        private fun getOrParsePath(type: AppIconType): Path {
+            synchronized(parsedPathCache) {
+                parsedPathCache[type]?.let { return it }
+            }
+            val parsed = PathParser.createPathFromPathData(type.svgPath) ?: Path()
+            synchronized(parsedPathCache) {
+                parsedPathCache[type] = parsed
+            }
+            return parsed
+        }
     }
 
     private fun startSpin() {

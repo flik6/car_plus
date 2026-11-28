@@ -40,6 +40,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
@@ -226,6 +227,45 @@ object CarWidgetManager {
     private val COLOR_ACTIVE = Color.parseColor("#3D9BFF")
     private val lastAutoSyncAttemptMs = AtomicLong(0L)
     private val bgSyncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val widgetExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "CarWidgetWorker").apply { isDaemon = true }
+    }
+    private val coalescedUpdateQueued = AtomicBoolean(false)
+
+    private data class WidgetRenderAuthContext(
+        val hasActiveToken: Boolean,
+        val savedPin: String,
+        val requirePinEveryTime: Boolean
+    )
+
+    private data class CachedModelBitmapEntry(
+        val key: String,
+        val lastModified: Long,
+        val fileLength: Long,
+        val bitmap: Bitmap
+    )
+
+    private val modelBitmapCacheLock = Any()
+    private var cachedModelBitmap: CachedModelBitmapEntry? = null
+
+    private fun runOffMainSerialized(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            widgetExecutor.execute { runCatching { block() } }
+        } else {
+            block()
+        }
+    }
+
+    private fun loadRenderAuthContext(context: Context): WidgetRenderAuthContext {
+        val appCtx = context.applicationContext
+        val profile = runCatching { VehicleProfileStore(appCtx).getActiveProfile() }.getOrNull()
+        val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+        return WidgetRenderAuthContext(
+            hasActiveToken = profile != null && profile.accessToken.isNotBlank(),
+            savedPin = profile?.controlPin?.trim().orEmpty(),
+            requirePinEveryTime = uiPrefs.getBoolean("require_pin_every_time", true)
+        )
+    }
 
     fun resolveWidgetModelKey(
         modelName: String,
@@ -257,8 +297,10 @@ object CarWidgetManager {
      */
     fun markLoggedOut(context: Context, expired: Boolean = false) {
         val appCtx = context.applicationContext
-        CarWidgetStateStore.markLoggedOut(appCtx, expired = expired)
-        updateAllWidgets(appCtx)
+        runOffMainSerialized {
+            CarWidgetStateStore.markLoggedOut(appCtx, expired = expired)
+            updateAllWidgetsNow(appCtx)
+        }
     }
 
     /**
@@ -278,55 +320,57 @@ object CarWidgetManager {
         primaryStatus: String? = null
     ) {
         val appCtx = context.applicationContext
-        val rawCurrent = CarWidgetStateStore.load(appCtx)
-        val normalizedVin = vin.trim().uppercase(Locale.US).ifBlank {
-            telemetry?.vin?.trim()?.uppercase(Locale.US).orEmpty()
-        }.ifBlank {
-            VehicleProfileStore(appCtx).getActiveProfile().vin.trim().uppercase(Locale.US)
-        }
-        val sameVehicle = normalizedVin.isNotBlank() &&
-            rawCurrent.vin.equals(normalizedVin, ignoreCase = true)
-        val base = if (sameVehicle) rawCurrent else CarWidgetSnapshot(vin = normalizedVin)
+        runOffMainSerialized {
+            val rawCurrent = CarWidgetStateStore.load(appCtx)
+            val normalizedVin = vin.trim().uppercase(Locale.US).ifBlank {
+                telemetry?.vin?.trim()?.uppercase(Locale.US).orEmpty()
+            }.ifBlank {
+                VehicleProfileStore(appCtx).getActiveProfile().vin.trim().uppercase(Locale.US)
+            }
+            val sameVehicle = normalizedVin.isNotBlank() &&
+                rawCurrent.vin.equals(normalizedVin, ignoreCase = true)
+            val base = if (sameVehicle) rawCurrent else CarWidgetSnapshot(vin = normalizedVin)
 
-        val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
-        val effectiveEngineType = engineType.ifBlank { uiPrefs.getString("engineType", "").orEmpty() }
-        val resolvedModelName = modelName.trim().ifBlank { base.modelName }
-        val resolvedKey = resolveWidgetModelKey(
-            modelName = resolvedModelName,
-            vin = normalizedVin,
-            explicitKey = modelKey
-        )
-        val powertrain = VehiclePowertrain.resolve(effectiveEngineType, resolvedModelName, telemetry)
-        val resolvedPlate = plateNo.trim().ifBlank {
-            telemetry?.licensePlate.orEmpty().trim().ifBlank { if (sameVehicle) base.plateNo else "" }
-        }
+            val uiPrefs = appCtx.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+            val effectiveEngineType = engineType.ifBlank { uiPrefs.getString("engineType", "").orEmpty() }
+            val resolvedModelName = modelName.trim().ifBlank { base.modelName }
+            val resolvedKey = resolveWidgetModelKey(
+                modelName = resolvedModelName,
+                vin = normalizedVin,
+                explicitKey = modelKey
+            )
+            val powertrain = VehiclePowertrain.resolve(effectiveEngineType, resolvedModelName, telemetry)
+            val resolvedPlate = plateNo.trim().ifBlank {
+                telemetry?.licensePlate.orEmpty().trim().ifBlank { if (sameVehicle) base.plateNo else "" }
+            }
 
-        if (telemetry != null) {
-            syncFromTelemetry(
-                context = appCtx,
+            if (telemetry != null) {
+                syncFromTelemetryNow(
+                    context = appCtx,
+                    modelName = resolvedModelName,
+                    plateNo = resolvedPlate,
+                    telemetry = telemetry,
+                    cabinTempC = cabinTempC,
+                    primaryStatus = primaryStatus,
+                    modelKey = resolvedKey
+                )
+                return@runOffMainSerialized
+            }
+
+            val next = base.copy(
+                vin = normalizedVin,
+                modelKey = resolvedKey,
                 modelName = resolvedModelName,
                 plateNo = resolvedPlate,
-                telemetry = telemetry,
-                cabinTempC = cabinTempC,
-                primaryStatus = primaryStatus,
-                modelKey = resolvedKey
+                powertrainCode = powertrain.code,
+                primaryStatus = primaryStatus ?: if (sameVehicle) base.primaryStatus else "状态待同步",
+                transientHint = "",
+                loggedIn = true,
+                sessionExpired = false
             )
-            return
+            CarWidgetStateStore.save(appCtx, next)
+            updateAllWidgetsNow(appCtx)
         }
-
-        val next = base.copy(
-            vin = normalizedVin,
-            modelKey = resolvedKey,
-            modelName = resolvedModelName,
-            plateNo = resolvedPlate,
-            powertrainCode = powertrain.code,
-            primaryStatus = primaryStatus ?: if (sameVehicle) base.primaryStatus else "状态待同步",
-            transientHint = "",
-            loggedIn = true,
-            sessionExpired = false
-        )
-        CarWidgetStateStore.save(appCtx, next)
-        updateAllWidgets(appCtx)
     }
 
     /**
@@ -336,39 +380,16 @@ object CarWidgetManager {
     fun triggerBackgroundSyncIfStale(
         context: Context,
         minStaleMs: Long = 15L * 60L * 1000L,
-        pendingResult: BroadcastReceiver.PendingResult? = null
+        pendingResult: BroadcastReceiver.PendingResult? = null,
+        onComplete: (() -> Unit)? = null
     ) {
         val appCtx = context.applicationContext
-        val store = VehicleProfileStore(appCtx)
-        val profile = store.getActiveProfile()
-        if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
-            pendingResult?.finish()
-            return
-        }
-
-        val forceSync = minStaleMs <= 0L
-        val now = System.currentTimeMillis()
-        val snap = CarWidgetStateStore.load(appCtx)
-        if (!forceSync && snap.loggedIn && snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) {
-            pendingResult?.finish()
-            return
-        }
-
-        if (forceSync) {
-            lastAutoSyncAttemptMs.set(now)
-        } else {
-            val prevAttempt = lastAutoSyncAttemptMs.get()
-            if (now - prevAttempt < 60_000L || !lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) {
-                pendingResult?.finish()
-                return
-            }
-        }
-
         val mainHandler = Handler(Looper.getMainLooper())
         val finished = AtomicBoolean(false)
         fun finishOnce() {
             if (finished.compareAndSet(false, true)) {
                 runCatching { pendingResult?.finish() }
+                runCatching { onComplete?.invoke() }
             }
         }
         var syncJob: kotlinx.coroutines.Job? = null
@@ -376,12 +397,34 @@ object CarWidgetManager {
             syncJob?.cancel()
             finishOnce()
         }
-        if (pendingResult != null) {
+        if (pendingResult != null || onComplete != null) {
             mainHandler.postDelayed(watchdog, 7_000L)
         }
 
         syncJob = bgSyncScope.launch {
             try {
+                val store = VehicleProfileStore(appCtx)
+                val profile = store.getActiveProfile()
+                if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
+                    return@launch
+                }
+
+                val forceSync = minStaleMs <= 0L
+                val now = System.currentTimeMillis()
+                val snap = CarWidgetStateStore.load(appCtx)
+                if (!forceSync && snap.loggedIn && snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) {
+                    return@launch
+                }
+
+                if (forceSync) {
+                    lastAutoSyncAttemptMs.set(now)
+                } else {
+                    val prevAttempt = lastAutoSyncAttemptMs.get()
+                    if (now - prevAttempt < 60_000L || !lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) {
+                        return@launch
+                    }
+                }
+
                 kotlinx.coroutines.withTimeoutOrNull(6_500L) {
                     val client = CheryHttpClient(
                         defaultDeviceId = store.defaultDeviceId(),
@@ -413,7 +456,7 @@ object CarWidgetManager {
                         uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
                     )
                     val cachedPlate = uiPrefs.getString("plateNo", snap.plateNo).orEmpty()
-                    syncFromTelemetry(
+                    syncFromTelemetryNow(
                         context = appCtx,
                         modelName = cachedModel,
                         plateNo = cachedPlate,
@@ -428,6 +471,29 @@ object CarWidgetManager {
     }
 
     fun syncFromTelemetry(
+        context: Context,
+        modelName: String,
+        plateNo: String,
+        telemetry: VehicleTelemetry?,
+        cabinTempC: Double? = null,
+        primaryStatus: String? = null,
+        modelKey: String = ""
+    ) {
+        val appCtx = context.applicationContext
+        runOffMainSerialized {
+            syncFromTelemetryNow(
+                context = appCtx,
+                modelName = modelName,
+                plateNo = plateNo,
+                telemetry = telemetry,
+                cabinTempC = cabinTempC,
+                primaryStatus = primaryStatus,
+                modelKey = modelKey
+            )
+        }
+    }
+
+    private fun syncFromTelemetryNow(
         context: Context,
         modelName: String,
         plateNo: String,
@@ -491,50 +557,132 @@ object CarWidgetManager {
             sessionExpired = false
         )
         CarWidgetStateStore.save(context, next)
-        updateAllWidgets(context)
+        updateAllWidgetsNow(context)
     }
 
     fun updateAllWidgets(context: Context) {
         val appContext = context.applicationContext
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (coalescedUpdateQueued.compareAndSet(false, true)) {
+                widgetExecutor.execute {
+                    coalescedUpdateQueued.set(false)
+                    runCatching { updateAllWidgetsNow(appContext) }
+                }
+            }
+            return
+        }
+        updateAllWidgetsNow(appContext)
+    }
+
+    private fun updateAllWidgetsNow(context: Context) {
+        val appContext = context.applicationContext
         val mgr = AppWidgetManager.getInstance(appContext) ?: return
+        val barIds = mgr.getAppWidgetIds(ComponentName(appContext, CarWidgetBarProvider::class.java))
+        val compactIds = mgr.getAppWidgetIds(ComponentName(appContext, CarWidgetCompactProvider::class.java))
+        val mediumIds = mgr.getAppWidgetIds(ComponentName(appContext, CarWidgetMediumProvider::class.java))
+        val largeIds = mgr.getAppWidgetIds(ComponentName(appContext, CarWidgetLargeProvider::class.java))
+        if (barIds.isEmpty() && compactIds.isEmpty() && mediumIds.isEmpty() && largeIds.isEmpty()) {
+            return
+        }
         val snapshot = CarWidgetStateStore.load(appContext)
-        updateProvider(appContext, mgr, CarWidgetBarProvider::class.java, CarWidgetStyle.BAR, snapshot)
-        updateProvider(appContext, mgr, CarWidgetCompactProvider::class.java, CarWidgetStyle.COMPACT, snapshot)
-        updateProvider(appContext, mgr, CarWidgetMediumProvider::class.java, CarWidgetStyle.MEDIUM, snapshot)
-        updateProvider(appContext, mgr, CarWidgetLargeProvider::class.java, CarWidgetStyle.LARGE, snapshot)
+        val authCtx = loadRenderAuthContext(appContext)
+        updateProviderIds(appContext, mgr, barIds, CarWidgetStyle.BAR, snapshot, authCtx)
+        updateProviderIds(appContext, mgr, compactIds, CarWidgetStyle.COMPACT, snapshot, authCtx)
+        updateProviderIds(appContext, mgr, mediumIds, CarWidgetStyle.MEDIUM, snapshot, authCtx)
+        updateProviderIds(appContext, mgr, largeIds, CarWidgetStyle.LARGE, snapshot, authCtx)
+    }
+
+    fun handleProviderUpdate(
+        context: Context,
+        mgr: AppWidgetManager,
+        widgetIds: IntArray,
+        style: CarWidgetStyle,
+        pendingResult: BroadcastReceiver.PendingResult? = null
+    ) {
+        val appCtx = context.applicationContext
+        val idsCopy = widgetIds.copyOf()
+        val mainHandler = Handler(Looper.getMainLooper())
+        val finished = AtomicBoolean(false)
+        fun finishOnce() {
+            if (finished.compareAndSet(false, true)) {
+                runCatching { pendingResult?.finish() }
+            }
+        }
+        val watchdog = Runnable { finishOnce() }
+        if (pendingResult != null) {
+            mainHandler.postDelayed(watchdog, 7_000L)
+        }
+        widgetExecutor.execute {
+            try {
+                if (idsCopy.isNotEmpty()) {
+                    val snapshot = CarWidgetStateStore.load(appCtx)
+                    val authCtx = loadRenderAuthContext(appCtx)
+                    updateProviderIds(appCtx, mgr, idsCopy, style, snapshot, authCtx)
+                }
+            } catch (_: Throwable) {
+                // Keep provider update resilient
+            }
+            // Hand off the remaining budget to background stale-telemetry sync (or finish immediately if fresh)
+            triggerBackgroundSyncIfStale(
+                context = appCtx,
+                pendingResult = null,
+                onComplete = {
+                    mainHandler.removeCallbacks(watchdog)
+                    finishOnce()
+                }
+            )
+        }
     }
 
     fun updateWidgetsForStyle(
         context: Context,
         mgr: AppWidgetManager,
         widgetIds: IntArray,
-        style: CarWidgetStyle
+        style: CarWidgetStyle,
+        pendingResult: BroadcastReceiver.PendingResult? = null
     ) {
-        val snapshot = CarWidgetStateStore.load(context.applicationContext)
-        for (id in widgetIds) {
-            mgr.updateAppWidget(id, buildRemoteViews(context.applicationContext, style, snapshot))
+        if (widgetIds.isEmpty()) {
+            runCatching { pendingResult?.finish() }
+            return
+        }
+        val appCtx = context.applicationContext
+        val idsCopy = widgetIds.copyOf()
+        val mainHandler = Handler(Looper.getMainLooper())
+        val finished = AtomicBoolean(false)
+        fun finishOnce() {
+            if (finished.compareAndSet(false, true)) {
+                runCatching { pendingResult?.finish() }
+            }
+        }
+        val watchdog = Runnable { finishOnce() }
+        if (pendingResult != null) {
+            mainHandler.postDelayed(watchdog, 7_000L)
+        }
+        runOffMainSerialized {
+            try {
+                val snapshot = CarWidgetStateStore.load(appCtx)
+                val authCtx = loadRenderAuthContext(appCtx)
+                updateProviderIds(appCtx, mgr, idsCopy, style, snapshot, authCtx)
+            } finally {
+                mainHandler.removeCallbacks(watchdog)
+                finishOnce()
+            }
         }
     }
 
-    private fun updateProvider(
+    private fun updateProviderIds(
         context: Context,
         mgr: AppWidgetManager,
-        providerClass: Class<*>,
+        ids: IntArray,
         style: CarWidgetStyle,
-        snapshot: CarWidgetSnapshot
+        snapshot: CarWidgetSnapshot,
+        authCtx: WidgetRenderAuthContext
     ) {
-        val ids = mgr.getAppWidgetIds(ComponentName(context, providerClass))
         if (ids.isEmpty()) return
-        val views = buildRemoteViews(context, style, snapshot)
+        val views = buildRemoteViews(context, style, snapshot, authCtx)
         for (id in ids) {
             mgr.updateAppWidget(id, views)
         }
-    }
-
-    private fun hasActiveSession(context: Context, snapshot: CarWidgetSnapshot): Boolean {
-        if (!snapshot.loggedIn) return false
-        val profile = runCatching { VehicleProfileStore(context).getActiveProfile() }.getOrNull()
-        return profile != null && profile.accessToken.isNotBlank()
     }
 
     private fun formatRangeText(s: CarWidgetSnapshot): String {
@@ -555,8 +703,21 @@ object CarWidgetManager {
         val cleanKey = modelKey.trim().lowercase(Locale.US)
         if (cleanKey.isBlank()) return null
         val file = File(File(context.applicationContext.filesDir, "widget_models"), "$cleanKey.png")
-        if (!file.exists() || file.length() <= 0L) return null
-        return runCatching {
+        val fileLen = if (file.exists()) file.length() else 0L
+        if (fileLen <= 0L) return null
+        val mtime = file.lastModified()
+        synchronized(modelBitmapCacheLock) {
+            val cached = cachedModelBitmap
+            if (cached != null &&
+                cached.key == cleanKey &&
+                cached.lastModified == mtime &&
+                cached.fileLength == fileLen &&
+                !cached.bitmap.isRecycled
+            ) {
+                return cached.bitmap
+            }
+        }
+        val decodedResult = runCatching {
             val maxDimPx = 480
             val maxBytes = 350 * 1024
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -583,7 +744,12 @@ object CarWidgetManager {
                     if (it !== decoded) decoded.recycle()
                 }
             }
-        }.getOrNull()
+        }.getOrNull() ?: return null
+
+        synchronized(modelBitmapCacheLock) {
+            cachedModelBitmap = CachedModelBitmapEntry(cleanKey, mtime, fileLen, decodedResult)
+        }
+        return decodedResult
     }
 
     private fun bindVehicleImage(context: Context, rv: RemoteViews, modelKey: String) {
@@ -602,13 +768,14 @@ object CarWidgetManager {
     private fun buildRemoteViews(
         context: Context,
         style: CarWidgetStyle,
-        s: CarWidgetSnapshot
+        s: CarWidgetSnapshot,
+        authCtx: WidgetRenderAuthContext
     ): RemoteViews {
         val rv = RemoteViews(context.packageName, style.layoutRes)
         val openAppPi = buildOpenAppPendingIntent(context)
 
         // Clean logged-out / session-expired state across all 4 widget sizes
-        if (!hasActiveSession(context, s)) {
+        if (!s.loggedIn || !authCtx.hasActiveToken) {
             rv.setViewVisibility(R.id.widget_content_container, View.GONE)
             rv.setViewVisibility(R.id.widget_logged_out_container, View.VISIBLE)
             val expired = s.sessionExpired
@@ -703,9 +870,8 @@ object CarWidgetManager {
         // Android 10-15 BAL compliance: when PIN verification or PIN caching is required,
         // bind remote control buttons directly to PendingIntent.getActivity instead of a
         // BroadcastReceiver trampoline (which Android BAL blocks when backgrounded).
-        val uiPrefs = context.applicationContext.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
-        val requirePinEveryTime = uiPrefs.getBoolean("require_pin_every_time", true)
-        val savedPin = runCatching { VehicleProfileStore(context).getActiveProfile().controlPin.trim() }.getOrDefault("")
+        val requirePinEveryTime = authCtx.requirePinEveryTime
+        val savedPin = authCtx.savedPin
         val launchAppForControl = requirePinEveryTime || savedPin.length != 6
         val needPinCache = !requirePinEveryTime && savedPin.length != 6
 

@@ -134,17 +134,23 @@ class PassiveEntryScanReceiver : BroadcastReceiver() {
 class PassiveEntryBootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        when (intent.action) {
-            Intent.ACTION_BOOT_COMPLETED -> {
-                PassiveEntryWakeManager.restoreIfEnabled(context.applicationContext)
-            }
-            BluetoothAdapter.ACTION_STATE_CHANGED -> {
-                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-                if (state == BluetoothAdapter.STATE_ON) {
-                    PassiveEntryWakeManager.restoreIfEnabled(context.applicationContext)
-                }
+        val shouldRestore = when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED -> true
+            BluetoothAdapter.ACTION_STATE_CHANGED ->
+                intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) ==
+                    BluetoothAdapter.STATE_ON
+            else -> false
+        }
+        if (!shouldRestore) return
+        val pending = goAsync()
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val finishOnce = {
+            if (finished.compareAndSet(false, true)) {
+                runCatching { pending.finish() }
             }
         }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(finishOnce, 6_000L)
+        PassiveEntryWakeManager.restoreIfEnabled(context.applicationContext, onCompleted = finishOnce)
     }
 }
 
