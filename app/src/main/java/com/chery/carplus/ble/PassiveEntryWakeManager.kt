@@ -12,7 +12,7 @@ import android.os.Build
 import com.chery.carplus.profile.VehicleProfile
 import com.chery.carplus.profile.VehicleProfileStore
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 data class WakeRegistrationResult(
     val ok: Boolean,
@@ -34,7 +34,12 @@ object PassiveEntryWakeManager {
     private val wakeExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "passive-wake-io").apply { isDaemon = true }
     }
-    private val restoreInFlight = AtomicBoolean(false)
+    private val wakeStateLock = Any()
+    private val wakeGeneration = AtomicLong(0L)
+    private val restoreQueueLock = Any()
+    private var restoreRunning = false
+    private var restorePending = false
+    private val pendingRestoreCallbacks = mutableListOf<() -> Unit>()
 
     fun isPendingIntentSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
 
@@ -61,6 +66,56 @@ object PassiveEntryWakeManager {
     @SuppressLint("MissingPermission")
     fun enableForVehicle(context: Context, profile: VehicleProfile): WakeRegistrationResult {
         val appContext = context.applicationContext
+        val gen = wakeGeneration.incrementAndGet()
+        synchronized(wakeStateLock) {
+            if (wakeGeneration.get() != gen) {
+                return WakeRegistrationResult(
+                    ok = false,
+                    pendingIntentRegistered = false,
+                    companionPresenceActive = false,
+                    channelLabel = "未开启",
+                    message = "操作已被更新状态替代"
+                )
+            }
+            return enableForVehicleLocked(
+                appContext = appContext,
+                profile = profile,
+                expectedGen = gen,
+                requirePersistedEnabled = false
+            )
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun enableForVehicleLocked(
+        appContext: Context,
+        profile: VehicleProfile,
+        expectedGen: Long,
+        requirePersistedEnabled: Boolean
+    ): WakeRegistrationResult {
+        if (wakeGeneration.get() != expectedGen) {
+            return WakeRegistrationResult(
+                ok = false,
+                pendingIntentRegistered = false,
+                companionPresenceActive = false,
+                channelLabel = "未开启",
+                message = "操作已被更新状态替代"
+            )
+        }
+        val persistedConfig = PassiveEntryStore.load(appContext, profile.vin)
+        val persistedActiveVin = PassiveEntryStore.getActiveEnabledVin(appContext)
+        if (requirePersistedEnabled &&
+            (!persistedConfig.enabled || !persistedActiveVin.equals(profile.vin, ignoreCase = true))
+        ) {
+            return WakeRegistrationResult(
+                ok = false,
+                pendingIntentRegistered = false,
+                companionPresenceActive = false,
+                channelLabel = "未开启",
+                message = "蓝牙无感已关闭，跳过后台通道注册"
+            )
+        }
+
         val targetMac = PassiveEntryPrerequisiteChecker.normalizeMac(profile.bleMac)
             ?: return WakeRegistrationResult(
                 ok = false,
@@ -187,11 +242,12 @@ object PassiveEntryWakeManager {
         }
 
         val persistedEnabled = PassiveEntryStore.load(appContext, profile.vin).enabled
+        val effectiveEnabled = if (requirePersistedEnabled) persistedEnabled else (ok || persistedEnabled)
         PassiveEntryRuntime.updateWakeChannelStatus(
-            enabled = ok || persistedEnabled,
-            active = ok,
-            channelLabel = label,
-            logMessage = msg
+            enabled = effectiveEnabled,
+            active = ok && effectiveEnabled,
+            channelLabel = if (effectiveEnabled) label else "未开启",
+            logMessage = if (effectiveEnabled) msg else null
         )
         return WakeRegistrationResult(
             ok = ok,
@@ -205,77 +261,154 @@ object PassiveEntryWakeManager {
     @SuppressLint("MissingPermission")
     fun disable(context: Context, bleMac: String? = null) {
         val appContext = context.applicationContext
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val btManager = appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
-            val scanner = btManager?.adapter?.bluetoothLeScanner
-            val existing = buildScanPendingIntent(appContext, create = false)
-            if (existing != null) {
-                runCatching { scanner?.stopScan(existing) }
-                runCatching { existing.cancel() }
+        wakeGeneration.incrementAndGet()
+        synchronized(wakeStateLock) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val btManager = appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                val scanner = btManager?.adapter?.bluetoothLeScanner
+                val existing = buildScanPendingIntent(appContext, create = false)
+                if (existing != null) {
+                    runCatching { scanner?.stopScan(existing) }
+                    runCatching { existing.cancel() }
+                }
             }
-        }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val cdm = appContext.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
-            val macToStop = PassiveEntryPrerequisiteChecker.normalizeMac(bleMac)
-                ?: run {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val cdm = appContext.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
+                if (cdm != null) {
+                    val macsToStop = linkedSetOf<String>()
+                    PassiveEntryPrerequisiteChecker.normalizeMac(bleMac)?.let(macsToStop::add)
                     val activeVin = PassiveEntryStore.getActiveEnabledVin(appContext)
-                    val profile = VehicleProfileStore(appContext).listProfiles()
-                        .firstOrNull { it.vin.equals(activeVin, ignoreCase = true) }
-                    PassiveEntryPrerequisiteChecker.normalizeMac(profile?.bleMac)
-                }
-            if (cdm != null && macToStop != null) {
-                runCatching {
-                    @Suppress("DEPRECATION")
-                    cdm.stopObservingDevicePresence(macToStop)
+                    val profiles = VehicleProfileStore(appContext).listProfiles()
+                    if (activeVin.isNotBlank()) {
+                        profiles.firstOrNull { it.vin.equals(activeVin, ignoreCase = true) }
+                            ?.let { PassiveEntryPrerequisiteChecker.normalizeMac(it.bleMac)?.let(macsToStop::add) }
+                        PassiveEntryPrerequisiteChecker.normalizeMac(
+                            PassiveEntryStore.load(appContext, activeVin).cdmAssociatedMac
+                        )?.let(macsToStop::add)
+                    }
+                    if (bleMac.isNullOrBlank()) {
+                        profiles.forEach { p ->
+                            PassiveEntryPrerequisiteChecker.normalizeMac(p.bleMac)?.let(macsToStop::add)
+                            PassiveEntryPrerequisiteChecker.normalizeMac(
+                                PassiveEntryStore.load(appContext, p.vin).cdmAssociatedMac
+                            )?.let(macsToStop::add)
+                        }
+                        collectCompanionAssociatedMacsApi31(cdm).forEach(macsToStop::add)
+                    }
+                    macsToStop.forEach { mac ->
+                        runCatching {
+                            @Suppress("DEPRECATION")
+                            cdm.stopObservingDevicePresence(mac)
+                        }
+                    }
                 }
             }
-        }
 
-        PassiveEntryService.stopService(appContext)
-        PassiveEntryRuntime.updateWakeChannelStatus(
-            enabled = false,
-            active = false,
-            channelLabel = "未开启",
-            logMessage = "已关闭蓝牙无感并停止后台感应"
-        )
+            PassiveEntryService.stopService(appContext)
+            PassiveEntryRuntime.updateWakeChannelStatus(
+                enabled = false,
+                active = false,
+                channelLabel = "未开启",
+                logMessage = "已关闭蓝牙无感并停止后台感应"
+            )
+        }
+    }
+
+    private fun collectCompanionAssociatedMacsApi31(cdm: CompanionDeviceManager): Set<String> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return emptySet()
+        return runCatching {
+            val result = linkedSetOf<String>()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                cdm.myAssociations.forEach { assoc ->
+                    PassiveEntryPrerequisiteChecker.normalizeMac(assoc.deviceMacAddress?.toString())
+                        ?.let(result::add)
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                cdm.associations.forEach { addr ->
+                    PassiveEntryPrerequisiteChecker.normalizeMac(addr)?.let(result::add)
+                }
+            }
+            result
+        }.getOrDefault(emptySet())
     }
 
     /**
      * Offloads wake-channel restoration (SharedPreferences + VehicleProfileStore +
      * BluetoothManager/PowerManager/CompanionDeviceManager Binder IPCs) onto a
      * serialized background thread so Activity.onCreate()/onResume() never stall.
+     * Concurrent calls (e.g. Bluetooth STATE_ON during an active restore) set
+     * [restorePending] so a coalesced follow-up pass always runs.
      */
     fun restoreIfEnabled(context: Context, onCompleted: (() -> Unit)? = null) {
         val appContext = context.applicationContext
-        if (onCompleted == null && !restoreInFlight.compareAndSet(false, true)) {
-            return
+        val shouldSubmit: Boolean
+        synchronized(restoreQueueLock) {
+            if (onCompleted != null) pendingRestoreCallbacks.add(onCompleted)
+            if (restoreRunning) {
+                restorePending = true
+                shouldSubmit = false
+            } else {
+                restoreRunning = true
+                restorePending = false
+                shouldSubmit = true
+            }
         }
-        val ownsFlag = (onCompleted == null)
+        if (!shouldSubmit) return
         wakeExecutor.execute {
-            try {
-                restoreIfEnabledSync(appContext)
-            } finally {
-                if (ownsFlag) restoreInFlight.set(false)
-                onCompleted?.invoke()
+            while (true) {
+                val batchCallbacks: List<() -> Unit>
+                synchronized(restoreQueueLock) {
+                    batchCallbacks = pendingRestoreCallbacks.toList()
+                    pendingRestoreCallbacks.clear()
+                    restorePending = false
+                }
+                try {
+                    restoreIfEnabledSync(appContext)
+                } catch (_: Throwable) {
+                    // Keep serialized restore loop alive across unexpected platform exceptions.
+                } finally {
+                    batchCallbacks.forEach { cb -> runCatching { cb.invoke() } }
+                }
+                val runAgain = synchronized(restoreQueueLock) {
+                    if (restorePending || pendingRestoreCallbacks.isNotEmpty()) {
+                        true
+                    } else {
+                        restoreRunning = false
+                        false
+                    }
+                }
+                if (!runAgain) break
             }
         }
     }
 
     private fun restoreIfEnabledSync(appContext: Context) {
+        val genAtStart = wakeGeneration.get()
         val activeVin = PassiveEntryStore.getActiveEnabledVin(appContext)
         if (activeVin.isBlank()) {
-            PassiveEntryRuntime.updateWakeChannelStatus(
-                enabled = false,
-                active = false,
-                channelLabel = "未开启",
-                logMessage = null
-            )
+            synchronized(wakeStateLock) {
+                if (wakeGeneration.get() != genAtStart) return
+                PassiveEntryRuntime.updateWakeChannelStatus(
+                    enabled = false,
+                    active = false,
+                    channelLabel = "未开启",
+                    logMessage = null
+                )
+            }
             return
         }
         val config = PassiveEntryStore.load(appContext, activeVin)
         if (!config.enabled) {
-            PassiveEntryStore.setActiveEnabledVin(appContext, "")
+            synchronized(wakeStateLock) {
+                if (wakeGeneration.get() != genAtStart) return
+                if (!PassiveEntryStore.load(appContext, activeVin).enabled &&
+                    PassiveEntryStore.getActiveEnabledVin(appContext).equals(activeVin, ignoreCase = true)
+                ) {
+                    PassiveEntryStore.setActiveEnabledVin(appContext, "")
+                }
+            }
             return
         }
         val store = VehicleProfileStore(appContext)
@@ -283,15 +416,28 @@ object PassiveEntryWakeManager {
             ?: store.getActiveProfile().takeIf { it.vin.equals(activeVin, ignoreCase = true) }
             ?: return
         val report = PassiveEntryPrerequisiteChecker.evaluate(appContext, profile)
-        if (!report.allRequiredSatisfied) {
-            PassiveEntryRuntime.updateWakeChannelStatus(
-                enabled = true,
-                active = false,
-                channelLabel = "等待前置条件就绪",
-                logMessage = "恢复后台扫描跳过：${report.summaryText}"
+        synchronized(wakeStateLock) {
+            if (wakeGeneration.get() != genAtStart) return
+            val latestActiveVin = PassiveEntryStore.getActiveEnabledVin(appContext)
+            val latestConfig = PassiveEntryStore.load(appContext, activeVin)
+            if (!latestConfig.enabled || !latestActiveVin.equals(activeVin, ignoreCase = true)) {
+                return
+            }
+            if (!report.allRequiredSatisfied) {
+                PassiveEntryRuntime.updateWakeChannelStatus(
+                    enabled = true,
+                    active = false,
+                    channelLabel = "等待前置条件就绪",
+                    logMessage = "恢复后台扫描跳过：${report.summaryText}"
+                )
+                return
+            }
+            enableForVehicleLocked(
+                appContext = appContext,
+                profile = profile,
+                expectedGen = genAtStart,
+                requirePersistedEnabled = true
             )
-            return
         }
-        enableForVehicle(appContext, profile)
     }
 }

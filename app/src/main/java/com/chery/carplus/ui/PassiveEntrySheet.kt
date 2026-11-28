@@ -7,6 +7,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -29,7 +30,14 @@ import com.chery.carplus.ble.PassiveSensitivity
 import com.chery.carplus.ble.PassiveState
 import com.chery.carplus.ble.PrerequisiteCheckItem
 import com.chery.carplus.ble.PrerequisiteId
+import com.chery.carplus.ble.PrerequisiteReport
 import com.chery.carplus.profile.VehicleProfile
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -52,10 +60,12 @@ class PassiveEntrySheets(
 ) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val sheetScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var activeDialog: Dialog? = null
     private var activeImmediateDismiss: (() -> Unit)? = null
     private var refreshOpenSheetBlock: (() -> Unit)? = null
     private var rssiPollRunnable: Runnable? = null
+    private var prereqEvalJob: Job? = null
 
     fun refreshIfOpen() {
         mainHandler.post { refreshOpenSheetBlock?.invoke() }
@@ -63,6 +73,8 @@ class PassiveEntrySheets(
 
     fun dismiss() {
         stopRssiPolling()
+        prereqEvalJob?.cancel()
+        prereqEvalJob = null
         refreshOpenSheetBlock = null
         activeImmediateDismiss?.invoke() ?: activeDialog?.dismiss()
         activeImmediateDismiss = null
@@ -109,9 +121,7 @@ class PassiveEntrySheets(
         ) {}
         outer.addView(ctaBtn, lp(top = dp(14)))
 
-        val render = {
-            val profile = profileProvider()
-            val report = PassiveEntryPrerequisiteChecker.evaluate(context, profile)
+        val applyReport: (VehicleProfile, PrerequisiteReport) -> Unit = { profile, report ->
             val requiredTotal = report.items.count { it.required }
             val requiredDone = report.items.count { it.required && it.satisfied }
             subtitleTv.text = if (report.allRequiredSatisfied) {
@@ -152,13 +162,31 @@ class PassiveEntrySheets(
             }
         }
 
-        render()
-        refreshOpenSheetBlock = render
+        val render = {
+            if (subtitleTv.text.isNullOrBlank()) {
+                subtitleTv.text = "正在检查权限与连接状态…"
+                ctaBtn.alpha = 0.45f
+                ctaBtn.isEnabled = false
+            }
+            prereqEvalJob?.cancel()
+            val targetDialog = dialog
+            prereqEvalJob = sheetScope.launch {
+                val appContext = context.applicationContext
+                val (profile, report) = withContext(Dispatchers.IO) {
+                    val p = profileProvider()
+                    p to PassiveEntryPrerequisiteChecker.evaluate(appContext, p)
+                }
+                if (activeDialog !== targetDialog || !targetDialog.isShowing) return@launch
+                applyReport(profile, report)
+            }
+        }
 
         AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.65f)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog)
         dialog.setOnDismissListener {
             if (activeDialog === dialog) {
+                prereqEvalJob?.cancel()
+                prereqEvalJob = null
                 activeDialog = null
                 activeImmediateDismiss = null
                 refreshOpenSheetBlock = null
@@ -166,8 +194,10 @@ class PassiveEntrySheets(
         }
         activeDialog = dialog
         activeImmediateDismiss = immediateDismiss
+        refreshOpenSheetBlock = render
         dialog.show()
         MotionSpec.animateSheetEnter(outer)
+        render()
     }
 
     /**
@@ -403,11 +433,16 @@ class PassiveEntrySheets(
         )
         body.addView(prereqRow, lp())
 
-        val renderLive = {
+        var cachedReport: PrerequisiteReport? = null
+        var lastPrereqEvalElapsedMs = 0L
+        var prereqEvalInFlight = false
+        var prereqEvalPending = false
+
+        val renderLiveUi = {
             val latestProfile = profileProvider()
             cfg = PassiveEntryStore.load(context, latestProfile.vin)
             val snap = PassiveEntryRuntime.currentSnapshot()
-            val report = PassiveEntryPrerequisiteChecker.evaluate(context, latestProfile)
+            val report = cachedReport
             val liveRssi = liveBleRssiProvider() ?: snap.filteredRssi ?: snap.currentRawRssi
             val bleReady = liveBleConnectedProvider() || snap.sessionReady
 
@@ -417,7 +452,8 @@ class PassiveEntrySheets(
                 snap.state.label
             }
             statusDot.state = when {
-                snap.state == PassiveState.ERROR || !report.allRequiredSatisfied -> StatusDotView.State.DISCONNECTED
+                snap.state == PassiveState.ERROR || (report != null && !report.allRequiredSatisfied) ->
+                    StatusDotView.State.DISCONNECTED
                 bleReady || snap.state == PassiveState.NEAR_READY || snap.state == PassiveState.UNLOCKED_NEAR ->
                     StatusDotView.State.CONNECTED
                 snap.state == PassiveState.WAKING_CONNECT -> StatusDotView.State.CONNECTING
@@ -425,7 +461,7 @@ class PassiveEntrySheets(
             }
 
             statusMainTv.text = when {
-                !report.allRequiredSatisfied -> "还有 ${report.missingRequiredCount} 项必备设置待完成"
+                report != null && !report.allRequiredSatisfied -> "还有 ${report.missingRequiredCount} 项必备设置待完成"
                 snap.state == PassiveState.UNLOCKED_NEAR -> "已连接车辆 · 车辆已处于解锁状态"
                 bleReady && liveRssi != null && liveRssi >= cfg.effectiveUnlockRssi -> "就在车旁 · 信号很强"
                 bleReady -> "已连接车辆 · 蓝牙信号良好"
@@ -449,20 +485,61 @@ class PassiveEntrySheets(
                 cfg.sensitivity.description
             }
             resetCalBtn.visibility = if (cfg.calibratedUnlockRssi != null) View.VISIBLE else View.GONE
-            prereqSub.text = if (report.allRequiredSatisfied) {
-                "全部必备条件已满足"
-            } else {
-                "缺少 ${report.missingRequiredCount} 项必备条件"
+            prereqSub.text = when {
+                report == null -> "正在检查必备条件…"
+                report.allRequiredSatisfied -> "全部必备条件已满足"
+                else -> "缺少 ${report.missingRequiredCount} 项必备条件"
             }
         }
 
+        lateinit var schedulePrereqEval: (force: Boolean) -> Unit
+        schedulePrereqEval = { force ->
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val shouldSkip = !force && cachedReport != null &&
+                (nowElapsed - lastPrereqEvalElapsedMs) < PREREQ_REFRESH_DEBOUNCE_MS
+            if (!shouldSkip) {
+                if (prereqEvalInFlight) {
+                    prereqEvalPending = true
+                } else {
+                    prereqEvalInFlight = true
+                    val targetDialog = dialog
+                    val appContext = context.applicationContext
+                    prereqEvalJob = sheetScope.launch {
+                        val evaluated = try {
+                            withContext(Dispatchers.IO) {
+                                PassiveEntryPrerequisiteChecker.evaluate(appContext, profileProvider())
+                            }
+                        } finally {
+                            prereqEvalInFlight = false
+                        }
+                        lastPrereqEvalElapsedMs = SystemClock.elapsedRealtime()
+                        if (activeDialog !== targetDialog || !targetDialog.isShowing) return@launch
+                        cachedReport = evaluated
+                        renderLiveUi()
+                        if (prereqEvalPending) {
+                            prereqEvalPending = false
+                            schedulePrereqEval(true)
+                        }
+                    }
+                }
+            }
+        }
+
+        val renderLive = {
+            renderLiveUi()
+            schedulePrereqEval(false)
+        }
+
         val runtimeListener: (PassiveEntrySnapshot) -> Unit = {
-            renderLive()
+            renderLiveUi()
         }
         PassiveEntryRuntime.addListener(runtimeListener)
-        renderLive()
-        refreshOpenSheetBlock = renderLive
-        startRssiPolling()
+        renderLiveUi()
+        refreshOpenSheetBlock = {
+            renderLiveUi()
+            schedulePrereqEval(true)
+        }
+        startRssiPolling(onTick = renderLive)
 
         AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.65f)
         MotionSpec.attachSheetSwipeToDismiss(outer, scroll, dialog)
@@ -470,6 +547,8 @@ class PassiveEntrySheets(
             PassiveEntryRuntime.removeListener(runtimeListener)
             stopRssiPolling()
             if (activeDialog === dialog) {
+                prereqEvalJob?.cancel()
+                prereqEvalJob = null
                 activeDialog = null
                 activeImmediateDismiss = null
                 refreshOpenSheetBlock = null
@@ -479,6 +558,7 @@ class PassiveEntrySheets(
         activeImmediateDismiss = immediateDismiss
         dialog.show()
         MotionSpec.animateSheetEnter(outer)
+        schedulePrereqEval(true)
     }
 
     private fun createAnimatedSheetDialog(sheetView: View): Pair<Dialog, () -> Unit> {
@@ -502,7 +582,7 @@ class PassiveEntrySheets(
         return dialog to immediateDismiss
     }
 
-    private fun startRssiPolling() {
+    private fun startRssiPolling(onTick: () -> Unit) {
         stopRssiPolling()
         val task = object : Runnable {
             override fun run() {
@@ -510,12 +590,16 @@ class PassiveEntrySheets(
                 if (liveBleConnectedProvider()) {
                     onRequestLiveRssi()
                 }
-                refreshOpenSheetBlock?.invoke()
+                onTick()
                 mainHandler.postDelayed(this, 1_500L)
             }
         }
         rssiPollRunnable = task
         mainHandler.postDelayed(task, 600L)
+    }
+
+    private companion object {
+        const val PREREQ_REFRESH_DEBOUNCE_MS = 10_000L
     }
 
     private fun stopRssiPolling() {

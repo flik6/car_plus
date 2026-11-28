@@ -733,7 +733,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     Screen.LOGIN_FORM -> showWelcomeScreen()
                     Screen.SETTINGS -> {
                         if (settingsScreen?.handleBackPressed() != true) {
-                            showHomeScreen()
+                            returnFromSettingsToHome()
                         }
                     }
                     Screen.SECURITY -> returnFromSecurityToHome()
@@ -984,8 +984,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         ) {
             return
         }
-        appDialog?.dismiss()
-        appDialog = null
+        dismissAppDialogImmediately()
         if (subpageOverlayStack.isNotEmpty()) {
             clearSubpageOverlayStack()
         }
@@ -1223,6 +1222,8 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     override fun onDestroy() {
+        pendingStartupServicesRunnable?.let(contentFrame::removeCallbacks)
+        pendingStartupServicesRunnable = null
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
         cancelPendingForegroundPassiveUnlockCheck()
@@ -1633,6 +1634,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
 
     private fun showPolicyInfoDialog(title: String, body: String) {
+        if (isFinishing || isDestroyed) return
         dismissAppDialogImmediately()
         val dialog = android.app.Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -1656,9 +1658,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             setLayout((resources.displayMetrics.widthPixels * 0.86f).roundToInt(), WRAP_CONTENT)
             setGravity(Gravity.CENTER)
         }
+        if (isFinishing || isDestroyed) return
         trackAppDialog(dialog)
-        dialog.show()
-        MotionSpec.animateModalEnter(container)
+        runCatching {
+            dialog.show()
+            MotionSpec.animateModalEnter(container)
+        }.onFailure {
+            if (appDialog === dialog) {
+                appDialog = null
+                dismissAppDialogSync = null
+            }
+        }
     }
 
     // =========================================================================
@@ -1719,6 +1729,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     }
 
     private fun showCreateAccountDialog() {
+        if (isFinishing || isDestroyed) return
         dismissAppDialogImmediately()
         val dialog = android.app.Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -1758,9 +1769,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             setLayout((resources.displayMetrics.widthPixels * 0.88f).roundToInt(), WRAP_CONTENT)
             setGravity(Gravity.CENTER)
         }
+        if (isFinishing || isDestroyed) return
         trackAppDialog(dialog)
-        dialog.show()
-        MotionSpec.animateModalEnter(sheet)
+        runCatching {
+            dialog.show()
+            MotionSpec.animateModalEnter(sheet)
+        }.onFailure {
+            if (appDialog === dialog) {
+                appDialog = null
+                dismissAppDialogSync = null
+            }
+        }
     }
 
     // =========================================================================
@@ -3299,6 +3318,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     currentProfile = withContext(Dispatchers.IO) {
                         profileStore.updateControlPin(profile.vin, pin)
                     } ?: profileStore.getActiveProfile()
+                    CarWidgetManager.updateAllWidgets(this@MainActivity)
                     dismiss()
                     onPinReady(pin)
                 } else {
@@ -8722,6 +8742,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
      * Bluetooth pairing dialogs while the user manually types the 6-digit PIN.
      */
     private fun showTopPairingPinDrawer(pin: String) {
+        if (isFinishing || isDestroyed) return
         val decor = window.decorView as? FrameLayout ?: return
         dismissTopPairingPinDrawer(immediate = true)
 
@@ -9015,32 +9036,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     // Transient Toast Pill & Reusable Dark App Bottom Sheets / Components
     // =========================================================================
 
-    private fun showEditLicensePlateSheet() {
-        val profile = profileStore.getActiveProfile()
-        if (profile.vin.isBlank()) return
-        val currentPlate = uiPrefs.getString(KEY_PLATE_NO, "").orEmpty()
-        showInputSheet(
-            title = "设置车牌号",
-            message = "修改后将同步保存至云端并更新主页展示。",
-            hint = currentPlate.ifBlank { "例如：皖B12345" },
-            numeric = false,
-            confirmText = "保存"
-        ) { plate ->
-            val clean = plate.trim().uppercase(Locale.US)
-            if (clean.isBlank()) return@showInputSheet
-            lifecycleScope.launch {
-                val ok = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.updateVehicleLicensePlate(profile.vin, clean, profile.accessToken)
-                    }
-                }.getOrDefault(false)
-                uiPrefs.edit().putString(KEY_PLATE_NO, clean).apply()
-                refreshHomeHeaderAndRows()
-                showHomeStatus(if (ok) "车牌号已同步更新：$clean" else "已本地保存车牌号：$clean")
-            }
-        }
-    }
-
     private fun showHomeStatus(message: String) {
         if (isFinishing || isDestroyed) return
         if (currentScreen != Screen.HOME || subpageOverlayStack.isNotEmpty() || transientToastBanner == null) {
@@ -9069,6 +9064,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         onDismiss: (() -> Unit)? = null,
         buildContent: (LinearLayout, android.app.Dialog) -> Unit
     ) {
+        if (isFinishing || isDestroyed) return
         dismissAppDialogImmediately()
         sheetClimateTempView = null
 
@@ -9092,7 +9088,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
         val outer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = topRounded(CARD_MODAL, 20f)
+            background = topRounded(CARD_MODAL, 22f)
             setPadding(dp(22), dp(12), dp(22), dp(26))
         }
         sheetRootView = outer
@@ -9140,15 +9136,24 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             onDismiss?.invoke()
         }
+        if (isFinishing || isDestroyed) return
         dismissAppDialogSync = {
             bypassImmediate = true
             outer.animate().cancel()
             MotionSpec.dismissSheetImmediately(dialog)
         }
         appDialog = dialog
-        dialog.show()
-        MotionSpec.animateSheetEnter(outer)
-        applySheetDepthRecede(true)
+        runCatching {
+            dialog.show()
+            MotionSpec.animateSheetEnter(outer)
+            applySheetDepthRecede(true)
+        }.onFailure {
+            if (appDialog === dialog) {
+                appDialog = null
+                dismissAppDialogSync = null
+                sheetClimateTempView = null
+            }
+        }
     }
 
     private fun showInputSheet(

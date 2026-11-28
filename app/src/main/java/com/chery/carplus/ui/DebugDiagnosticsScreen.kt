@@ -125,6 +125,13 @@ class DebugDiagnosticsScreen(
         var summaryView: TextView? = null
     )
 
+    private data class WidgetCounts(
+        val bar: Int = 0,
+        val compact: Int = 0,
+        val medium: Int = 0,
+        val large: Int = 0
+    )
+
     private data class LiveSnapshot(
         val profile: VehicleProfile,
         val ble: CheryBleController.BleDebugSnapshot,
@@ -136,6 +143,7 @@ class DebugDiagnosticsScreen(
         val exactModelMatch: Boolean,
         val cacheInfos: List<VehicleModelRepository.ModelCacheDebugInfo>,
         val widgetSnap: CarWidgetSnapshot,
+        val widgetCounts: WidgetCounts,
         val verName: String,
         val verCode: Int,
         val passiveEnabled: Boolean,
@@ -157,6 +165,9 @@ class DebugDiagnosticsScreen(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var destroyed = false
     private var autoRefreshEnabled = true
+    private var refreshInFlight = false
+    private var pendingForceRebuild = false
+    private var latestSnapshot: LiveSnapshot? = null
 
     private var activeTab: InspectTab = InspectTab.SNAPSHOT
     private var activeLogFilter: LogFilter = LogFilter.ALL
@@ -194,7 +205,7 @@ class DebugDiagnosticsScreen(
     }
 
     fun buildView(): Pair<View, () -> Unit> {
-        cleanupOrphanedDiagFiles()
+        scope.launch(Dispatchers.IO) { cleanupOrphanedDiagFiles() }
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(ThemeTokens.BG_CANVAS)
@@ -652,7 +663,12 @@ class DebugDiagnosticsScreen(
             if (next != activeTab) {
                 val direction = if (next.ordinal > activeTab.ordinal) 1 else -1
                 activeTab = next
-                renderActiveInspectTab(captureSnapshot(), direction = direction)
+                val cached = latestSnapshot
+                if (cached != null) {
+                    renderActiveInspectTab(cached, direction = direction)
+                } else {
+                    refreshInPlace(forceInspectRebuild = true)
+                }
             }
         }
         inspectSegBar = segBar
@@ -740,18 +756,14 @@ class DebugDiagnosticsScreen(
             lp(bottom = dp(8))
         )
 
-        val mgr = AppWidgetManager.getInstance(context)
-        val cBar = mgr?.getAppWidgetIds(ComponentName(context, CarWidgetBarProvider::class.java))?.size ?: 0
-        val cCompact = mgr?.getAppWidgetIds(ComponentName(context, CarWidgetCompactProvider::class.java))?.size ?: 0
-        val cMedium = mgr?.getAppWidgetIds(ComponentName(context, CarWidgetMediumProvider::class.java))?.size ?: 0
-        val cLarge = mgr?.getAppWidgetIds(ComponentName(context, CarWidgetLargeProvider::class.java))?.size ?: 0
+        val wc = snap.widgetCounts
         val dm = context.resources.displayMetrics
 
         val envRows = mutableListOf(
             "映射模型" to "${snap.resolvedModelKey} · ${if (snap.exactModelMatch) "精准" else "回退"}",
             "账号手机" to formatAccountMobile(snap.profile.mobileNo),
             "VIN / PIN" to "${SensitiveUiText.identifier(snap.profile.vin)} · ${if (requirePinEveryTimeProvider()) "每次PIN" else "免密"}",
-            "桌面小组件" to "4×1:$cBar  2×2:$cCompact  4×2:$cMedium  4×3:$cLarge",
+            "桌面小组件" to "4×1:${wc.bar}  2×2:${wc.compact}  4×2:${wc.medium}  4×3:${wc.large}",
             "组件同步" to if (snap.widgetSnap.updatedAtMs > 0L) {
                 "${formatShortTime(snap.widgetSnap.updatedAtMs)} · ${snap.widgetSnap.primaryStatus} ${snap.widgetSnap.fuelPercent}%"
             } else {
@@ -1086,9 +1098,14 @@ class DebugDiagnosticsScreen(
                         val dir = if (filter.ordinal > activeLogFilter.ordinal) 1 else -1
                         AppHaptics.perform(it, HapticLevel.LIGHT_TICK)
                         activeLogFilter = filter
-                        renderActiveInspectTab(captureSnapshot(), direction = 0)
-                        inspectHost?.getChildAt(0)?.let { panel ->
-                            MotionSpec.animatePanelSwitch(panel, direction = dir)
+                        val cached = latestSnapshot
+                        if (cached != null) {
+                            renderActiveInspectTab(cached, direction = 0)
+                            inspectHost?.getChildAt(0)?.let { panel ->
+                                MotionSpec.animatePanelSwitch(panel, direction = dir)
+                            }
+                        } else {
+                            refreshInPlace(forceInspectRebuild = true)
                         }
                     }
                 }
@@ -1175,7 +1192,29 @@ class DebugDiagnosticsScreen(
 
     private fun refreshInPlace(forceInspectRebuild: Boolean) {
         if (destroyed) return
-        val snap = captureSnapshot()
+        if (refreshInFlight) {
+            if (forceInspectRebuild) pendingForceRebuild = true
+            return
+        }
+        refreshInFlight = true
+        scope.launch {
+            try {
+                val snap = captureSnapshotAsync()
+                if (destroyed) return@launch
+                latestSnapshot = snap
+                applySnapshotToViews(snap, forceInspectRebuild)
+            } finally {
+                refreshInFlight = false
+                if (pendingForceRebuild && !destroyed) {
+                    pendingForceRebuild = false
+                    refreshInPlace(forceInspectRebuild = true)
+                }
+            }
+        }
+    }
+
+    private fun applySnapshotToViews(snap: LiveSnapshot, forceInspectRebuild: Boolean) {
+        if (destroyed) return
 
         // 1. Overview header
         overviewModelTv?.text = snap.modelName
@@ -1384,10 +1423,15 @@ class DebugDiagnosticsScreen(
     }
 
     private fun handleClear3dCache() {
-        val count = VehicleModelRepository.clearAllModelCaches(context)
-        appendLocalLog("[3D] 清理缓存 $count 个")
-        toast("已清 $count 个模型缓存")
-        refreshInPlace(forceInspectRebuild = true)
+        scope.launch {
+            val count = withContext(Dispatchers.IO) {
+                VehicleModelRepository.clearAllModelCaches(context)
+            }
+            if (destroyed) return@launch
+            appendLocalLog("[3D] 清理缓存 $count 个")
+            toast("已清 $count 个模型缓存")
+            refreshInPlace(forceInspectRebuild = true)
+        }
     }
 
     private fun handleBleScan() {
@@ -1437,21 +1481,25 @@ class DebugDiagnosticsScreen(
         if (onOpenPassiveEntry != null) {
             onOpenPassiveEntry.invoke()
         } else {
-            val snap = captureSnapshot()
-            sectionStates[SECTION_BLE_PASSIVE]?.expanded = true
-            if (activeTab != InspectTab.SNAPSHOT) {
-                val tabRow = inspectSegBar?.getChildAt(1) as? LinearLayout
-                val firstTab = tabRow?.getChildAt(InspectTab.SNAPSHOT.ordinal)
-                if (firstTab != null) {
-                    firstTab.performClick()
+            scope.launch {
+                val snap = latestSnapshot ?: captureSnapshotAsync()
+                if (destroyed) return@launch
+                latestSnapshot = snap
+                sectionStates[SECTION_BLE_PASSIVE]?.expanded = true
+                if (activeTab != InspectTab.SNAPSHOT) {
+                    val tabRow = inspectSegBar?.getChildAt(1) as? LinearLayout
+                    val firstTab = tabRow?.getChildAt(InspectTab.SNAPSHOT.ordinal)
+                    if (firstTab != null) {
+                        firstTab.performClick()
+                    } else {
+                        activeTab = InspectTab.SNAPSHOT
+                        renderActiveInspectTab(snap, direction = -1)
+                    }
                 } else {
-                    activeTab = InspectTab.SNAPSHOT
-                    renderActiveInspectTab(snap, direction = -1)
+                    renderActiveInspectTab(snap, direction = 0)
                 }
-            } else {
-                renderActiveInspectTab(snap, direction = 0)
+                toast("无感: ${if (snap.passiveEnabled) snap.passiveStateLabel else "已关闭"}")
             }
-            toast("无感: ${if (snap.passiveEnabled) snap.passiveStateLabel else "已关闭"}")
         }
     }
 
@@ -1526,26 +1574,31 @@ class DebugDiagnosticsScreen(
     }
 
     private fun handleExportLogs() {
-        val report = buildSanitizedReportText()
-        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        appendLocalLog("[会话] 导出脱敏日志")
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "Qiri+ 脱敏诊断日志 $ts")
-            putExtra(Intent.EXTRA_TEXT, report)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        scope.launch {
+            val snap = captureSnapshotAsync()
+            if (destroyed) return@launch
+            latestSnapshot = snap
+            val report = buildSanitizedReportText(snap)
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            appendLocalLog("[会话] 导出脱敏日志")
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "Qiri+ 脱敏诊断日志 $ts")
+                putExtra(Intent.EXTRA_TEXT, report)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val launched = runCatching {
+                context.startActivity(Intent.createChooser(shareIntent, "导出诊断日志"))
+                true
+            }.getOrDefault(false)
+            if (!launched) {
+                copyTextToClipboard("Qiri+ Debug Log", report)
+                toast("已复制到剪贴板")
+            } else {
+                toast("已生成脱敏日志")
+            }
+            refreshInPlace(forceInspectRebuild = true)
         }
-        val launched = runCatching {
-            context.startActivity(Intent.createChooser(shareIntent, "导出诊断日志"))
-            true
-        }.getOrDefault(false)
-        if (!launched) {
-            copyTextToClipboard("Qiri+ Debug Log", report)
-            toast("已复制到剪贴板")
-        } else {
-            toast("已生成脱敏日志")
-        }
-        refreshInPlace(forceInspectRebuild = true)
     }
 
     private fun cleanupOrphanedDiagFiles() {
@@ -1580,10 +1633,15 @@ class DebugDiagnosticsScreen(
     // -------------------------------------------------------------------------
 
     private fun copySanitizedReport() {
-        val report = buildSanitizedReportText()
-        copyTextToClipboard("Qiri+ Debug Report", report)
-        appendLocalLog("[会话] 复制脱敏报告")
-        toast("已复制脱敏报告")
+        scope.launch {
+            val snap = captureSnapshotAsync()
+            if (destroyed) return@launch
+            latestSnapshot = snap
+            val report = buildSanitizedReportText(snap)
+            copyTextToClipboard("Qiri+ Debug Report", report)
+            appendLocalLog("[会话] 复制脱敏报告")
+            toast("已复制脱敏报告")
+        }
     }
 
     private fun copyFilteredLogs(snap: LiveSnapshot) {
@@ -1598,8 +1656,7 @@ class DebugDiagnosticsScreen(
         cm?.setPrimaryClip(ClipData.newPlainText(label, SensitiveUiText.maskPhonesInText(text)))
     }
 
-    private fun buildSanitizedReportText(): String {
-        val snap = captureSnapshot()
+    private fun buildSanitizedReportText(snap: LiveSnapshot): String {
         val ble = snap.ble
         val p = snap.profile
         val raw = buildString {
@@ -1664,49 +1721,62 @@ class DebugDiagnosticsScreen(
     // Snapshot Capture & Signature
     // -------------------------------------------------------------------------
 
-    private fun captureSnapshot(): LiveSnapshot {
+    private suspend fun captureSnapshotAsync(): LiveSnapshot {
         val profile = profileProvider()
         val ble = bleController.getDebugSnapshot(profile)
         val telemetry = telemetryProvider()
         val modelName = modelNameProvider().ifBlank { "未知车型" }
         val plateNo = plateNoProvider().ifBlank { "--" }
+        val vehicleCount = vehicleCountProvider().coerceAtLeast(1)
         val resolvedKey = VehicleModelRepository.resolveModelKey(modelName)
         val exactMatch = VehicleModelRepository.isExactModelMatch(modelName)
-        val cacheInfos = VehicleModelRepository.getDebugCacheStatus(context)
-        val widgetSnap = CarWidgetStateStore.load(context)
-        val (verName, verCode) = AppUpdater.getCurrentVersion(context)
-        val passiveCfg = PassiveEntryStore.load(context, profile.vin)
         val passiveSnap = PassiveEntryRuntime.currentSnapshot()
-        val passivePrereq = PassiveEntryPrerequisiteChecker.evaluate(context, profile)
+        val appContext = context.applicationContext
 
-        return LiveSnapshot(
-            profile = profile,
-            ble = ble,
-            telemetry = telemetry,
-            modelName = modelName,
-            plateNo = plateNo,
-            vehicleCount = vehicleCountProvider().coerceAtLeast(1),
-            resolvedModelKey = resolvedKey,
-            exactModelMatch = exactMatch,
-            cacheInfos = cacheInfos,
-            widgetSnap = widgetSnap,
-            verName = verName,
-            verCode = verCode,
-            passiveEnabled = passiveCfg.enabled,
-            passiveUnlock = passiveCfg.autoUnlockEnabled,
-            passiveLock = passiveCfg.autoLockEnabled,
-            passiveUnlockRssi = passiveCfg.effectiveUnlockRssi,
-            passiveLockRssi = passiveCfg.effectiveLockRssi,
-            passiveSensitivity = passiveCfg.sensitivity.label,
-            passiveWakeChannel = passiveSnap.wakeChannelLabel,
-            passiveWakeReady = passiveSnap.wakeChannelActive,
-            passiveServiceRunning = passiveSnap.serviceRunning,
-            passiveStateLabel = passiveSnap.state.label,
-            passiveRawRssi = passiveSnap.currentRawRssi,
-            passiveFilteredRssi = passiveSnap.filteredRssi,
-            passivePrereqSummary = passivePrereq.summaryText,
-            passiveLastEvent = passiveSnap.lastEventText.ifBlank { passiveCfg.lastTriggerSummary }
-        )
+        return withContext(Dispatchers.IO) {
+            val cacheInfos = VehicleModelRepository.getDebugCacheStatus(appContext)
+            val widgetSnap = CarWidgetStateStore.load(appContext)
+            val mgr = AppWidgetManager.getInstance(appContext)
+            val widgetCounts = WidgetCounts(
+                bar = runCatching { mgr?.getAppWidgetIds(ComponentName(appContext, CarWidgetBarProvider::class.java))?.size }.getOrNull() ?: 0,
+                compact = runCatching { mgr?.getAppWidgetIds(ComponentName(appContext, CarWidgetCompactProvider::class.java))?.size }.getOrNull() ?: 0,
+                medium = runCatching { mgr?.getAppWidgetIds(ComponentName(appContext, CarWidgetMediumProvider::class.java))?.size }.getOrNull() ?: 0,
+                large = runCatching { mgr?.getAppWidgetIds(ComponentName(appContext, CarWidgetLargeProvider::class.java))?.size }.getOrNull() ?: 0
+            )
+            val (verName, verCode) = AppUpdater.getCurrentVersion(appContext)
+            val passiveCfg = PassiveEntryStore.load(appContext, profile.vin)
+            val passivePrereq = PassiveEntryPrerequisiteChecker.evaluate(appContext, profile)
+
+            LiveSnapshot(
+                profile = profile,
+                ble = ble,
+                telemetry = telemetry,
+                modelName = modelName,
+                plateNo = plateNo,
+                vehicleCount = vehicleCount,
+                resolvedModelKey = resolvedKey,
+                exactModelMatch = exactMatch,
+                cacheInfos = cacheInfos,
+                widgetSnap = widgetSnap,
+                widgetCounts = widgetCounts,
+                verName = verName,
+                verCode = verCode,
+                passiveEnabled = passiveCfg.enabled,
+                passiveUnlock = passiveCfg.autoUnlockEnabled,
+                passiveLock = passiveCfg.autoLockEnabled,
+                passiveUnlockRssi = passiveCfg.effectiveUnlockRssi,
+                passiveLockRssi = passiveCfg.effectiveLockRssi,
+                passiveSensitivity = passiveCfg.sensitivity.label,
+                passiveWakeChannel = passiveSnap.wakeChannelLabel,
+                passiveWakeReady = passiveSnap.wakeChannelActive,
+                passiveServiceRunning = passiveSnap.serviceRunning,
+                passiveStateLabel = passiveSnap.state.label,
+                passiveRawRssi = passiveSnap.currentRawRssi,
+                passiveFilteredRssi = passiveSnap.filteredRssi,
+                passivePrereqSummary = passivePrereq.summaryText,
+                passiveLastEvent = passiveSnap.lastEventText.ifBlank { passiveCfg.lastTriggerSummary }
+            )
+        }
     }
 
     private fun computeInspectSignature(snap: LiveSnapshot): String {
@@ -1720,6 +1790,7 @@ class DebugDiagnosticsScreen(
                 ble.stage, ble.scanning, ble.isSessionReady, ble.connectedAddress, ble.currentRssi,
                 ble.totalScannedDevices, snap.passiveEnabled, snap.passiveStateLabel,
                 snap.passiveRawRssi, snap.passiveFilteredRssi, snap.widgetSnap.updatedAtMs,
+                snap.widgetCounts.bar, snap.widgetCounts.compact, snap.widgetCounts.medium, snap.widgetCounts.large,
                 snap.cacheInfos.count { it.cached }
             ).joinToString("|")
 

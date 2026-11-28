@@ -1471,8 +1471,19 @@ object SixDigitPinSheet {
         onPinSixDigits: (pin: String, ui: PinSheetController) -> Unit
     ): Dialog {
         var outerRef: View? = null
+        var boxRowRef: View? = null
+        var pendingSubmitRunnable: Runnable? = null
+        var dismissing = false
+        fun cancelPendingSubmit() {
+            pendingSubmitRunnable?.let { runnable ->
+                boxRowRef?.removeCallbacks(runnable)
+            }
+            pendingSubmitRunnable = null
+        }
         val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
             override fun dismiss() {
+                dismissing = true
+                cancelPendingSubmit()
                 val sheet = outerRef
                 if (!isShowing || sheet == null || MotionSpec.isBypassingSheetDismiss(this)) {
                     runCatching { super.dismiss() }
@@ -1548,7 +1559,15 @@ object SixDigitPinSheet {
         val boxRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) = Unit
+                override fun onViewDetachedFromWindow(v: View) {
+                    dismissing = true
+                    cancelPendingSubmit()
+                }
+            })
         }
+        boxRowRef = boxRow
         val boxes = ArrayList<FrameLayout>(6)
         val dots = ArrayList<View>(6)
         val digits = StringBuilder(6)
@@ -1675,6 +1694,8 @@ object SixDigitPinSheet {
                     .start()
             },
             dismissAnimated = {
+                dismissing = true
+                cancelPendingSubmit()
                 MotionSpec.dismissSheetAnimated(outer, dialog)
             }
         )
@@ -1696,7 +1717,7 @@ object SixDigitPinSheet {
         )
 
         fun onDigitPressed(d: String) {
-            if (locked || digits.length >= 6) return
+            if (dismissing || locked || digits.length >= 6) return
             errorTv.text = ""
             val idx = digits.length
             digits.append(d)
@@ -1704,11 +1725,17 @@ object SixDigitPinSheet {
             if (digits.length == 6) {
                 locked = true
                 val pin = digits.toString()
-                boxRow.postDelayed({
-                    if (dialog.isShowing) {
+                cancelPendingSubmit()
+                val runnable = Runnable {
+                    pendingSubmitRunnable = null
+                    if (!dismissing && dialog.isShowing && boxRow.isAttachedToWindow &&
+                        MotionSpec.isHostActivityAlive(context)
+                    ) {
                         onPinSixDigits(pin, controller)
                     }
-                }, 90L)
+                }
+                pendingSubmitRunnable = runnable
+                boxRow.postDelayed(runnable, 90L)
             }
         }
 

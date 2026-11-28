@@ -59,7 +59,9 @@ data class ParsedTBoxResponse(
     val doorsOpen: Boolean? = null,
     val trunkOpen: Boolean? = null,
     val acOn: Boolean? = null,
-    val engineRunning: Boolean? = null
+    val engineRunning: Boolean? = null,
+    val errorCodes: List<Int> = emptyList(),
+    val subFeatureWarnings: Map<Int, List<Int>> = emptyMap()
 )
 
 /**
@@ -212,21 +214,41 @@ object TBoxTlvBuilder {
         val hasOuterServiceHeader = hasValidOuterServiceHeader(payload)
         val tlvs = parseTlvItems(payload)
         val resultItem = tlvs.firstOrNull { (it.tag and 0xFF) == TAG_RESULT }
-        val errorItem = tlvs.firstOrNull { (it.tag and 0xFF) == TAG_ERROR }
-            ?: tlvs.firstOrNull { (it.tag and 0xFF) in 0xE2..0xE8 }
         var resultCode = resultItem?.value?.firstOrNull()?.toInt()?.and(0xFF)
-        var errorCode = errorItem?.value?.takeIf { it.isNotEmpty() }?.let { value ->
-            if (value.size >= 2) {
-                ((value[0].toInt() and 0xFF) shl 8) or (value[1].toInt() and 0xFF)
-            } else {
-                value[0].toInt() and 0xFF
+
+        // zyhl BleKeyTManager (a.java:2076-2150): 0xE1..0xE8 carry 1-byte error code lists.
+        // 0xE1 holds primary command errors; 0xE2..0xE8 hold AC sub-feature warnings (non-fatal when 0xE0 == 0x01).
+        val rawPrimaryErrors = tlvs
+            .filter { (it.tag and 0xFF) == TAG_ERROR }
+            .flatMap { item -> item.value.map { b -> b.toInt() and 0xFF } }
+        val primaryErrorCodes = rawPrimaryErrors.filter { it != 0 }.distinct()
+        val subFeatureWarnings = linkedMapOf<Int, List<Int>>().apply {
+            tlvs.filter { (it.tag and 0xFF) in 0xE2..0xE8 }.forEach { item ->
+                val tag = item.tag and 0xFF
+                val codes = item.value.map { b -> b.toInt() and 0xFF }.filter { it != 0 }.distinct()
+                if (codes.isNotEmpty()) {
+                    this[tag] = (this[tag].orEmpty() + codes).distinct()
+                }
             }
+        }
+        var errorCode: Int? = when {
+            primaryErrorCodes.isNotEmpty() -> primaryErrorCodes.first()
+            rawPrimaryErrors.isNotEmpty() -> 0
+            else -> null
         }
 
         val compact = !hasOuterServiceHeader && looksLikeCompactActionResult(payload)
-        if (compact) {
+        val finalErrorCodes = if (compact) {
             if (resultCode == null) resultCode = payload[1].toInt() and 0xFF
-            if (errorCode == null && payload.size >= 3) errorCode = payload[2].toInt() and 0xFF
+            if (primaryErrorCodes.isEmpty() && payload.size >= 3) {
+                val compactErr = payload[2].toInt() and 0xFF
+                if (errorCode == null) errorCode = compactErr
+                if (compactErr != 0) listOf(compactErr) else emptyList()
+            } else {
+                primaryErrorCodes
+            }
+        } else {
+            primaryErrorCodes
         }
 
         val serviceTag = when {
@@ -237,8 +259,8 @@ object TBoxTlvBuilder {
 
         val isStatusPush = serviceTag == TBoxService.REALDATA || messageId == BleWholeProtocol.MSG_VEHICLE_INFO
         val success = when {
-            resultCode != null -> resultCode == 1 && (errorCode == null || errorCode == 0)
-            errorCode != null -> errorCode == 0
+            resultCode != null -> resultCode == 1 && finalErrorCodes.isEmpty()
+            errorCode != null -> finalErrorCodes.isEmpty() && errorCode == 0
             compact && payload.size >= 2 -> (payload[1].toInt() and 0xFF) == 1 &&
                 (payload.size < 3 || (payload[2].toInt() and 0xFF) == 0)
             isStatusPush -> tlvs.isNotEmpty()
@@ -326,7 +348,15 @@ object TBoxTlvBuilder {
             }
         }
 
-        val summary = buildSummary(messageId, serviceTag, resultCode, errorCode, success, tlvs)
+        val summary = buildSummary(
+            messageId = messageId,
+            serviceTag = serviceTag,
+            resultCode = resultCode,
+            errorCodes = finalErrorCodes,
+            subFeatureWarnings = subFeatureWarnings,
+            success = success,
+            tlvs = tlvs
+        )
         return ParsedTBoxResponse(
             messageId = messageId,
             serviceTag = serviceTag,
@@ -340,7 +370,9 @@ object TBoxTlvBuilder {
             doorsOpen = doorsOpen,
             trunkOpen = trunkOpen,
             acOn = acOn,
-            engineRunning = engineRunning
+            engineRunning = engineRunning,
+            errorCodes = finalErrorCodes,
+            subFeatureWarnings = subFeatureWarnings
         )
     }
 
@@ -416,7 +448,8 @@ object TBoxTlvBuilder {
         messageId: Int,
         serviceTag: Int?,
         resultCode: Int?,
-        errorCode: Int?,
+        errorCodes: List<Int>,
+        subFeatureWarnings: Map<Int, List<Int>>,
         success: Boolean,
         tlvs: List<TBoxTlvItem>
     ): String {
@@ -428,9 +461,27 @@ object TBoxTlvBuilder {
             null -> if (success) "已受理" else "结果未知"
             else -> "结果码 0x%02X".format(resultCode and 0xFF)
         }
-        val errorText = when (errorCode) {
-            null, 0 -> ""
-            else -> "，错误码 0x%02X".format(errorCode and 0xFF)
+        val errorText = if (errorCodes.isEmpty()) {
+            ""
+        } else {
+            "，错误码 " + errorCodes.joinToString(",") { "0x%02X".format(it and 0xFF) }
+        }
+        val warningText = if (subFeatureWarnings.isEmpty()) {
+            ""
+        } else {
+            "（子项提示: " + subFeatureWarnings.entries.joinToString("，") { (tag, codes) ->
+                val subName = when (tag) {
+                    0xE2 -> "前除霜"
+                    0xE3 -> "后除霜"
+                    0xE4 -> "主驾加热"
+                    0xE5 -> "副驾加热"
+                    0xE6 -> "空气净化"
+                    0xE7 -> "主驾通风"
+                    0xE8 -> "副驾通风"
+                    else -> "0x%02X".format(tag and 0xFF)
+                }
+                "$subName=" + codes.joinToString(",") { "0x%02X".format(it and 0xFF) }
+            } + "）"
         }
         val details = tlvs.joinToString(separator = "，") { item ->
             val label = when (item.tag) {
@@ -445,7 +496,7 @@ object TBoxTlvBuilder {
         } else {
             "$serviceName$resultText"
         }
-        return if (details.isEmpty()) "$prefix$errorText" else "$prefix$errorText；$details"
+        return if (details.isEmpty()) "$prefix$errorText$warningText" else "$prefix$errorText$warningText；$details"
     }
 
     private fun door(unlock: Boolean): ByteArray = command(

@@ -2206,11 +2206,14 @@ internal class VehicleFeatureSheets(
                                             upgradeBtn.isEnabled = true
                                             upgradeBtn.alpha = 1f
                                             upgradeBtn.text = "立即升级"
+                                            val cachedPinNow = cachedPinProvider().ifBlank { profile.controlPin }.trim()
+                                            if (pin.isNotBlank() && pin == cachedPinNow) {
+                                                onPinUpdated(profile.vin, "")
+                                            }
                                             if (onPinError != null) {
                                                 onPinError(res.message.ifBlank { "车控安全密码校验失败，请重新输入" })
                                             } else {
-                                                secondaryDialog = SixDigitPinSheet.showVerifyPinSheet(
-                                                    context = context,
+                                                showTrackedVerifyPinSheet(
                                                     title = "验证安全密码",
                                                     subtitle = "请输入 6 位车控安全密码以开始车辆升级"
                                                 ) { enteredPin, showErr, dismissPin ->
@@ -2256,8 +2259,7 @@ internal class VehicleFeatureSheets(
                                     val mustPromptPin = requirePinEveryTimeProvider() ||
                                         cachedPin.length != 6 || !cachedPin.all { it.isDigit() }
                                     if (mustPromptPin) {
-                                        secondaryDialog = SixDigitPinSheet.showVerifyPinSheet(
-                                            context = context,
+                                        showTrackedVerifyPinSheet(
                                             title = "验证安全密码",
                                             subtitle = "请输入 6 位车控安全密码以开始车辆升级"
                                         ) { enteredPin, showErr, dismissPin ->
@@ -2844,48 +2846,80 @@ internal class VehicleFeatureSheets(
             lateinit var saveSpeedBtn: TextView
             var disableSpeedBtn: TextView? = null
 
+            fun executeSpeedLimit(
+                targetEnabled: Boolean,
+                targetSpeed: Int,
+                desc: String,
+                pin: String,
+                onPinError: ((String) -> Unit)? = null,
+                onDismissPin: (() -> Unit)? = null
+            ) {
+                if (submittingSpeed) return
+                submittingSpeed = true
+                saveSpeedBtn.isEnabled = false
+                saveSpeedBtn.alpha = 0.6f
+                disableSpeedBtn?.isEnabled = false
+                disableSpeedBtn?.alpha = 0.6f
+                scope.launch {
+                    val outcome = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.setSpeedLimitReminderResult(
+                                vin = profile.vin,
+                                speedKmh = if (targetEnabled) targetSpeed else 0,
+                                pin = pin,
+                                accessToken = profile.accessToken
+                            )
+                        }
+                    }
+                    submittingSpeed = false
+                    saveSpeedBtn.isEnabled = true
+                    saveSpeedBtn.alpha = 1f
+                    disableSpeedBtn?.isEnabled = true
+                    disableSpeedBtn?.alpha = 1f
+                    outcome.onSuccess { res ->
+                        if (res.success) {
+                            if (pin.length == 6 && pin.all { it.isDigit() }) {
+                                onPinUpdated(profile.vin, pin)
+                            }
+                            onDismissPin?.invoke()
+                            onUpdated(targetEnabled, if (targetEnabled) targetSpeed else 0)
+                            if (dialog.isShowing) dialog.dismiss()
+                            toast(if (targetEnabled) "已设置限速提醒：$targetSpeed km/h" else "已关闭限速提醒")
+                        } else if (res.isPinError) {
+                            val cachedPinNow = cachedPinProvider().ifBlank { profile.controlPin }.trim()
+                            if (pin.isNotBlank() && pin == cachedPinNow) {
+                                onPinUpdated(profile.vin, "")
+                            }
+                            if (onPinError != null) {
+                                onPinError(res.message.ifBlank { "车控安全密码校验失败，请重新输入" })
+                            } else if (dialog.isShowing) {
+                                showTrackedVerifyPinSheet(
+                                    title = "验证安全密码",
+                                    subtitle = "请输入 6 位车控安全密码以执行「$desc」"
+                                ) { enteredPin, showErr, dismissPin ->
+                                    executeSpeedLimit(targetEnabled, targetSpeed, desc, enteredPin, showErr, dismissPin)
+                                }
+                            }
+                        } else {
+                            onDismissPin?.invoke()
+                            toast(res.message.ifBlank { "限速提醒设置失败，请稍后重试" })
+                        }
+                    }.onFailure { err ->
+                        onDismissPin?.invoke()
+                        if (err is CherySessionExpiredException) {
+                            if (dialog.isShowing) dialog.dismiss()
+                        } else {
+                            toast(friendlyErrorMessage(err, "限速提醒设置失败，请稍后重试"))
+                        }
+                    }
+                }
+            }
+
             fun submitSpeed(targetEnabled: Boolean, targetSpeed: Int) {
                 if (submittingSpeed) return
                 val desc = if (targetEnabled) "开启限速提醒（${targetSpeed} km/h）" else "关闭限速提醒"
                 resolvePin(desc) { verifiedPin ->
-                    if (submittingSpeed) return@resolvePin
-                    submittingSpeed = true
-                    saveSpeedBtn.isEnabled = false
-                    saveSpeedBtn.alpha = 0.6f
-                    disableSpeedBtn?.isEnabled = false
-                    disableSpeedBtn?.alpha = 0.6f
-                    scope.launch {
-                        val res = runCatching {
-                            withContext(Dispatchers.IO) {
-                                httpClient.setSpeedLimitReminder(
-                                    vin = profile.vin,
-                                    speedKmh = if (targetEnabled) targetSpeed else 0,
-                                    pin = verifiedPin,
-                                    accessToken = profile.accessToken
-                                )
-                            }
-                        }
-                        submittingSpeed = false
-                        saveSpeedBtn.isEnabled = true
-                        saveSpeedBtn.alpha = 1f
-                        disableSpeedBtn?.isEnabled = true
-                        disableSpeedBtn?.alpha = 1f
-                        res.onSuccess { ok ->
-                            if (ok) {
-                                onUpdated(targetEnabled, if (targetEnabled) targetSpeed else 0)
-                                if (dialog.isShowing) dialog.dismiss()
-                                toast(if (targetEnabled) "已设置限速提醒：$targetSpeed km/h" else "已关闭限速提醒")
-                            } else {
-                                toast("限速提醒设置失败，请稍后重试")
-                            }
-                        }.onFailure { err ->
-                            if (err is CherySessionExpiredException) {
-                                if (dialog.isShowing) dialog.dismiss()
-                            } else {
-                                toast(friendlyErrorMessage(err, "限速提醒设置失败，请稍后重试"))
-                            }
-                        }
-                    }
+                    executeSpeedLimit(targetEnabled, targetSpeed, desc, verifiedPin)
                 }
             }
 
@@ -2948,43 +2982,76 @@ internal class VehicleFeatureSheets(
 
             lateinit var renderSchedules: () -> Unit
 
+            fun executePersistSchedules(
+                nextMaster: Boolean,
+                nextList: List<ChargingScheduleItem>,
+                actionDesc: String,
+                pin: String,
+                onPinError: ((String) -> Unit)? = null,
+                onDismissPin: (() -> Unit)? = null
+            ) {
+                if (savingSchedules) return
+                savingSchedules = true
+                scope.launch {
+                    val outcome = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.saveChargingSchedulesResult(
+                                vin = profile.vin,
+                                masterEnabled = nextMaster,
+                                schedules = nextList,
+                                pin = pin,
+                                accessToken = profile.accessToken
+                            )
+                        }
+                    }
+                    savingSchedules = false
+                    outcome.onSuccess { res ->
+                        if (res.success) {
+                            if (pin.length == 6 && pin.all { it.isDigit() }) {
+                                onPinUpdated(profile.vin, pin)
+                            }
+                            onDismissPin?.invoke()
+                            masterEnabled = nextMaster
+                            currentSchedules = nextList
+                            if (dialog.isShowing) renderSchedules()
+                            toast("预约充电设置已下发")
+                        } else if (res.isPinError) {
+                            val cachedPinNow = cachedPinProvider().ifBlank { profile.controlPin }.trim()
+                            if (pin.isNotBlank() && pin == cachedPinNow) {
+                                onPinUpdated(profile.vin, "")
+                            }
+                            if (dialog.isShowing) renderSchedules()
+                            if (onPinError != null) {
+                                onPinError(res.message.ifBlank { "车控安全密码校验失败，请重新输入" })
+                            } else if (dialog.isShowing) {
+                                showTrackedVerifyPinSheet(
+                                    title = "验证安全密码",
+                                    subtitle = "请输入 6 位车控安全密码以执行「$actionDesc」"
+                                ) { enteredPin, showErr, dismissPin ->
+                                    executePersistSchedules(nextMaster, nextList, actionDesc, enteredPin, showErr, dismissPin)
+                                }
+                            }
+                        } else {
+                            onDismissPin?.invoke()
+                            if (dialog.isShowing) renderSchedules()
+                            toast(res.message.ifBlank { "预约充电同步失败，请稍后重试" })
+                        }
+                    }.onFailure { err ->
+                        onDismissPin?.invoke()
+                        if (err is CherySessionExpiredException) {
+                            if (dialog.isShowing) dialog.dismiss()
+                        } else {
+                            if (dialog.isShowing) renderSchedules()
+                            toast(friendlyErrorMessage(err, "预约充电同步失败，请稍后重试"))
+                        }
+                    }
+                }
+            }
+
             fun persistSchedules(nextMaster: Boolean, nextList: List<ChargingScheduleItem>, actionDesc: String) {
                 if (savingSchedules) return
                 resolvePin(actionDesc) { verifiedPin ->
-                    if (savingSchedules) return@resolvePin
-                    savingSchedules = true
-                    scope.launch {
-                        val res = runCatching {
-                            withContext(Dispatchers.IO) {
-                                httpClient.saveChargingSchedules(
-                                    vin = profile.vin,
-                                    masterEnabled = nextMaster,
-                                    schedules = nextList,
-                                    pin = verifiedPin,
-                                    accessToken = profile.accessToken
-                                )
-                            }
-                        }
-                        savingSchedules = false
-                        res.onSuccess { ok ->
-                            if (ok) {
-                                masterEnabled = nextMaster
-                                currentSchedules = nextList
-                                if (dialog.isShowing) renderSchedules()
-                                toast("预约充电设置已下发")
-                            } else {
-                                if (dialog.isShowing) renderSchedules()
-                                toast("预约充电同步失败，请稍后重试")
-                            }
-                        }.onFailure { err ->
-                            if (err is CherySessionExpiredException) {
-                                if (dialog.isShowing) dialog.dismiss()
-                            } else {
-                                if (dialog.isShowing) renderSchedules()
-                                toast(friendlyErrorMessage(err, "预约充电同步失败，请稍后重试"))
-                            }
-                        }
-                    }
+                    executePersistSchedules(nextMaster, nextList, actionDesc, verifiedPin)
                 }
             }
 
@@ -3074,7 +3141,7 @@ internal class VehicleFeatureSheets(
                         } else {
                             updatedList.add(newItem)
                         }
-                        mDialog.dismiss()
+                        MotionSpec.dismissSheetImmediately(mDialog)
                         persistSchedules(true, updatedList, "保存预约充电计划")
                     }, weightLp(dp(10), dp(44)))
 
@@ -3082,7 +3149,7 @@ internal class VehicleFeatureSheets(
                         box.addView(
                             AppComponents.createActionButton(context, "删除此计划", ButtonStyle.DANGER_TEXT) {
                                 val updatedList = currentSchedules.toMutableList().apply { removeAt(existingIndex) }
-                                mDialog.dismiss()
+                                MotionSpec.dismissSheetImmediately(mDialog)
                                 persistSchedules(updatedList.any { it.enabled }, updatedList, "删除预约充电计划")
                             },
                             lp(top = dp(8), height = dp(42))
@@ -3240,48 +3307,81 @@ internal class VehicleFeatureSheets(
                 host.addView(timeField, lp(top = dp(6), bottom = dp(18)))
 
                 lateinit var saveBtn: TextView
+                fun executeSaveTravel(
+                    targetOn: Boolean,
+                    pickedTime: String,
+                    desc: String,
+                    pin: String,
+                    onPinError: ((String) -> Unit)? = null,
+                    onDismissPin: (() -> Unit)? = null
+                ) {
+                    if (savingTravel) return
+                    savingTravel = true
+                    saveBtn.isEnabled = false
+                    saveBtn.alpha = 0.6f
+                    saveBtn.text = "同步中..."
+                    scope.launch {
+                        val outcome = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.saveTravelScheduleResult(
+                                    vin = profile.vin,
+                                    enabled = targetOn,
+                                    startTimeHhMm = pickedTime,
+                                    airType = airType,
+                                    pin = pin,
+                                    accessToken = profile.accessToken
+                                )
+                            }
+                        }
+                        savingTravel = false
+                        saveBtn.isEnabled = true
+                        saveBtn.alpha = 1f
+                        saveBtn.text = "保存预约出行"
+                        outcome.onSuccess { res ->
+                            if (res.success) {
+                                if (pin.length == 6 && pin.all { it.isDigit() }) {
+                                    onPinUpdated(profile.vin, pin)
+                                }
+                                onDismissPin?.invoke()
+                                if (dialog.isShowing) dialog.dismiss()
+                                toast(if (targetOn) "预约出行已设置：$pickedTime" else "已关闭预约出行")
+                            } else if (res.isPinError) {
+                                val cachedPinNow = cachedPinProvider().ifBlank { profile.controlPin }.trim()
+                                if (pin.isNotBlank() && pin == cachedPinNow) {
+                                    onPinUpdated(profile.vin, "")
+                                }
+                                if (onPinError != null) {
+                                    onPinError(res.message.ifBlank { "车控安全密码校验失败，请重新输入" })
+                                } else if (dialog.isShowing) {
+                                    showTrackedVerifyPinSheet(
+                                        title = "验证安全密码",
+                                        subtitle = "请输入 6 位车控安全密码以执行「$desc」"
+                                    ) { enteredPin, showErr, dismissPin ->
+                                        executeSaveTravel(targetOn, pickedTime, desc, enteredPin, showErr, dismissPin)
+                                    }
+                                }
+                            } else {
+                                onDismissPin?.invoke()
+                                toast(res.message.ifBlank { "预约出行同步失败，请稍后重试" })
+                            }
+                        }.onFailure { err ->
+                            onDismissPin?.invoke()
+                            if (err is CherySessionExpiredException) {
+                                if (dialog.isShowing) dialog.dismiss()
+                            } else {
+                                toast(friendlyErrorMessage(err, "预约出行同步失败，请稍后重试"))
+                            }
+                        }
+                    }
+                }
+
                 saveBtn = primaryBtn("保存预约出行") {
                     if (savingTravel) return@primaryBtn
                     val pickedTime = getTime().ifBlank { initialTime }
-                    val desc = if (isOn) "开启预约出行（$pickedTime）" else "关闭预约出行"
+                    val targetOn = isOn
+                    val desc = if (targetOn) "开启预约出行（$pickedTime）" else "关闭预约出行"
                     resolvePin(desc) { verifiedPin ->
-                        if (savingTravel) return@resolvePin
-                        savingTravel = true
-                        saveBtn.isEnabled = false
-                        saveBtn.alpha = 0.6f
-                        saveBtn.text = "同步中..."
-                        scope.launch {
-                            val res = runCatching {
-                                withContext(Dispatchers.IO) {
-                                    httpClient.saveTravelSchedule(
-                                        vin = profile.vin,
-                                        enabled = isOn,
-                                        startTimeHhMm = pickedTime,
-                                        airType = airType,
-                                        pin = verifiedPin,
-                                        accessToken = profile.accessToken
-                                    )
-                                }
-                            }
-                            savingTravel = false
-                            saveBtn.isEnabled = true
-                            saveBtn.alpha = 1f
-                            saveBtn.text = "保存预约出行"
-                            res.onSuccess { ok ->
-                                if (ok) {
-                                    if (dialog.isShowing) dialog.dismiss()
-                                    toast(if (isOn) "预约出行已设置：$pickedTime" else "已关闭预约出行")
-                                } else {
-                                    toast("预约出行同步失败，请稍后重试")
-                                }
-                            }.onFailure { err ->
-                                if (err is CherySessionExpiredException) {
-                                    if (dialog.isShowing) dialog.dismiss()
-                                } else {
-                                    toast(friendlyErrorMessage(err, "预约出行同步失败，请稍后重试"))
-                                }
-                            }
-                        }
+                        executeSaveTravel(targetOn, pickedTime, desc, verifiedPin)
                     }
                 }
                 host.addView(saveBtn, lp(height = dp(48)))
@@ -3613,6 +3713,26 @@ internal class VehicleFeatureSheets(
                 activeImmediateDismiss = null
             }
         }
+    }
+
+    private fun showTrackedVerifyPinSheet(
+        title: String,
+        subtitle: String,
+        onCompleted: (pin: String, showError: (String) -> Unit, dismiss: () -> Unit) -> Unit
+    ): Dialog? {
+        if (!MotionSpec.isHostActivityAlive(context)) return null
+        secondaryDialog?.let { MotionSpec.dismissSheetImmediately(it) }
+        val pinDlg = SixDigitPinSheet.showVerifyPinSheet(
+            context = context,
+            title = title,
+            subtitle = subtitle,
+            onCompleted = onCompleted
+        )
+        pinDlg.setOnDismissListener {
+            if (secondaryDialog === pinDlg) secondaryDialog = null
+        }
+        secondaryDialog = pinDlg
+        return pinDlg
     }
 
     private fun showModalDialog(title: String, build: (LinearLayout, Dialog) -> Unit) {

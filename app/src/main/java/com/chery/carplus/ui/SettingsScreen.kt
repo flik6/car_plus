@@ -129,10 +129,6 @@ class SettingsScreen(
     private var progressWidthAnimator: ValueAnimator? = null
     private var profileSaveColorAnim: ValueAnimator? = null
     private var cachedRegionDirectory: CheryHttpClient.RegionDirectory? = null
-    @Volatile
-    private var cachedAvatarCacheKey: String = ""
-    @Volatile
-    private var cachedAvatarBitmap: Bitmap? = null
 
     // Live UI hooks on MAIN page
     private var mainVehicleTrailingTv: TextView? = null
@@ -260,8 +256,7 @@ class SettingsScreen(
         val currentUserId = userInfo.userId.ifBlank { cloudMobile }
         val switchedAccount = currentUserId.isNotBlank() && lastSyncedUserId.isNotBlank() && lastSyncedUserId != currentUserId
         if (switchedAccount) {
-            cachedAvatarCacheKey = ""
-            cachedAvatarBitmap = null
+            cachedAvatarEntry = null
             runCatching { avatarFile().delete() }
             runCatching { pendingAvatarFile().delete() }
             runCatching { cloudAvatarFile().delete() }
@@ -308,6 +303,7 @@ class SettingsScreen(
             val cFile = cloudAvatarFile()
             if (resolvedAvatarUrl != prevUrl || !cFile.exists() || cFile.length() == 0L) {
                 if (downloadCloudAvatar(resolvedAvatarUrl, cFile)) {
+                    cachedAvatarEntry = null
                     editor.putString(KEY_AVATAR_URL, resolvedAvatarUrl)
                     changed = true
                 }
@@ -951,8 +947,7 @@ class SettingsScreen(
                         runCatching { staged.copyTo(target, overwrite = true) }
                         runCatching { staged.delete() }
                     }
-                    cachedAvatarCacheKey = ""
-                    cachedAvatarBitmap = null
+                    cachedAvatarEntry = null
                 }
             }
 
@@ -2289,7 +2284,7 @@ class SettingsScreen(
         val stagedFile = pendingAvatarFile()
         val localFile = avatarFile()
         val cloudFile = cloudAvatarFile()
-        val memBmp = cachedAvatarBitmap?.takeIf { !it.isRecycled }
+        val memBmp = cachedAvatarEntry?.bitmap?.takeIf { !it.isRecycled }
         if (!preferPending && memBmp != null) {
             renderBitmap(memBmp)
         } else {
@@ -2297,7 +2292,7 @@ class SettingsScreen(
         }
 
         scope.launch {
-            val decodedPair = withContext(Dispatchers.IO) {
+            val decodedEntry = withContext(Dispatchers.IO) {
                 val resolvedFile = when {
                     preferPending && stagedFile.exists() && stagedFile.length() > 0L -> stagedFile
                     localFile.exists() && localFile.length() > 0L -> localFile
@@ -2305,27 +2300,26 @@ class SettingsScreen(
                     else -> null
                 } ?: return@withContext null
                 val key = "${resolvedFile.absolutePath}:${resolvedFile.lastModified()}:${resolvedFile.length()}"
-                val cached = cachedAvatarBitmap
-                if (key == cachedAvatarCacheKey && cached != null && !cached.isRecycled) {
-                    return@withContext key to cached
+                val cached = cachedAvatarEntry
+                if (cached != null && cached.key == key && !cached.bitmap.isRecycled) {
+                    return@withContext cached
                 }
                 val bmp = runCatching { BitmapFactory.decodeFile(resolvedFile.absolutePath) }.getOrNull()
                     ?: return@withContext null
+                val entry = CachedAvatarEntry(key, bmp)
                 if (!preferPending) {
-                    cachedAvatarCacheKey = key
-                    cachedAvatarBitmap = bmp
+                    cachedAvatarEntry = entry
                 }
-                key to bmp
+                entry
             }
             if (!MotionSpec.isHostActivityAlive(activity)) return@launch
-            val bmp = decodedPair?.second
+            val bmp = decodedEntry?.bitmap
             if (bmp != null && !bmp.isRecycled) {
                 if (bmp !== memBmp || preferPending) {
                     renderBitmap(bmp)
                 }
             } else if (memBmp != null && !preferPending) {
-                cachedAvatarCacheKey = ""
-                cachedAvatarBitmap = null
+                cachedAvatarEntry = null
                 renderMonogram()
             }
         }
@@ -2505,7 +2499,16 @@ class SettingsScreen(
         private const val PENDING_AVATAR_FILENAME = "user_avatar_pending.jpg"
         private const val CLOUD_AVATAR_FILENAME = "cloud_avatar.jpg"
 
+        private data class CachedAvatarEntry(
+            val key: String,
+            val bitmap: Bitmap
+        )
+
+        @Volatile
+        private var cachedAvatarEntry: CachedAvatarEntry? = null
+
         fun clearCachedAccountProfile(context: Context) {
+            cachedAvatarEntry = null
             context.getSharedPreferences(PREFS_ACCOUNT_PROFILE, Context.MODE_PRIVATE)
                 .edit()
                 .clear()

@@ -221,8 +221,6 @@ class CheryBleController(
         val onComplete: (() -> Unit)?
     )
 
-    private data class IngeekReassemblyState(val expected: Int, val body: MutableList<Byte>)
-
     private data class PendingAction(
         val actionKey: String,
         val temperatureCelsius: Double = 24.0,
@@ -306,7 +304,10 @@ class CheryBleController(
     private val pendingActionBySerial = mutableMapOf<Int, String>()
     private val actionTimeoutRunnables = mutableMapOf<Int, Runnable>()
 
-    private val ingeekReassemblies = linkedMapOf<Pair<Int, Int>, IngeekReassemblyState>()
+    private val ingeekFrameAssembler = BleFrameAssembler(
+        format = BleWholeProtocol.FrameFormat.INGEEK_EXTENDED,
+        maximumPayloadLength = 4096
+    )
 
     private var mtuFallbackRunnable: Runnable? = null
     private var connectTimeout: Runnable? = null
@@ -1155,8 +1156,17 @@ class CheryBleController(
         }
 
         // Fast-path reject non-Chery peripherals so random nearby BLE traffic never runs
-        // ADV random parsing, double SHA-256 PIN derivation, or bond-state Binder IPC on Main.
-        if (!isCheryCandidate) return
+        // double SHA-256 PIN derivation or bond-state Binder IPC on Main. Preserve exact
+        // 6-byte `06 FF <rand4> <flag>` ADV_IND randoms so RPA vehicles splitting ADV_IND
+        // from SCAN_RSP (`CHR*` / `0x0759`) still have their rolling 4B random cached.
+        if (!isCheryCandidate) {
+            val splitAdvRandom = extractExactIngeekAdvRandom(record?.bytes)
+            if (splitAdvRandom != null) {
+                randomByAddress[device.address] = splitAdvRandom
+                randomTimestampByAddress[device.address] = SystemClock.elapsedRealtime()
+            }
+            return
+        }
 
         val random = BlePairingPinCalculator.extractAdvRandomBytes(record)
         val nowElapsed = SystemClock.elapsedRealtime()
@@ -1393,7 +1403,7 @@ class CheryBleController(
         writeQueue.clear()
         writeInFlight = false
         pendingActionBySerial.clear()
-        ingeekReassemblies.clear()
+        ingeekFrameAssembler.reset()
         txFrameHashes.clear()
         servicesReady = false
         notificationsReady = false
@@ -2030,58 +2040,29 @@ class CheryBleController(
         }
 
         val completeFrames = try {
-            reassembleIngeekPacket(raw)
+            ingeekFrameAssembler.ingest(raw)
         } catch (error: Throwable) {
-            ingeekReassemblies.clear()
+            ingeekFrameAssembler.reset()
             fail("FFF2 响应重组失败", error)
             return
         }
         completeFrames.forEach(::handleCompleteFrame)
     }
 
-    private fun reassembleIngeekPacket(raw: ByteArray): List<BleWholeProtocol.Frame> {
-        val packet = BleWholeProtocol.parseIngeekPacket(raw) ?: return emptyList()
-        val key = packet.messageId to packet.serialNum
-        if (packet.packFlag == BleWholeProtocol.INGEEK_SINGLE_PACKET) {
-            if (packet.fragment.size < packet.lengthField) return emptyList()
-            return listOf(
-                BleWholeProtocol.Frame(
-                    format = BleWholeProtocol.FrameFormat.INGEEK_EXTENDED,
-                    version = 1,
-                    encryptionType = 0,
-                    serialNum = packet.serialNum,
-                    messageId = packet.messageId,
-                    payload = packet.fragment.copyOfRange(0, packet.lengthField),
-                    raw = raw
-                )
-            )
+    private fun extractExactIngeekAdvRandom(raw: ByteArray?): ByteArray? {
+        if (raw == null || raw.size < 7) return null
+        var offset = 0
+        while (offset < raw.size) {
+            val len = raw[offset].toInt() and 0xFF
+            if (len == 0) break
+            val next = offset + 1 + len
+            if (next > raw.size) break
+            if (len == 6 && (raw[offset + 1].toInt() and 0xFF) == 0xFF) {
+                return raw.copyOfRange(offset + 2, offset + 6)
+            }
+            offset = next
         }
-        if (packet.packFlag > BleWholeProtocol.INGEEK_START_MASK &&
-            (packet.packFlag and BleWholeProtocol.INGEEK_START_MASK) == BleWholeProtocol.INGEEK_START_MASK
-        ) {
-            ingeekReassemblies[key] = IngeekReassemblyState(
-                expected = packet.lengthField,
-                body = packet.fragment.toMutableList()
-            )
-        } else {
-            val state = ingeekReassemblies[key] ?: return emptyList()
-            state.body.addAll(packet.fragment.toList())
-        }
-        val state = ingeekReassemblies[key] ?: return emptyList()
-        if (state.body.size < state.expected) return emptyList()
-        ingeekReassemblies.remove(key)
-        val payload = ByteArray(state.expected) { state.body[it] }
-        return listOf(
-            BleWholeProtocol.Frame(
-                format = BleWholeProtocol.FrameFormat.INGEEK_EXTENDED,
-                version = 1,
-                encryptionType = 0,
-                serialNum = packet.serialNum,
-                messageId = packet.messageId,
-                payload = payload,
-                raw = raw
-            )
-        )
+        return null
     }
 
     private fun handleCompleteFrame(frame: BleWholeProtocol.Frame) {

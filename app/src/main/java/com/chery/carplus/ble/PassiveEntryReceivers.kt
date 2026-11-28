@@ -201,8 +201,12 @@ class PassiveEntryCompanionService : CompanionDeviceService() {
         val profile = store.listProfiles().firstOrNull { it.vin.equals(activeVin, ignoreCase = true) }
             ?: store.getActiveProfile().takeIf { it.vin.equals(activeVin, ignoreCase = true) }
             ?: return
-        val expectedMac = PassiveEntryPrerequisiteChecker.normalizeMac(profile.bleMac) ?: return
-        if (!expectedMac.equals(targetMac, ignoreCase = true)) return
+        val expectedProfileMac = PassiveEntryPrerequisiteChecker.normalizeMac(profile.bleMac)
+        val expectedCdmMac = PassiveEntryPrerequisiteChecker.normalizeMac(cfg.cdmAssociatedMac)
+        val matchesActive =
+            (expectedProfileMac != null && expectedProfileMac.equals(targetMac, ignoreCase = true)) ||
+                (expectedCdmMac != null && expectedCdmMac.equals(targetMac, ignoreCase = true))
+        if (!matchesActive) return
 
         if (PassiveEntryRuntime.isServiceRunning()) {
             return
@@ -211,6 +215,21 @@ class PassiveEntryCompanionService : CompanionDeviceService() {
             PassiveEntryRuntime.appendLog("伴随设备检测到本车出现 ($targetMac)，前台活跃中跳过后台抢连")
             return
         }
+        val now = SystemClock.elapsedRealtime()
+        val throttleReason = PassiveEntryRuntime.shouldThrottleScanWake(
+            context = appContext,
+            vin = profile.vin,
+            rssi = cfg.effectiveUnlockRssi,
+            cfg = cfg,
+            nowElapsed = now
+        )
+        if (throttleReason != null) {
+            PassiveEntryRuntime.appendLog("伴随设备检测到本车出现 ($targetMac)，$throttleReason")
+            return
+        }
+        if (now - lastCompanionWakeElapsedMs < COMPANION_WAKE_THROTTLE_MS) return
+        lastCompanionWakeElapsedMs = now
+
         PassiveEntryService.startForWake(
             context = appContext,
             vin = profile.vin,
@@ -222,9 +241,34 @@ class PassiveEntryCompanionService : CompanionDeviceService() {
     }
 
     private fun handleDisappeared(rawAddress: String) {
+        val appContext = applicationContext
         val mac = PassiveEntryPrerequisiteChecker.normalizeMac(rawAddress) ?: return
-        PassiveEntryRuntime.markCompanionDisappeared(applicationContext)
+        val activeVin = PassiveEntryStore.getActiveEnabledVin(appContext)
+        if (activeVin.isBlank()) return
+        val cfg = PassiveEntryStore.load(appContext, activeVin)
+        if (!cfg.enabled) return
+
+        val store = VehicleProfileStore(appContext)
+        val profile = store.listProfiles().firstOrNull { it.vin.equals(activeVin, ignoreCase = true) }
+            ?: store.getActiveProfile().takeIf { it.vin.equals(activeVin, ignoreCase = true) }
+        val expectedProfileMac = PassiveEntryPrerequisiteChecker.normalizeMac(profile?.bleMac)
+        val expectedCdmMac = PassiveEntryPrerequisiteChecker.normalizeMac(cfg.cdmAssociatedMac)
+        val matchesActive =
+            (expectedProfileMac != null && expectedProfileMac.equals(mac, ignoreCase = true)) ||
+                (expectedCdmMac != null && expectedCdmMac.equals(mac, ignoreCase = true))
+        if (!matchesActive) {
+            PassiveEntryRuntime.appendLog("忽略非当前无感车辆的伴随设备远离事件 ($mac)")
+            return
+        }
+
+        PassiveEntryRuntime.markCompanionDisappeared(appContext)
         PassiveEntryRuntime.appendLog("伴随设备报告本车远离 ($mac)")
-        PassiveEntryService.notifyCompanionDisappeared(applicationContext, mac)
+        PassiveEntryService.notifyCompanionDisappeared(appContext, mac)
+    }
+
+    companion object {
+        private const val COMPANION_WAKE_THROTTLE_MS = 12_000L
+        @Volatile
+        private var lastCompanionWakeElapsedMs: Long = 0L
     }
 }

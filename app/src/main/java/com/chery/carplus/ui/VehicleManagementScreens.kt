@@ -31,7 +31,9 @@ import com.chery.carplus.cloud.VehicleTrafficInfo
 import com.chery.carplus.cloud.VehicleUpgradeInfo
 import com.chery.carplus.cloud.VehicleUpgradeStatus
 import com.chery.carplus.profile.VehicleProfile
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
@@ -72,6 +74,50 @@ internal class VehicleManagementScreens(
     private val cachedVehiclesByVin = mutableMapOf<String, VehicleSummary>()
     private var cachedVehicleSession = ""
     private var openVehicleInfoRefresh: (() -> Unit)? = null
+    private val activeSubpages = mutableListOf<SubpageLifecycle>()
+
+    private inner class SubpageLifecycle {
+        @Volatile
+        var destroyed: Boolean = false
+            private set
+        private val jobs = mutableListOf<Job>()
+
+        init {
+            synchronized(activeSubpages) {
+                activeSubpages += this
+            }
+        }
+
+        fun isAlive(): Boolean = !destroyed && MotionSpec.isHostActivityAlive(context)
+
+        fun launch(block: suspend CoroutineScope.() -> Unit): Job {
+            val job = scope.launch(block = block)
+            synchronized(jobs) {
+                if (destroyed) {
+                    job.cancel()
+                    return job
+                }
+                jobs += job
+            }
+            job.invokeOnCompletion {
+                synchronized(jobs) { jobs.remove(job) }
+            }
+            return job
+        }
+
+        fun destroy() {
+            destroyed = true
+            synchronized(activeSubpages) {
+                activeSubpages.remove(this)
+            }
+            val snapshot = synchronized(jobs) {
+                val copy = jobs.toList()
+                jobs.clear()
+                copy
+            }
+            snapshot.forEach { it.cancel() }
+        }
+    }
 
     fun refreshOpenVehicleInfo() {
         openVehicleInfoRefresh?.invoke()
@@ -94,6 +140,12 @@ internal class VehicleManagementScreens(
     }
 
     fun dismissAll() {
+        val pages = synchronized(activeSubpages) {
+            val copy = activeSubpages.toList()
+            activeSubpages.clear()
+            copy
+        }
+        pages.forEach { it.destroy() }
         activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         activeDialog = null
         runCatching { activeDropdown?.dismiss() }
@@ -143,52 +195,56 @@ internal class VehicleManagementScreens(
         scroll.addView(body, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
+        val pageLife = SubpageLifecycle()
         val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         body.addView(listHost, lp())
 
         var reloadList: () -> Unit = {}
         reloadList = {
-            listHost.removeAllViews()
-            listHost.addView(loadingHint("正在加载驾驶员列表..."))
-            val current = profileProvider()
-            if (targetVin.isBlank() || current.accessToken.isBlank()) {
+            if (pageLife.isAlive()) {
                 listHost.removeAllViews()
-                listHost.addView(buildEmptyDriversGuideCard(hasVehicle = false))
-            } else {
-                scope.launch {
-                    val result = runCatching {
-                        withContext(Dispatchers.IO) {
-                            httpClient.queryRemoteAuthorizations(
-                                accessToken = current.accessToken,
-                                vin = targetVin
-                            )
-                        }
-                    }
+                listHost.addView(loadingHint("正在加载驾驶员列表..."))
+                val current = profileProvider()
+                if (targetVin.isBlank() || current.accessToken.isBlank()) {
                     listHost.removeAllViews()
-                    result.onSuccess { items ->
-                        if (items.isEmpty()) {
-                            listHost.addView(buildEmptyDriversGuideCard(hasVehicle = true))
-                        } else {
-                            items.forEachIndexed { idx, item ->
-                                listHost.addView(
-                                    buildDriverSummaryCard(
-                                        item = item,
-                                        vin = targetVin,
-                                        onChanged = reloadList
-                                    ),
-                                    lp(top = if (idx == 0) 0 else dp(12))
+                    listHost.addView(buildEmptyDriversGuideCard(hasVehicle = false))
+                } else {
+                    pageLife.launch {
+                        val result = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.queryRemoteAuthorizations(
+                                    accessToken = current.accessToken,
+                                    vin = targetVin
                                 )
                             }
                         }
-                    }.onFailure { err ->
-                        if (err is CherySessionExpiredException) return@onFailure
-                        listHost.addView(errorBanner("驾驶员列表加载失败：${err.message.orEmpty().take(90)}"))
-                        listHost.addView(
-                            AppComponents.createActionButton(context, "重新加载", ButtonStyle.SECONDARY) {
-                                reloadList()
-                            },
-                            lp(top = dp(12), height = dp(44))
-                        )
+                        if (!pageLife.isAlive()) return@launch
+                        listHost.removeAllViews()
+                        result.onSuccess { items ->
+                            if (items.isEmpty()) {
+                                listHost.addView(buildEmptyDriversGuideCard(hasVehicle = true))
+                            } else {
+                                items.forEachIndexed { idx, item ->
+                                    listHost.addView(
+                                        buildDriverSummaryCard(
+                                            item = item,
+                                            vin = targetVin,
+                                            onChanged = reloadList
+                                        ),
+                                        lp(top = if (idx == 0) 0 else dp(12))
+                                    )
+                                }
+                            }
+                        }.onFailure { err ->
+                            if (err is CherySessionExpiredException) return@onFailure
+                            listHost.addView(errorBanner("驾驶员列表加载失败：${err.message.orEmpty().take(90)}"))
+                            listHost.addView(
+                                AppComponents.createActionButton(context, "重新加载", ButtonStyle.SECONDARY) {
+                                    reloadList()
+                                },
+                                lp(top = dp(12), height = dp(44))
+                            )
+                        }
                     }
                 }
             }
@@ -206,7 +262,7 @@ internal class VehicleManagementScreens(
             lp()
         )
 
-        onPushOverlaySubpage(root, null)
+        onPushOverlaySubpage(root) { pageLife.destroy() }
         reloadList()
     }
 
@@ -316,8 +372,10 @@ internal class VehicleManagementScreens(
         vin: String,
         onChanged: () -> Unit
     ) {
+        val pageLife = SubpageLifecycle()
         var currentEnabled = item.enabled
-        var currentName = SensitiveUiText.maskIfPhone(item.receiverAccountName).ifBlank {
+        var rawName = item.receiverAccountName.trim()
+        fun displayDriverName(): String = SensitiveUiText.maskIfPhone(rawName).ifBlank {
             item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
         }
         var currentStart = formatAuthTime(item.startTime).takeUnless { it == "--" }.orEmpty()
@@ -369,7 +427,7 @@ internal class VehicleManagementScreens(
             }
             val active = profileProvider()
             saving = true
-            scope.launch {
+            pageLife.launch {
                 val res = runCatching {
                     withContext(Dispatchers.IO) {
                         httpClient.updateRemoteAuthorization(
@@ -384,10 +442,11 @@ internal class VehicleManagementScreens(
                     }
                 }
                 saving = false
+                if (!pageLife.isAlive()) return@launch
                 res.onSuccess { ok ->
                     if (ok) {
                         AppHaptics.perform(body, HapticLevel.MEDIUM_CONFIRM)
-                        currentName = cleanName
+                        rawName = cleanName
                         currentStart = cleanStart
                         currentEnd = cleanEnd
                         isEditing = false
@@ -443,7 +502,7 @@ internal class VehicleManagementScreens(
                 setPadding(dp(20), dp(14), dp(20), dp(18))
             }
             hero.addView(
-                text(currentName, 22f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
+                text(displayDriverName(), 22f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 }
@@ -465,7 +524,7 @@ internal class VehicleManagementScreens(
                             toggling = true
                             setChecked(targetEnabled, animate = true)
                             val active = profileProvider()
-                            scope.launch {
+                            pageLife.launch {
                                 val res = runCatching {
                                     withContext(Dispatchers.IO) {
                                         httpClient.toggleRemoteAuthorization(
@@ -477,6 +536,7 @@ internal class VehicleManagementScreens(
                                     }
                                 }
                                 toggling = false
+                                if (!pageLife.isAlive()) return@launch
                                 res.onSuccess { ok ->
                                     if (ok) {
                                         currentEnabled = targetEnabled
@@ -519,7 +579,7 @@ internal class VehicleManagementScreens(
                 val (nameBox, nameInput) = AppComponents.createUnderlineInput(
                     context = context,
                     hint = "请输入驾驶员姓名",
-                    initialValue = currentName,
+                    initialValue = rawName,
                     inputType = InputType.TYPE_CLASS_TEXT,
                     maxLength = 20,
                     showUnderline = false,
@@ -531,7 +591,7 @@ internal class VehicleManagementScreens(
                 body.addView(buildInlineEditRow("姓名", nameBox), lp())
                 body.addView(nameHairline)
             } else {
-                body.addView(buildBorderlessInfoRow("姓名", currentName), lp())
+                body.addView(buildBorderlessInfoRow("姓名", displayDriverName()), lp())
                 body.addView(AppComponents.createHairline(context, startInsetDp = 20))
             }
 
@@ -597,7 +657,7 @@ internal class VehicleManagementScreens(
                     activeDialog = AppComponents.showConfirmDialog(
                         context = context,
                         title = "撤销驾驶员授权",
-                        message = "确认撤销「$currentName」的驾驶员权限？撤销后对方将无法查看车况或远程控车。",
+                        message = "确认撤销「${displayDriverName()}」的驾驶员权限？撤销后对方将无法查看车况或远程控车。",
                         confirmText = "确认撤销",
                         cancelText = "取消",
                         dangerConfirm = true
@@ -608,7 +668,7 @@ internal class VehicleManagementScreens(
                         revokeBtn.alpha = 0.5f
                         revokeBtn.text = "正在撤销..."
                         val active = profileProvider()
-                        scope.launch {
+                        pageLife.launch {
                             val res = runCatching {
                                 withContext(Dispatchers.IO) {
                                     httpClient.deleteRemoteAuthorization(
@@ -619,6 +679,7 @@ internal class VehicleManagementScreens(
                                 }
                             }
                             revokingAuth = false
+                            if (!pageLife.isAlive()) return@launch
                             revokeBtn.isEnabled = true
                             revokeBtn.alpha = 1f
                             revokeBtn.text = "撤销驾驶员授权"
@@ -644,7 +705,7 @@ internal class VehicleManagementScreens(
         }
 
         renderScreen()
-        onPushOverlaySubpage(root, null)
+        onPushOverlaySubpage(root) { pageLife.destroy() }
     }
 
     /**
@@ -654,6 +715,7 @@ internal class VehicleManagementScreens(
         vin: String,
         onSaved: () -> Unit
     ) {
+        val pageLife = SubpageLifecycle()
         val (defaultStart, defaultEnd) = defaultAuthWindowMinutes()
         var startValue = defaultStart
         var endValue = defaultEnd
@@ -799,7 +861,7 @@ internal class VehicleManagementScreens(
 
                 val active = profileProvider()
                 submitting = true
-                scope.launch {
+                pageLife.launch {
                     val res = runCatching {
                         withContext(Dispatchers.IO) {
                             httpClient.createRemoteAuthorization(
@@ -815,6 +877,7 @@ internal class VehicleManagementScreens(
                         }
                     }
                     submitting = false
+                    if (!pageLife.isAlive()) return@launch
                     res.onSuccess { ok ->
                         if (ok) {
                             AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
@@ -834,13 +897,14 @@ internal class VehicleManagementScreens(
             lp()
         )
 
-        onPushOverlaySubpage(root, null)
+        onPushOverlaySubpage(root) { pageLife.destroy() }
     }
 
     private fun openDriverOperationRecordsScreen(
         item: VehicleAuthorizationItem,
         vin: String
     ) {
+        val pageLife = SubpageLifecycle()
         val granteeName = SensitiveUiText.maskIfPhone(item.receiverAccountName).ifBlank {
             item.receiverMobile.takeIf { it.isNotBlank() }?.let(::maskDriverPhone) ?: "驾驶员"
         }
@@ -962,7 +1026,7 @@ internal class VehicleManagementScreens(
                         renderRecordsList()
                     }
                     val active = profileProvider()
-                    scope.launch {
+                    pageLife.launch {
                         val res = runCatching {
                             withContext(Dispatchers.IO) {
                                 httpClient.queryAuthorizationOperationRecords(
@@ -975,6 +1039,7 @@ internal class VehicleManagementScreens(
                             }
                         }
                         loadingPage = false
+                        if (!pageLife.isAlive()) return@launch
                         res.onSuccess { records ->
                             currentPage = nextPage
                             if (reset) loadedRecords.clear()
@@ -1002,7 +1067,7 @@ internal class VehicleManagementScreens(
             }
         }
 
-        onPushOverlaySubpage(root, null)
+        onPushOverlaySubpage(root) { pageLife.destroy() }
         loadRecordsPage(true)
     }
 
@@ -1137,11 +1202,13 @@ internal class VehicleManagementScreens(
         scroll.addView(listHost, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
+        val pageLife = SubpageLifecycle()
         val simStatusByVin = mutableMapOf<String, String>()
         var loadedVehicles: List<VehicleSummary> = emptyList()
         var reloadVehicles: () -> Unit = {}
 
         fun renderVehicleCards() {
+            if (!pageLife.isAlive()) return
             listHost.removeAllViews()
             if (loadedVehicles.isEmpty()) {
                 listHost.addView(buildNoVehiclesEmptyCard {
@@ -1162,64 +1229,68 @@ internal class VehicleManagementScreens(
         }
 
         reloadVehicles = {
-            listHost.removeAllViews()
-            listHost.addView(loadingHint("正在同步车辆列表..."))
-            val active = profileProvider()
-            if (active.accessToken.isBlank()) {
+            if (pageLife.isAlive()) {
                 listHost.removeAllViews()
-                listHost.addView(errorBanner("请先登录后查看车辆管理"))
-            } else {
-                scope.launch {
-                    val res = runCatching {
-                        withContext(Dispatchers.IO) {
-                            httpClient.fetchVehicleList(active.accessToken)
-                        }
-                    }
-                    res.onSuccess { list ->
-                        loadedVehicles = list.filter { it.vin.isNotBlank() }
-                        rememberVehicleSummaries(loadedVehicles, active.accessToken)
-                        loadedVehicles.forEach { v ->
-                            if (v.simStatus.isNotBlank()) {
-                                val vinKey = v.vin.uppercase(Locale.US)
-                                if (!simStatusByVin.containsKey(vinKey)) {
-                                    simStatusByVin[vinKey] = v.simStatus
-                                }
+                listHost.addView(loadingHint("正在同步车辆列表..."))
+                val active = profileProvider()
+                if (active.accessToken.isBlank()) {
+                    listHost.removeAllViews()
+                    listHost.addView(errorBanner("请先登录后查看车辆管理"))
+                } else {
+                    pageLife.launch {
+                        val res = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.fetchVehicleList(active.accessToken)
                             }
                         }
-                        renderVehicleCards()
-
-                        // Refresh real-time certification status (935) for bound vehicles
-                        val boundVins = loadedVehicles.filter { it.isBoundVehicle }.map { it.vin }
-                        if (boundVins.isNotEmpty()) {
-                            val updatedStatuses = withContext(Dispatchers.IO) {
-                                boundVins.map { vin ->
-                                    async {
-                                        val st = runCatching {
-                                            httpClient.queryVehicleSimStatus(active.accessToken, vin)
-                                        }.getOrNull()
-                                        vin.uppercase(Locale.US) to st
+                        if (!pageLife.isAlive()) return@launch
+                        res.onSuccess { list ->
+                            loadedVehicles = list.filter { it.vin.isNotBlank() }
+                            rememberVehicleSummaries(loadedVehicles, active.accessToken)
+                            loadedVehicles.forEach { v ->
+                                if (v.simStatus.isNotBlank()) {
+                                    val vinKey = v.vin.uppercase(Locale.US)
+                                    if (!simStatusByVin.containsKey(vinKey)) {
+                                        simStatusByVin[vinKey] = v.simStatus
                                     }
-                                }.awaitAll()
-                            }
-                            var changed = false
-                            updatedStatuses.forEach { (vinKey, st) ->
-                                if (!st.isNullOrBlank() && simStatusByVin[vinKey] != st) {
-                                    simStatusByVin[vinKey] = st
-                                    changed = true
                                 }
                             }
-                            if (changed) renderVehicleCards()
+                            renderVehicleCards()
+
+                            // Refresh real-time certification status (935) for bound vehicles
+                            val boundVins = loadedVehicles.filter { it.isBoundVehicle }.map { it.vin }
+                            if (boundVins.isNotEmpty()) {
+                                val updatedStatuses = withContext(Dispatchers.IO) {
+                                    boundVins.map { vin ->
+                                        async {
+                                            val st = runCatching {
+                                                httpClient.queryVehicleSimStatus(active.accessToken, vin)
+                                            }.getOrNull()
+                                            vin.uppercase(Locale.US) to st
+                                        }
+                                    }.awaitAll()
+                                }
+                                if (!pageLife.isAlive()) return@launch
+                                var changed = false
+                                updatedStatuses.forEach { (vinKey, st) ->
+                                    if (!st.isNullOrBlank() && simStatusByVin[vinKey] != st) {
+                                        simStatusByVin[vinKey] = st
+                                        changed = true
+                                    }
+                                }
+                                if (changed) renderVehicleCards()
+                            }
+                        }.onFailure { err ->
+                            listHost.removeAllViews()
+                            if (err is CherySessionExpiredException) return@onFailure
+                            listHost.addView(errorBanner("车辆列表加载失败：${err.message.orEmpty().take(90)}"))
+                            listHost.addView(
+                                AppComponents.createActionButton(context, "重新加载", ButtonStyle.SECONDARY) {
+                                    reloadVehicles()
+                                },
+                                lp(top = dp(12), height = dp(44))
+                            )
                         }
-                    }.onFailure { err ->
-                        listHost.removeAllViews()
-                        if (err is CherySessionExpiredException) return@onFailure
-                        listHost.addView(errorBanner("车辆列表加载失败：${err.message.orEmpty().take(90)}"))
-                        listHost.addView(
-                            AppComponents.createActionButton(context, "重新加载", ButtonStyle.SECONDARY) {
-                                reloadVehicles()
-                            },
-                            lp(top = dp(12), height = dp(44))
-                        )
                     }
                 }
             }
@@ -1233,7 +1304,7 @@ internal class VehicleManagementScreens(
             lp()
         )
 
-        onPushOverlaySubpage(root, null)
+        onPushOverlaySubpage(root) { pageLife.destroy() }
         reloadVehicles()
     }
 
@@ -1393,6 +1464,7 @@ internal class VehicleManagementScreens(
         scroll.addView(body, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
+        val pageLife = SubpageLifecycle()
         var isEditing = startInEditMode
         var saving = false
         var settingDefaultVehicle = false
@@ -1408,6 +1480,7 @@ internal class VehicleManagementScreens(
         var refreshVersionCurrentRow: (() -> Unit)? = null
 
         fun renderDetail(vehicle: VehicleSummary) {
+            if (!pageLife.isAlive()) return
             currentVehicle = vehicle
             rememberVehicleSummaries(listOf(vehicle), activeProfile.accessToken)
             val activeVin = profileProvider().vin.trim().uppercase(Locale.US)
@@ -1431,13 +1504,14 @@ internal class VehicleManagementScreens(
                     cancelText = "取消",
                     dangerConfirm = true
                 ) {
-                    activeDialog = SixDigitPinSheet.showVerifyPinSheet(
+                    var pinDialog: Dialog? = null
+                    pinDialog = SixDigitPinSheet.showVerifyPinSheet(
                         context = context,
                         title = "验证 PIN 码",
                         subtitle = "请输入 6 位 PIN 码以取消车辆认证"
                     ) { pin, showError, dismiss ->
                         val active = profileProvider()
-                        scope.launch {
+                        pageLife.launch {
                             val res = runCatching {
                                 withContext(Dispatchers.IO) {
                                     httpClient.cancelVehicleCertification(
@@ -1448,25 +1522,28 @@ internal class VehicleManagementScreens(
                                     )
                                 }
                             }
+                            if (!pageLife.isAlive()) return@launch
+                            val pinSheetShowing = pinDialog?.isShowing == true
                             res.onSuccess { ok ->
                                 if (ok) {
-                                    dismiss()
+                                    if (pinSheetShowing) dismiss()
                                     liveSimStatus = "0"
                                     toast("已取消车辆实名认证")
                                     renderDetail(vehicle.copy(simStatus = "0"))
                                     onUpdated()
-                                } else {
+                                } else if (pinSheetShowing) {
                                     showError("PIN 码验证失败，请重试")
                                 }
                             }.onFailure { err ->
                                 if (err is CherySessionExpiredException) {
-                                    dismiss()
-                                } else {
+                                    if (pinSheetShowing) dismiss()
+                                } else if (pinSheetShowing) {
                                     showError(err.message.orEmpty().ifBlank { "取消认证失败" }.take(60))
                                 }
                             }
                         }
                     }
+                    activeDialog = pinDialog
                 }
             }
 
@@ -1480,13 +1557,14 @@ internal class VehicleManagementScreens(
                     cancelText = "取消",
                     dangerConfirm = true
                 ) {
-                    activeDialog = SixDigitPinSheet.showVerifyPinSheet(
+                    var pinDialog: Dialog? = null
+                    pinDialog = SixDigitPinSheet.showVerifyPinSheet(
                         context = context,
                         title = "验证 PIN 码",
                         subtitle = "请输入 6 位 PIN 码以解除车辆绑定"
                     ) { pin, showError, dismiss ->
                         val active = profileProvider()
-                        scope.launch {
+                        pageLife.launch {
                             val res = runCatching {
                                 withContext(Dispatchers.IO) {
                                     httpClient.unbindVehicle(
@@ -1496,25 +1574,28 @@ internal class VehicleManagementScreens(
                                     )
                                 }
                             }
+                            if (!pageLife.isAlive()) return@launch
+                            val pinSheetShowing = pinDialog?.isShowing == true
                             res.onSuccess { ok ->
                                 if (ok) {
-                                    dismiss()
+                                    if (pinSheetShowing) dismiss()
                                     toast("车辆已解除绑定")
                                     onPopOverlaySubpage()
                                     onVehicleUnbound(vehicle.vin)
                                     onUpdated()
-                                } else {
+                                } else if (pinSheetShowing) {
                                     showError("PIN 码验证失败，请重试")
                                 }
                             }.onFailure { err ->
                                 if (err is CherySessionExpiredException) {
-                                    dismiss()
-                                } else {
+                                    if (pinSheetShowing) dismiss()
+                                } else if (pinSheetShowing) {
                                     showError(err.message.orEmpty().ifBlank { "解绑失败" }.take(60))
                                 }
                             }
                         }
                     }
+                    activeDialog = pinDialog
                 }
             }
 
@@ -1530,7 +1611,7 @@ internal class VehicleManagementScreens(
                 }
                 val active = profileProvider()
                 saving = true
-                scope.launch {
+                pageLife.launch {
                     val res = runCatching {
                         withContext(Dispatchers.IO) {
                             httpClient.saveVehicleInfo(
@@ -1543,6 +1624,7 @@ internal class VehicleManagementScreens(
                         }
                     }
                     saving = false
+                    if (!pageLife.isAlive()) return@launch
                     res.onSuccess { ok ->
                         if (ok) {
                             AppHaptics.perform(body, HapticLevel.MEDIUM_CONFIRM)
@@ -1718,13 +1800,14 @@ internal class VehicleManagementScreens(
                         setDefaultChip.alpha = 0.55f
                         setDefaultChip.text = "设置中..."
                         val active = profileProvider()
-                        scope.launch {
+                        pageLife.launch {
                             val res = runCatching {
                                 withContext(Dispatchers.IO) {
                                     httpClient.setDefaultVehicle(active.accessToken, vehicle.vin)
                                 }
                             }
                             settingDefaultVehicle = false
+                            if (!pageLife.isAlive()) return@launch
                             setDefaultChip.isEnabled = true
                             setDefaultChip.alpha = 1f
                             setDefaultChip.text = "设为默认车辆"
@@ -1930,11 +2013,11 @@ internal class VehicleManagementScreens(
                         applyTrafficToRow(cachedTrafficInfo)
                     } else if (!trafficFetching) {
                         trafficFetching = true
-                        scope.launch {
+                        pageLife.launch {
                             val active = profileProvider()
                             if (active.accessToken.isBlank()) {
                                 trafficFetching = false
-                                applyTrafficToCurrentRow?.invoke(null)
+                                if (pageLife.isAlive()) applyTrafficToCurrentRow?.invoke(null)
                                 return@launch
                             }
                             val traffic = runCatching {
@@ -1943,6 +2026,7 @@ internal class VehicleManagementScreens(
                                 }
                             }.getOrNull()
                             trafficFetching = false
+                            if (!pageLife.isAlive()) return@launch
                             trafficFetchedOnce = true
                             cachedTrafficInfo = traffic
                             applyTrafficToCurrentRow?.invoke(traffic)
@@ -2082,13 +2166,14 @@ internal class VehicleManagementScreens(
                         upgradeChecking = true
                         upgradeCheckFailed = false
                         refreshVersionCurrentRow?.invoke()
-                        scope.launch {
+                        pageLife.launch {
                             val res = runCatching {
                                 withContext(Dispatchers.IO) {
                                     httpClient.checkVehicleUpgrade(vehicle.vin, active.accessToken)
                                 }
                             }
                             upgradeChecking = false
+                            if (!pageLife.isAlive()) return@launch
                             upgradeCheckedOnce = true
                             res.onSuccess { info ->
                                 cachedUpgradeInfo = info
@@ -2175,7 +2260,7 @@ internal class VehicleManagementScreens(
         }
 
         val refreshHook: () -> Unit = {
-            if (!isEditing) {
+            if (pageLife.isAlive() && !isEditing) {
                 if (cachedUpgradeInfo?.shouldOpenSheet == true && !upgradeChecking) {
                     upgradeCheckedOnce = false
                 }
@@ -2187,6 +2272,7 @@ internal class VehicleManagementScreens(
         }
         openVehicleInfoRefresh = refreshHook
         onPushOverlaySubpage(root) {
+            pageLife.destroy()
             if (openVehicleInfoRefresh === refreshHook) {
                 openVehicleInfoRefresh = null
             }
@@ -2197,7 +2283,7 @@ internal class VehicleManagementScreens(
             renderDetail(resolvedInitial)
         } else {
             body.addView(loadingHint("正在加载车辆信息..."))
-            scope.launch {
+            pageLife.launch {
                 val active = profileProvider()
                 val res = runCatching {
                     withContext(Dispatchers.IO) {
@@ -2210,6 +2296,7 @@ internal class VehicleManagementScreens(
                         if (!liveSim.isNullOrBlank()) matched.copy(simStatus = liveSim) else matched
                     }
                 }
+                if (!pageLife.isAlive()) return@launch
                 res.onSuccess { fetched ->
                     if (active.accessToken != profileProvider().accessToken) return@onSuccess
                     renderDetail(fetched)
@@ -2227,6 +2314,7 @@ internal class VehicleManagementScreens(
     // =========================================================================
 
     private fun openAddVehicleScreen(onAdded: () -> Unit) {
+        val pageLife = SubpageLifecycle()
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(ThemeTokens.BG_CANVAS)
@@ -2373,7 +2461,7 @@ internal class VehicleManagementScreens(
 
                 val active = profileProvider()
                 binding = true
-                scope.launch {
+                pageLife.launch {
                     val res = runCatching {
                         withContext(Dispatchers.IO) {
                             httpClient.bindNewVehicle(
@@ -2390,6 +2478,7 @@ internal class VehicleManagementScreens(
                         }
                     }
                     binding = false
+                    if (!pageLife.isAlive()) return@launch
                     res.onSuccess { ok ->
                         if (ok) {
                             AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
@@ -2410,7 +2499,7 @@ internal class VehicleManagementScreens(
             lp()
         )
 
-        onPushOverlaySubpage(root, null)
+        onPushOverlaySubpage(root) { pageLife.destroy() }
     }
 
     // =========================================================================

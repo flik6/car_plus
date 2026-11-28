@@ -247,7 +247,12 @@ class BleFrameAssembler(
     private val maximumPayloadLength: Int = 0xFFFF
 ) {
     private data class ReassemblyKey(val messageId: Int, val serialNum: Int)
-    private data class IngeekState(val expected: Int, val body: MutableList<Byte>)
+    private data class IngeekState(
+        val expected: Int,
+        val baseHeader: ByteArray?,
+        val body: MutableList<Byte>,
+        var strippedBaseHeader: Boolean = false
+    )
 
     private val versionedBuffer = ArrayList<Byte>(512)
     private val ingeekStates = LinkedHashMap<ReassemblyKey, IngeekState>()
@@ -295,28 +300,81 @@ class BleFrameAssembler(
         }
 
         val key = ReassemblyKey(packet.messageId, packet.serialNum)
-        if (packet.packFlag > BleWholeProtocol.INGEEK_START_MASK &&
+        val isStartPacket = packet.packFlag > BleWholeProtocol.INGEEK_START_MASK &&
             (packet.packFlag and BleWholeProtocol.INGEEK_START_MASK) == BleWholeProtocol.INGEEK_START_MASK
-        ) {
+        if (isStartPacket) {
             if (packet.lengthField > maximumPayloadLength) {
                 throw IllegalArgumentException("Declared payload ${packet.lengthField} exceeds limit")
             }
+            val firstChunk = if (packet.lengthField in 1 until packet.fragment.size) {
+                packet.fragment.copyOfRange(0, packet.lengthField)
+            } else {
+                packet.fragment
+            }
+            val expectedTotal = if (packet.lengthField > packet.fragment.size) packet.lengthField else 0
+            val isBaseRespMsg = packet.messageId == BleWholeProtocol.MSG_BASE_RESPONSE ||
+                packet.messageId == BleWholeProtocol.MSG_VEHICLE_CONTROL_RESPONSE
+            val baseHeader = if (isBaseRespMsg && firstChunk.size >= 6) {
+                firstChunk.copyOfRange(0, 6)
+            } else {
+                null
+            }
             ingeekStates[key] = IngeekState(
-                expected = packet.lengthField,
-                body = ArrayList<Byte>(packet.lengthField).apply {
-                    packet.fragment.forEach { add(it) }
+                expected = expectedTotal,
+                baseHeader = baseHeader,
+                body = ArrayList<Byte>(expectedTotal.coerceAtLeast(firstChunk.size)).apply {
+                    firstChunk.forEach { add(it) }
                 }
             )
-        } else {
-            val state = ingeekStates[key] ?: return emptyList()
-            state.body.addAll(packet.fragment.toList())
+            return emptyList()
         }
 
         val state = ingeekStates[key] ?: return emptyList()
-        if (state.body.size < state.expected) return emptyList()
-        ingeekStates.remove(key)
-        val payload = ByteArray(state.expected) { state.body[it] }
-        return listOf(packet.toFrame(payload))
+        val trimmedFragment = if (packet.lengthField in 1..packet.fragment.size) {
+            packet.fragment.copyOfRange(0, packet.lengthField)
+        } else {
+            packet.fragment
+        }
+        val baseHeader = state.baseHeader
+        val chunkToAppend = if (baseHeader != null &&
+            trimmedFragment.size >= 6 &&
+            matchesPrefix6(trimmedFragment, baseHeader)
+        ) {
+            // zyhl BleDataReceiver (O00000Oo.java:132-136): continuation fragments repeat the 6-byte BleBaseResponse header.
+            state.strippedBaseHeader = true
+            trimmedFragment.copyOfRange(6, trimmedFragment.size)
+        } else {
+            trimmedFragment
+        }
+        if (state.body.size + chunkToAppend.size > maximumPayloadLength) {
+            ingeekStates.remove(key)
+            throw IllegalArgumentException("Reassembled payload exceeds limit $maximumPayloadLength")
+        }
+        chunkToAppend.forEach { state.body.add(it) }
+
+        val isLastPacket = packet.packFlag == BleWholeProtocol.INGEEK_LAST_PACKET
+        if (isLastPacket) {
+            ingeekStates.remove(key)
+            val payload = if (!state.strippedBaseHeader && state.expected in 1..state.body.size) {
+                ByteArray(state.expected) { state.body[it] }
+            } else {
+                state.body.toByteArray()
+            }
+            return if (payload.isEmpty()) emptyList() else listOf(packet.toFrame(payload))
+        }
+        if (!state.strippedBaseHeader && state.expected > 0 && state.body.size >= state.expected) {
+            ingeekStates.remove(key)
+            val payload = ByteArray(state.expected) { state.body[it] }
+            return listOf(packet.toFrame(payload))
+        }
+        return emptyList()
+    }
+
+    private fun matchesPrefix6(bytes: ByteArray, prefix6: ByteArray): Boolean {
+        for (i in 0 until 6) {
+            if (bytes[i] != prefix6[i]) return false
+        }
+        return true
     }
 
     private fun BleWholeProtocol.IngeekPacket.toFrame(payload: ByteArray): BleWholeProtocol.Frame =

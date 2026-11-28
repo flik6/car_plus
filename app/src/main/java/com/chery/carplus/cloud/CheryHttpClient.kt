@@ -429,6 +429,13 @@ data class VehicleUpgradeActionResult(
     val isPinError: Boolean = false
 )
 
+data class ZyhlPinActionResult(
+    val success: Boolean,
+    val resultCode: String = "",
+    val message: String = "",
+    val isPinError: Boolean = false
+)
+
 data class VehicleUpgradeInfo(
     val upgradeTaskId: String,
     val currentVersion: String,
@@ -1201,13 +1208,116 @@ class CheryHttpClient(
         globalId = authToken
     )
 
-    private fun isConfirmed125PinFailure(resultCode: String, resultMessage: String): Boolean {
+    fun isConfirmed125PinFailure(resultCode: String, resultMessage: String): Boolean {
         val code = resultCode.trim()
         if (code.isBlank() || code == RESULT_SUCCESS || code == RESULT_SESSION_EXPIRED) return false
         if (code.startsWith("05") || code.startsWith("5")) return false
         if (isPinRejection(code, resultMessage)) return true
         // Explicit server-side 125 PIN rejection when message is blank/generic
         return resultMessage.isBlank() && code != "0400" && code != "0204"
+    }
+
+    /**
+     * Executes a PIN-protected zyhl `970` instruction (`1110`, `1111`, `1115`, `1116`, `1203`, etc.)
+     * using the hardened `125 -> 970 -> 125 retry` flow, accurately propagating PIN errors
+     * including blank-message `125` rejections via [isConfirmed125PinFailure].
+     */
+    private fun execute970PinAction(
+        vin: String,
+        instruction: String,
+        paras: JSONObject,
+        pin: String = "",
+        accessToken: String = ""
+    ): ZyhlPinActionResult {
+        val authToken = resolveAuthToken(accessToken)
+        require(authToken.isNotBlank()) { "accessToken/globalId is required" }
+        val normVin = vin.trim().uppercase(Locale.US)
+        val trimmedPin = pin.trim()
+        val pinHash = if (trimmedPin.isNotBlank()) hashPasswordOrPin(trimmedPin) else ""
+        var preVerified = false
+
+        if (pinHash.isNotBlank() && !isPinSessionWarm(authToken, normVin, pinHash)) {
+            val pinResp = postPinSessionVerification(normVin, pinHash, authToken)
+            if (pinResp.resultCode != RESULT_SUCCESS) {
+                val confirmedPinMismatch = isConfirmed125PinFailure(pinResp.resultCode, pinResp.message)
+                if (confirmedPinMismatch) invalidatePinSessionForVin(normVin)
+                return ZyhlPinActionResult(
+                    success = false,
+                    resultCode = pinResp.resultCode,
+                    message = pinResp.message.ifBlank {
+                        if (confirmedPinMismatch) "车控安全密码校验失败，请重新输入" else "PIN 码校验失败"
+                    },
+                    isPinError = confirmedPinMismatch
+                )
+            }
+            markPinSessionWarm(authToken, normVin, pinHash)
+            preVerified = true
+        }
+
+        val commandData = JSONObject().apply {
+            put("vin", normVin)
+            put("instruction", instruction)
+            put("paras", paras)
+            put("passwordType", PASSWORD_TYPE_VEHICLE)
+            if (pinHash.isNotBlank()) put("safePasswd", pinHash)
+        }
+
+        var response = postEnvelope(
+            serviceType = SERVICE_REMOTE_COMMAND,
+            data = commandData,
+            globalId = authToken
+        )
+        var accepted = is970CommandAccepted(response.envelope)
+        if (accepted) {
+            if (pinHash.isNotBlank()) markPinSessionWarm(authToken, normVin, pinHash)
+            return ZyhlPinActionResult(
+                success = true,
+                resultCode = response.resultCode,
+                message = response.message,
+                isPinError = false
+            )
+        }
+
+        var confirmedPinError = false
+        var overrideCode = response.resultCode
+        var overrideMsg = response.message
+
+        if (!preVerified && pinHash.isNotBlank() && isPinRejection(response.resultCode, response.message)) {
+            val pinResp = runCatching {
+                postPinSessionVerification(normVin, pinHash, authToken)
+            }.getOrElse { err ->
+                if (err is CherySessionExpiredException || err is CheryDeviceBindingRequiredException) {
+                    throw err
+                }
+                null
+            }
+            if (pinResp?.resultCode == RESULT_SUCCESS) {
+                markPinSessionWarm(authToken, normVin, pinHash)
+                response = postEnvelope(
+                    serviceType = SERVICE_REMOTE_COMMAND,
+                    data = commandData,
+                    globalId = authToken
+                )
+                accepted = is970CommandAccepted(response.envelope)
+                if (accepted) markPinSessionWarm(authToken, normVin, pinHash)
+                overrideCode = response.resultCode
+                overrideMsg = response.message
+            } else if (pinResp != null && isConfirmed125PinFailure(pinResp.resultCode, pinResp.message)) {
+                invalidatePinSessionForVin(normVin)
+                confirmedPinError = true
+                overrideCode = pinResp.resultCode
+                overrideMsg = pinResp.message.ifBlank { "车控安全密码校验失败，请重新输入" }
+            }
+        } else if (!preVerified && pinHash.isBlank() && isPinRejection(response.resultCode, response.message)) {
+            confirmedPinError = true
+        }
+
+        return ZyhlPinActionResult(
+            success = accepted,
+            resultCode = overrideCode,
+            message = overrideMsg,
+            isPinError = confirmedPinError
+        )
     }
 
     fun isPinRejectionEnvelope(envelope: JSONObject): Boolean {
@@ -3102,28 +3212,18 @@ class CheryHttpClient(
         if (normVin.isBlank() || normTaskId.isBlank()) {
             return VehicleUpgradeActionResult(false, message = "升级任务参数缺失")
         }
-        val pinHash = if (vehiclePin.trim().isNotBlank()) hashPasswordOrPin(vehiclePin.trim()) else ""
-        val commandData = JSONObject().apply {
-            put("vin", normVin)
-            put("instruction", "1115")
-            put("paras", JSONObject().put("302F", normTaskId))
-            put("passwordType", PASSWORD_TYPE_VEHICLE)
-            if (pinHash.isNotBlank()) put("safePasswd", pinHash)
-        }
-        val envelope = executeZyhlService(
-            serviceType = SERVICE_REMOTE_COMMAND,
-            data = commandData,
+        val res = execute970PinAction(
+            vin = normVin,
+            instruction = "1115",
+            paras = JSONObject().put("302F", normTaskId),
+            pin = vehiclePin,
             accessToken = accessToken
         )
-        val code = jsonText(envelope, "resultCode")
-        val msg = envelopeResultMessage(envelope)
-        val accepted = is970CommandAccepted(envelope)
-        val pinErr = !accepted && isPinRejection(code, msg)
         return VehicleUpgradeActionResult(
-            success = accepted,
-            resultCode = code,
-            message = msg,
-            isPinError = pinErr
+            success = res.success,
+            resultCode = res.resultCode,
+            message = res.message,
+            isPinError = res.isPinError
         )
     }
 
@@ -3181,7 +3281,6 @@ class CheryHttpClient(
         if (normVin.isBlank() || normTaskId.isBlank()) {
             return VehicleUpgradeActionResult(false, message = "升级任务参数缺失")
         }
-        val pinHash = if (vehiclePin.trim().isNotBlank()) hashPasswordOrPin(vehiclePin.trim()) else ""
         val paras = JSONObject().apply {
             put("302F", normTaskId)
             val cleanStart = startTime.trim()
@@ -3189,27 +3288,18 @@ class CheryHttpClient(
                 put("3030", JSONArray().put(JSONObject().put("0001", cleanStart)))
             }
         }
-        val commandData = JSONObject().apply {
-            put("vin", normVin)
-            put("instruction", "1116")
-            put("paras", paras)
-            put("passwordType", PASSWORD_TYPE_VEHICLE)
-            if (pinHash.isNotBlank()) put("safePasswd", pinHash)
-        }
-        val envelope = executeZyhlService(
-            serviceType = SERVICE_REMOTE_COMMAND,
-            data = commandData,
+        val res = execute970PinAction(
+            vin = normVin,
+            instruction = "1116",
+            paras = paras,
+            pin = vehiclePin,
             accessToken = accessToken
         )
-        val code = jsonText(envelope, "resultCode")
-        val msg = envelopeResultMessage(envelope)
-        val accepted = is970CommandAccepted(envelope)
-        val pinErr = !accepted && isPinRejection(code, msg)
         return VehicleUpgradeActionResult(
-            success = accepted,
-            resultCode = code,
-            message = msg,
-            isPinError = pinErr
+            success = res.success,
+            resultCode = res.resultCode,
+            message = res.message,
+            isPinError = res.isPinError
         )
     }
 
@@ -3308,7 +3398,7 @@ class CheryHttpClient(
         return success
     }
 
-    /** Sets graphic gesture password via zyhl service 126 (DataReq126). */
+    /** Sets graphic gesture password via zyhl service 126 (DataReq126, openGesturePass="1" per SetCarCtrlPwdActivity.java:123). */
     fun setVehicleControlPin(
         vin: String,
         newPin: String,
@@ -3319,7 +3409,7 @@ class CheryHttpClient(
             data = JSONObject().apply {
                 put("vin", vin.trim().uppercase(Locale.US))
                 put("password", hashPasswordOrPin(newPin))
-                put("openGesturePass", "0")
+                put("openGesturePass", "1")
             },
             accessToken = accessToken
         )
@@ -3452,22 +3542,25 @@ class CheryHttpClient(
     }
 
     /** Sets or disables speed-limit reminder via zyhl 970 instruction 1203 (4005: 0=off, 60..120=km/h). */
+    fun setSpeedLimitReminderResult(
+        vin: String,
+        speedKmh: Int,
+        pin: String,
+        accessToken: String = ""
+    ): ZyhlPinActionResult = execute970PinAction(
+        vin = vin,
+        instruction = "1203",
+        paras = JSONObject().put("4005", if (speedKmh <= 0) 0 else speedKmh.coerceIn(60, 120)),
+        pin = pin,
+        accessToken = accessToken
+    )
+
     fun setSpeedLimitReminder(
         vin: String,
         speedKmh: Int,
         pin: String,
         accessToken: String = ""
-    ): Boolean {
-        val payload = JSONObject().apply {
-            put("vin", vin.trim().uppercase(Locale.US))
-            put("instruction", "1203")
-            put("paras", JSONObject().put("4005", if (speedKmh <= 0) 0 else speedKmh.coerceIn(60, 120)))
-            put("passwordType", PASSWORD_TYPE_VEHICLE)
-            if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
-        }
-        val env = executeZyhlService("970", payload, accessToken)
-        return is970CommandAccepted(env)
-    }
+    ): Boolean = setSpeedLimitReminderResult(vin, speedKmh, pin, accessToken).success
 
     /** Validates zyhl 970 responses strictly: outer resultCode == "0200" AND data.result == "1" (zyhl b.java:144,154). */
     fun is970CommandAccepted(envelope: JSONObject): Boolean {
@@ -3554,13 +3647,13 @@ class CheryHttpClient(
     }
 
     /** Saves EV/PHEV charging schedules via zyhl 970 instruction 1110 (3A04 + 3A19). */
-    fun saveChargingSchedules(
+    fun saveChargingSchedulesResult(
         vin: String,
         masterEnabled: Boolean,
         schedules: List<ChargingScheduleItem>,
         pin: String,
         accessToken: String = ""
-    ): Boolean {
+    ): ZyhlPinActionResult {
         val dayCodes = arrayOf("01", "02", "03", "04", "05", "06", "07")
         val listArr = JSONArray()
         schedules.forEach { item ->
@@ -3579,22 +3672,26 @@ class CheryHttpClient(
                 listArr.put(entry)
             }
         }
-        val payload = JSONObject().apply {
-            put("vin", vin.trim().uppercase(Locale.US))
-            put("instruction", "1110")
-            put(
-                "paras",
-                JSONObject().apply {
-                    put("3A04", if (masterEnabled) 1 else 0)
-                    put("3A19", listArr)
-                }
-            )
-            put("passwordType", PASSWORD_TYPE_VEHICLE)
-            if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
+        val paras = JSONObject().apply {
+            put("3A04", if (masterEnabled) 1 else 0)
+            put("3A19", listArr)
         }
-        val env = executeZyhlService("970", payload, accessToken)
-        return is970CommandAccepted(env)
+        return execute970PinAction(
+            vin = vin,
+            instruction = "1110",
+            paras = paras,
+            pin = pin,
+            accessToken = accessToken
+        )
     }
+
+    fun saveChargingSchedules(
+        vin: String,
+        masterEnabled: Boolean,
+        schedules: List<ChargingScheduleItem>,
+        pin: String,
+        accessToken: String = ""
+    ): Boolean = saveChargingSchedulesResult(vin, masterEnabled, schedules, pin, accessToken).success
 
     /** Queries departure/travel pre-conditioning schedules via zyhl 143 (DataResp143). */
     fun fetchTravelSchedules(
@@ -3626,6 +3723,33 @@ class CheryHttpClient(
     }
 
     /** Saves departure/travel pre-conditioning schedule via zyhl 970 instruction 1111 (0002 + 3010 + 302E). */
+    fun saveTravelScheduleResult(
+        vin: String,
+        enabled: Boolean,
+        startTimeHhMm: String,
+        airType: Int = 1,
+        pin: String,
+        accessToken: String = ""
+    ): ZyhlPinActionResult {
+        val mins = parseHhMmToMinutes(startTimeHhMm)
+        val entry = JSONObject().apply {
+            if (mins >= 0) put("302D", mins)
+            put("0002", if (enabled) 1 else 0)
+        }
+        val paras = JSONObject().apply {
+            put("0002", if (enabled) 1 else 0)
+            put("3010", airType.coerceIn(0, 1))
+            put("302E", JSONArray().put(entry))
+        }
+        return execute970PinAction(
+            vin = vin,
+            instruction = "1111",
+            paras = paras,
+            pin = pin,
+            accessToken = accessToken
+        )
+    }
+
     fun saveTravelSchedule(
         vin: String,
         enabled: Boolean,
@@ -3633,29 +3757,7 @@ class CheryHttpClient(
         airType: Int = 1,
         pin: String,
         accessToken: String = ""
-    ): Boolean {
-        val mins = parseHhMmToMinutes(startTimeHhMm)
-        val entry = JSONObject().apply {
-            if (mins >= 0) put("302D", mins)
-            put("0002", if (enabled) 1 else 0)
-        }
-        val payload = JSONObject().apply {
-            put("vin", vin.trim().uppercase(Locale.US))
-            put("instruction", "1111")
-            put(
-                "paras",
-                JSONObject().apply {
-                    put("0002", if (enabled) 1 else 0)
-                    put("3010", airType.coerceIn(0, 1))
-                    put("302E", JSONArray().put(entry))
-                }
-            )
-            put("passwordType", PASSWORD_TYPE_VEHICLE)
-            if (pin.isNotBlank()) put("safePasswd", hashPasswordOrPin(pin))
-        }
-        val env = executeZyhlService("970", payload, accessToken)
-        return is970CommandAccepted(env)
-    }
+    ): Boolean = saveTravelScheduleResult(vin, enabled, startTimeHhMm, airType, pin, accessToken).success
 
     /** Sends a navigation POI destination to the vehicle head-unit via zyhl 943. */
     fun sendPoiToVehicle(
@@ -4492,15 +4594,29 @@ class CheryHttpClient(
         trunkDoor: String,
         liftgateState: String,
         liftgateOperateState: String
-    ): Boolean? = when {
-        trunkDoor.isNotBlank() -> when (trunkDoor.normalizedState()) {
-            "1" -> true
-            "0", "3", "255", "0xff" -> false
+    ): Boolean? {
+        val fromTrunkDoor = when (trunkDoor.normalizedState()) {
+            "1", "open", "true" -> true
+            "0", "close", "closed", "false" -> false
+            "3", "255", "0xff", "" -> null
             else -> null
         }
-        liftgateState.isNotBlank() -> parseLiftgateState(liftgateState) == "open"
-        liftgateOperateState.isNotBlank() -> parseLiftgateState(liftgateOperateState) == "open"
-        else -> null
+        if (fromTrunkDoor != null) return fromTrunkDoor
+        val normLiftgate = liftgateState.normalizedState()
+        if (normLiftgate.isNotBlank() && normLiftgate !in setOf("3", "255", "0xff")) {
+            when (parseLiftgateState(liftgateState)) {
+                "open" -> return true
+                "closed" -> return false
+            }
+        }
+        val normOperate = liftgateOperateState.normalizedState()
+        if (normOperate.isNotBlank() && normOperate !in setOf("3", "255", "0xff")) {
+            when (parseLiftgateState(liftgateOperateState)) {
+                "open" -> return true
+                "closed" -> return false
+            }
+        }
+        return null
     }
 
     private fun parseLiftgateState(value: String): String = when (value.normalizedState()) {
