@@ -286,46 +286,41 @@ class InGeekBleSession(
     }
 
     /**
-     * Tries the verified RX-IV alternatives and validates AES-CMAC before
-     * accepting plaintext.  The returned Boolean is false only when no candidate
-     * authenticated the frame.
+     * Strictly monotonic forward RX-IV verification matching InGeekTA_AES::DecryptData.
+     * Rejects replayed/non-incremented IVs, allows a small bounded forward skip to
+     * recover from dropped BLE notifications, and commits `rxIv` only AFTER CMAC,
+     * AES-CBC decryption, and ISO 9797-1 Method 2 unpadding all succeed.
      */
     @Synchronized
     fun decryptIncomingPayload(ciphertextWithMac: ByteArray): Pair<ByteArray, Boolean> {
         val key = sessionKey ?: return ByteArray(0) to false
         val currentRx = rxIv ?: return ByteArray(0) to false
-        val initial = initialIv ?: return ByteArray(0) to false
-        val currentTx = txIv ?: return ByteArray(0) to false
         if (ciphertextWithMac.size < 32 || (ciphertextWithMac.size - 16) % 16 != 0) {
             return ByteArray(0) to false
         }
 
         val ciphertext = ciphertextWithMac.copyOfRange(0, ciphertextWithMac.size - 16)
         val receivedMac = ciphertextWithMac.copyOfRange(ciphertextWithMac.size - 16, ciphertextWithMac.size)
-        val candidates = linkedMapOf<String, ByteArray>()
-        fun addCandidate(iv: ByteArray) {
-            candidates.putIfAbsent(iv.toHex(), iv)
-        }
-        addCandidate(currentRx)
-        addCandidate(InGeekTaAesCrypto.incrementIv128Be(currentRx, 1))
-        addCandidate(initial)
-        addCandidate(InGeekTaAesCrypto.incrementIv128Be(initial, 1))
-        addCandidate(currentTx)
 
-        for ((_, candidateIv) in candidates) {
+        for (step in 1..MAX_RX_IV_FORWARD_SKIP) {
+            val candidateIv = InGeekTaAesCrypto.incrementIv128Be(currentRx, step)
             val expectedMac = InGeekTaAesCrypto.aes128Cmac(key, candidateIv + ciphertext)
             if (!InGeekTaAesCrypto.constantTimeEquals(receivedMac, expectedMac)) continue
 
-            rxIv = candidateIv
             val cbcIv = InGeekTaAesCrypto.aes128EcbEncrypt(key, candidateIv)
             val padded = runCatching {
                 InGeekTaAesCrypto.aes128CbcDecryptNoPad(key, cbcIv, ciphertext)
-            }.getOrNull() ?: return ByteArray(0) to true
+            }.getOrNull() ?: return ByteArray(0) to false
             val plain = runCatching { InGeekTaAesCrypto.iso9797Unpad16(padded) }.getOrNull()
-                ?: return ByteArray(0) to true
+                ?: return ByteArray(0) to false
+            rxIv = candidateIv
             return plain to true
         }
         return ByteArray(0) to false
+    }
+
+    companion object {
+        private const val MAX_RX_IV_FORWARD_SKIP = 4
     }
 
     @Synchronized

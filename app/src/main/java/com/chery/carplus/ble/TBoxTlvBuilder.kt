@@ -13,6 +13,7 @@ object TBoxService {
     const val AIR_CONDITIONER = 0x07
     const val TRUNK = 0x08
     const val ACCOUNT_SETTING = 0x80
+    const val REALDATA = 0x90
 
     fun name(serviceId: Int): String = when (serviceId) {
         DOOR -> "车门"
@@ -24,6 +25,7 @@ object TBoxService {
         AIR_CONDITIONER -> "空调"
         TRUNK -> "后备箱"
         ACCOUNT_SETTING -> "账号绑定"
+        REALDATA -> "实时车况"
         else -> "服务 0x%02X".format(serviceId and 0xFF)
     }
 }
@@ -68,7 +70,20 @@ data class ParsedTBoxResponse(
  */
 object TBoxTlvBuilder {
     const val TAG_RESULT = 0xE0
-    const val TAG_ERROR = 0xDF
+    const val TAG_ERROR = 0xE1
+    private val KNOWN_OUTER_SERVICES = setOf(
+        TBoxService.DOOR,
+        TBoxService.TAILGATE,
+        TBoxService.FIND_CAR,
+        TBoxService.SKYLIGHT,
+        TBoxService.WINDOW,
+        TBoxService.ENGINE,
+        TBoxService.AIR_CONDITIONER,
+        TBoxService.TRUNK,
+        TBoxService.ACCOUNT_SETTING,
+        TBoxService.REALDATA
+    )
+    private val KNOWN_REALDATA_TAGS = setOf(0x10, 0x11, 0x50, 0x60)
 
     private val actionKeys = linkedSetOf(
         "unlock", "lock", "find_car",
@@ -176,6 +191,7 @@ object TBoxTlvBuilder {
         TBoxService.AIR_CONDITIONER -> "air_conditioner"
         TBoxService.TRUNK -> "trunk"
         TBoxService.ACCOUNT_SETTING -> "account_setting"
+        TBoxService.REALDATA -> "realdata"
         else -> "service_0x%02x".format(serviceId and 0xFF)
     }
 
@@ -193,9 +209,11 @@ object TBoxTlvBuilder {
             )
         }
 
+        val hasOuterServiceHeader = hasValidOuterServiceHeader(payload)
         val tlvs = parseTlvItems(payload)
         val resultItem = tlvs.firstOrNull { (it.tag and 0xFF) == TAG_RESULT }
         val errorItem = tlvs.firstOrNull { (it.tag and 0xFF) == TAG_ERROR }
+            ?: tlvs.firstOrNull { (it.tag and 0xFF) in 0xE2..0xE8 }
         var resultCode = resultItem?.value?.firstOrNull()?.toInt()?.and(0xFF)
         var errorCode = errorItem?.value?.takeIf { it.isNotEmpty() }?.let { value ->
             if (value.size >= 2) {
@@ -205,24 +223,25 @@ object TBoxTlvBuilder {
             }
         }
 
-        val compact = looksLikeCompactActionResult(payload)
+        val compact = !hasOuterServiceHeader && looksLikeCompactActionResult(payload)
         if (compact) {
             if (resultCode == null) resultCode = payload[1].toInt() and 0xFF
             if (errorCode == null && payload.size >= 3) errorCode = payload[2].toInt() and 0xFF
         }
 
         val serviceTag = when {
-            payload.size >= 2 && payload[0].toInt().and(0xFF) in 0x01..0x08 &&
-                (payload[1].toInt() and 0xFF) == payload.size - 2 -> payload[0].toInt() and 0xFF
+            hasOuterServiceHeader -> payload[0].toInt() and 0xFF
             compact -> payload[0].toInt() and 0xFF
             else -> tlvs.firstOrNull()?.tag?.and(0xFF)
         }
 
+        val isStatusPush = serviceTag == TBoxService.REALDATA || messageId == BleWholeProtocol.MSG_VEHICLE_INFO
         val success = when {
             resultCode != null -> resultCode == 1 && (errorCode == null || errorCode == 0)
             errorCode != null -> errorCode == 0
             compact && payload.size >= 2 -> (payload[1].toInt() and 0xFF) == 1 &&
                 (payload.size < 3 || (payload[2].toInt() and 0xFF) == 0)
+            isStatusPush -> tlvs.isNotEmpty()
             else -> false
         }
 
@@ -232,7 +251,54 @@ object TBoxTlvBuilder {
         var acOn: Boolean? = null
         var engineRunning: Boolean? = null
 
+        fun parseLockAndDoorTags() {
+            tlvs.firstOrNull { it.tag == 0x10 }?.value?.toUnsignedWord()?.let { lockBits ->
+                // BleKeyTManager: left-front door lock bits (bits 2..3): 0 = LOCKED, 1 = UNLOCKED.
+                when ((lockBits shr 2) and 0x03) {
+                    0 -> if (doorLocked == null) doorLocked = true
+                    1 -> if (doorLocked == null) doorLocked = false
+                }
+            }
+            tlvs.firstOrNull { it.tag == 0x11 }?.value?.let { doorBitsValue ->
+                val word = doorBitsValue.toUnsignedWord()
+                val flOpen = (word and 0x03) == 1
+                val frOpen = ((word shr 2) and 0x03) == 1
+                val rlOpen = ((word shr 4) and 0x03) == 1
+                val rrOpen = ((word shr 6) and 0x03) == 1
+                doorsOpen = flOpen || frOpen || rlOpen || rrOpen
+                if (doorBitsValue.size >= 2) {
+                    when ((word shr 8) and 0x03) {
+                        0 -> trunkOpen = false
+                        1 -> trunkOpen = true
+                    }
+                }
+            }
+        }
+
+        fun parseEngineStatusByte(state: Int) {
+            // TBoxResponseEnum$STATUS_ENGINE: 0=NOTRUN, 1=RUN, 2=ACTIVATIONSTARTERPOWERSTAGE, 3=LIMPHOME, 255=INVALID.
+            when (state) {
+                0x00 -> engineRunning = false
+                0x01, 0x02, 0x03 -> engineRunning = true
+            }
+        }
+
+        fun parseAirStatusByte(state: Int) {
+            // TBoxResponseEnum$STATUS_TYPE_AIR: 0=OFF, 1=ON.
+            when (state) {
+                0x00 -> acOn = false
+                0x01 -> acOn = true
+            }
+        }
+
         when (serviceTag) {
+            TBoxService.REALDATA -> {
+                parseLockAndDoorTags()
+                tlvs.firstOrNull { it.tag == 0x50 }?.value?.firstOrNull()?.toInt()?.and(0xFF)
+                    ?.let(::parseEngineStatusByte)
+                tlvs.firstOrNull { it.tag == 0x60 }?.value?.firstOrNull()?.toInt()?.and(0xFF)
+                    ?.let(::parseAirStatusByte)
+            }
             TBoxService.DOOR -> {
                 tlvs.firstOrNull { it.tag == 0x01 }?.value?.firstOrNull()?.toInt()?.and(0xFF)?.let { state ->
                     when (state) {
@@ -240,41 +306,22 @@ object TBoxTlvBuilder {
                         0x01 -> doorLocked = false
                     }
                 }
-                tlvs.firstOrNull { it.tag == 0x10 }?.value?.toUnsignedWord()?.let { lockBits ->
-                    when ((lockBits shr 2) and 0x03) {
-                        0 -> if (doorLocked == null) doorLocked = true
-                        1 -> if (doorLocked == null) doorLocked = false
-                    }
-                }
-                tlvs.firstOrNull { it.tag == 0x11 }?.value?.let { doorBitsValue ->
-                    val word = doorBitsValue.toUnsignedWord()
-                    val flOpen = (word and 0x03) == 1
-                    val frOpen = ((word shr 2) and 0x03) == 1
-                    val rlOpen = ((word shr 4) and 0x03) == 1
-                    val rrOpen = ((word shr 6) and 0x03) == 1
-                    doorsOpen = flOpen || frOpen || rlOpen || rrOpen
-                    if (doorBitsValue.size >= 2) {
-                        when ((word shr 8) and 0x03) {
-                            0 -> trunkOpen = false
-                            1 -> trunkOpen = true
-                        }
-                    }
-                }
+                parseLockAndDoorTags()
             }
             TBoxService.ENGINE -> {
-                tlvs.firstOrNull { it.tag == 0x01 }?.value?.firstOrNull()?.toInt()?.and(0xFF)?.let { state ->
-                    when (state) {
-                        0x01 -> engineRunning = true
-                        0x02, 0x00 -> engineRunning = false
-                    }
+                tlvs.firstOrNull { it.tag == 0x50 }?.value?.firstOrNull()?.toInt()?.and(0xFF)
+                    ?.let(::parseEngineStatusByte)
+                if (engineRunning == null) {
+                    tlvs.firstOrNull { it.tag == 0x01 }?.value?.firstOrNull()?.toInt()?.and(0xFF)
+                        ?.let(::parseEngineStatusByte)
                 }
             }
             TBoxService.AIR_CONDITIONER -> {
-                tlvs.firstOrNull { it.tag == 0x01 }?.value?.firstOrNull()?.toInt()?.and(0xFF)?.let { state ->
-                    when (state) {
-                        0x01 -> acOn = true
-                        0x02, 0x00 -> acOn = false
-                    }
+                tlvs.firstOrNull { it.tag == 0x60 }?.value?.firstOrNull()?.toInt()?.and(0xFF)
+                    ?.let(::parseAirStatusByte)
+                if (acOn == null) {
+                    tlvs.firstOrNull { it.tag == 0x01 }?.value?.firstOrNull()?.toInt()?.and(0xFF)
+                        ?.let(::parseAirStatusByte)
                 }
             }
         }
@@ -298,6 +345,11 @@ object TBoxTlvBuilder {
     }
 
     fun parseTlvItems(payload: ByteArray): List<TBoxTlvItem> {
+        if (hasValidOuterServiceHeader(payload)) {
+            if (payload.size == 2) return emptyList()
+            val inner = runCatching { parseTlvSequence(payload, 2) }.getOrNull()
+            if (inner != null) return inner
+        }
         val candidates = mutableListOf<List<TBoxTlvItem>>()
         val starts = linkedSetOf(0)
         if (payload.size >= 2 && (payload[1].toInt() and 0xFF) == payload.size - 2) starts += 2
@@ -312,6 +364,13 @@ object TBoxTlvBuilder {
             }
         }
         return candidates.maxByOrNull { scoreTlvList(it) } ?: emptyList()
+    }
+
+    private fun hasValidOuterServiceHeader(payload: ByteArray): Boolean {
+        if (payload.size < 2) return false
+        val service = payload[0].toInt() and 0xFF
+        val declaredBodyLen = payload[1].toInt() and 0xFF
+        return service in KNOWN_OUTER_SERVICES && declaredBodyLen == payload.size - 2
     }
 
     private fun parseTlvSequence(payload: ByteArray, start: Int): List<TBoxTlvItem> {
@@ -334,6 +393,7 @@ object TBoxTlvBuilder {
         var score = items.size * 10
         if (items.any { it.tag == TAG_RESULT }) score += 100
         if (items.any { it.tag == TAG_ERROR }) score += 100
+        if (items.any { it.tag in KNOWN_REALDATA_TAGS }) score += 50
         if (items.all { it.tag in 0x01..0xFF }) score += 5
         return score
     }
@@ -345,10 +405,11 @@ object TBoxTlvBuilder {
     }
 
     private fun looksLikeCompactActionResult(payload: ByteArray): Boolean {
-        if (payload.size < 2) return false
+        if (payload.size < 2 || payload.size > 4) return false
+        if (hasValidOuterServiceHeader(payload)) return false
         val action = payload[0].toInt() and 0xFF
         val result = payload[1].toInt() and 0xFF
-        return action in 0x01..0x08 && result in 0x00..0x02
+        return action in 0x01..0x08 && result in 0x00..0x01
     }
 
     private fun buildSummary(
@@ -363,7 +424,7 @@ object TBoxTlvBuilder {
             ?: if (messageId == BleWholeProtocol.MSG_VEHICLE_INFO) "车辆状态" else "车辆服务"
         val resultText = when (resultCode) {
             1 -> "执行成功"
-            2 -> "执行失败"
+            0, 2 -> "执行失败"
             null -> if (success) "已受理" else "结果未知"
             else -> "结果码 0x%02X".format(resultCode and 0xFF)
         }
@@ -379,7 +440,7 @@ object TBoxTlvBuilder {
             }
             "$label=${item.value.toHex()}"
         }.take(240)
-        val prefix = if (messageId == BleWholeProtocol.MSG_VEHICLE_INFO) {
+        val prefix = if (messageId == BleWholeProtocol.MSG_VEHICLE_INFO || serviceTag == TBoxService.REALDATA) {
             "车辆状态更新"
         } else {
             "$serviceName$resultText"

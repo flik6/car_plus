@@ -250,8 +250,14 @@ object VehicleModelRepository {
 
     fun buildLocalCacheUrl(context: Context, key: String): String {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val tag = prefs.getString("sha256_$key", "").orEmpty().take(10)
-            .ifBlank { prefs.getInt("version_$key", 1).toString() }
+        val sha8 = prefs.getString("sha256_$key", "").orEmpty().trim().take(8)
+        val file = File(cacheDir(context), "$key.glb")
+        val mtime = if (file.exists()) file.lastModified() else 0L
+        val tag = when {
+            sha8.isNotBlank() -> sha8
+            mtime > 0L -> "${prefs.getInt("version_$key", 1)}_$mtime"
+            else -> prefs.getInt("version_$key", 1).toString()
+        }
         return "https://appassets.androidplatform.net/car3d-cache/$key.glb?v=$tag"
     }
 
@@ -529,11 +535,9 @@ object VehicleModelRepository {
 
                     val actualSha = digest.digest().joinToString("") { "%02x".format(it) }
                     if (entry.sha256.isNotBlank() && !actualSha.equals(entry.sha256, ignoreCase = true)) {
-                        // Accept valid GLB if remote branch was updated ahead of cached manifest fallback,
-                        // but reject obviously truncated downloads.
-                        if (entry.sizeBytes > 0L && downloaded < entry.sizeBytes / 2L) {
-                            throw IllegalStateException("Model size mismatch ($downloaded vs ${entry.sizeBytes})")
-                        }
+                        throw IllegalStateException(
+                            "Model SHA-256 mismatch (expected ${entry.sha256.take(12)}, got ${actualSha.take(12)})"
+                        )
                     }
 
                     if (finalFile.exists()) {

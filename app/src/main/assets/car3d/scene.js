@@ -714,7 +714,6 @@
   var state = {
     modelKey: 'arrizo8',
     vehicleLocked: true,
-    doorsOpen: false,
     trunkOpen: false,
     skylightOpen: false,
     skylightMode: 'closed',   // 'closed' | 'tilt' | 'open'
@@ -1660,6 +1659,23 @@
             rb.mesh.position.y = Math.sin(t * 2.2 + rb.phaseOffset) * 0.03;
           }
         }
+      },
+      isAnimating: function (st) {
+        if (anim.flashActive || anim.hornActive) return true;
+        if (!st) return false;
+        if (st.climateOn || st.windowsMode === 'vent') return true;
+        if (st.trunkOpen !== anim.prevTrunkOpen ||
+            st.engineRunning !== anim.prevEngineRunning ||
+            st.vehicleLocked !== anim.prevLocked) return true;
+        var tTrunk = st.trunkOpen ? 1.0 : 0.0;
+        if (Math.abs(tTrunk - anim.trunkProgress) > 0.002) return true;
+        var effSky = st.skylightMode || (st.skylightOpen ? 'open' : 'closed');
+        var tTilt = effSky === 'tilt' ? 1.0 : 0.0;
+        var tSlide = effSky === 'open' ? 1.0 : 0.0;
+        if (Math.abs(tTilt - anim.sunroofTilt) > 0.002 || Math.abs(tSlide - anim.sunroofSlide) > 0.002) return true;
+        var tDrop = st.windowsMode === 'open' ? 0.30 : (st.windowsMode === 'vent' ? 0.052 : 0.0);
+        if (Math.abs(tDrop - anim.windowDrop) > 0.001) return true;
+        return false;
       }
     };
   }
@@ -1694,10 +1710,11 @@
     });
   }
 
-  function loadModel(modelKey, customGlbUrl) {
+  function loadModel(modelKey, customGlbUrl, forceReload) {
     var cfg = global.CarModelRegistry.get(modelKey);
     var resolvedUrl = (typeof customGlbUrl === 'string' && customGlbUrl) ? customGlbUrl : cfg.glbUrl;
-    if (currentModelKey === cfg.key && activeLoadedUrl === resolvedUrl && currentContainer) {
+    if (!forceReload && currentModelKey === cfg.key && activeLoadedUrl === resolvedUrl && currentContainer) {
+      wakeRenderLoop();
       return;
     }
     currentModelKey = cfg.key;
@@ -1856,17 +1873,30 @@
         }
 
         notifyAndroidReady();
+        wakeRenderLoop();
         requestAnimationFrame(function () {
           requestAnimationFrame(function () {
-            if (renderer && scene && camera) {
+            if (renderer && scene && camera && !contextLost) {
               renderer.render(scene, camera);
             }
             notifyAndroidFirstFrame();
+            wakeRenderLoop();
           });
         });
       },
       undefined,
       function (err) {
+        if (currentContainer === container) {
+          scene.remove(container);
+          disposeObject3D(container);
+          currentContainer = null;
+          currentChassis = null;
+          currentEffects = null;
+          currentRig = null;
+          currentModelSize = null;
+          currentModelKey = null;
+          activeLoadedUrl = null;
+        }
         if (global.Car3DBridge && typeof global.Car3DBridge.onWebGLError === 'function') {
           global.Car3DBridge.onWebGLError('GLB load failed: ' + String(err));
         }
@@ -2016,6 +2046,7 @@
 
       orbit.velTheta = lerp(orbit.velTheta, clamp(dTheta / moveDt, -7.5, 7.5), 0.45);
       orbit.velPhi = lerp(orbit.velPhi, clamp(dPhi / moveDt, -3.5, 3.5), 0.45);
+      wakeRenderLoop();
     }, { passive: true });
 
     domEl.addEventListener('touchend', function (e) {
@@ -2031,6 +2062,7 @@
         }
         touchTrackingTap = false;
         orbit.dragging = false;
+        wakeRenderLoop();
       }
     }, { passive: true });
 
@@ -2039,6 +2071,7 @@
       orbit.dragging = false;
       orbit.velTheta = 0;
       orbit.velPhi = 0;
+      wakeRenderLoop();
     }, { passive: true });
 
     var mouseTrackingTap = false;
@@ -2055,6 +2088,7 @@
       orbit.velTheta = 0;
       orbit.velPhi = 0;
       orbit.lastMoveTime = performance.now();
+      wakeRenderLoop();
     });
     window.addEventListener('mousemove', function (e) {
       if (!mouseTrackingTap && !orbit.dragging) return;
@@ -2080,6 +2114,7 @@
 
       orbit.velTheta = lerp(orbit.velTheta, clamp(dTheta / moveDt, -7.5, 7.5), 0.45);
       orbit.velPhi = lerp(orbit.velPhi, clamp(dPhi / moveDt, -3.5, 3.5), 0.45);
+      wakeRenderLoop();
     });
     window.addEventListener('mouseup', function () {
       if (!mouseTrackingTap && !orbit.dragging) return;
@@ -2096,6 +2131,7 @@
         orbit.velTheta = 0;
         orbit.velPhi = 0;
       }
+      wakeRenderLoop();
     });
   }
 
@@ -2170,17 +2206,57 @@
       orbit.radius = fitR;
     }
     renderer.setSize(w, h, false);
-    if (renderActive && scene) {
+    if (renderActive && !contextLost && scene) {
       renderer.render(scene, camera);
+    }
+    wakeRenderLoop();
+  }
+
+  var contextLost = false;
+
+  function stopRenderLoop() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  function needsContinuousRender() {
+    if (!renderActive || contextLost || !renderer) return false;
+    if (orbit.dragging || entrance.active || state.engineRunning || state.climateOn || state.windowsMode === 'vent') {
+      return true;
+    }
+    if (Math.abs(orbit.velTheta) > 0.001 || Math.abs(orbit.velPhi) > 0.001) return true;
+    if (Math.abs(orbit.targetTheta - orbit.theta) > 0.0005 ||
+        Math.abs(orbit.targetPhi - orbit.phi) > 0.0005 ||
+        Math.abs(orbit.targetRadius - orbit.radius) > 0.0005 ||
+        Math.abs(orbit.deckProgress - smoothDeckProgress) > 0.0005) {
+      return true;
+    }
+    if (Math.abs(suspension.pitch) > 0.0002 || Math.abs(suspension.vPitch) > 0.0002 ||
+        Math.abs(suspension.roll) > 0.0002 || Math.abs(suspension.vRoll) > 0.0002 ||
+        Math.abs(suspension.heave) > 0.0002 || Math.abs(suspension.vHeave) > 0.0002) {
+      return true;
+    }
+    if (currentEffects && typeof currentEffects.isAnimating === 'function' && currentEffects.isAnimating(state)) {
+      return true;
+    }
+    return false;
+  }
+
+  function wakeRenderLoop() {
+    if (!renderActive || contextLost || !renderer) return;
+    if (rafId === null) {
+      lastTime = performance.now();
+      rafId = requestAnimationFrame(animate);
     }
   }
 
   function animate(now) {
-    if (!renderActive) {
-      rafId = null;
+    rafId = null;
+    if (!renderActive || contextLost || !renderer) {
       return;
     }
-    rafId = requestAnimationFrame(animate);
 
     var dt = lastTime ? Math.min(0.05, (now - lastTime) / 1000) : 0.016;
     lastTime = now;
@@ -2415,6 +2491,15 @@
     }
 
     renderer.render(scene, camera);
+
+    if (needsContinuousRender()) {
+      rafId = requestAnimationFrame(animate);
+    } else {
+      orbit.theta = orbit.targetTheta;
+      orbit.phi = orbit.targetPhi;
+      orbit.radius = orbit.targetRadius;
+      smoothDeckProgress = orbit.deckProgress;
+    }
   }
 
   function init() {
@@ -2438,6 +2523,40 @@
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.25;
     container.appendChild(renderer.domElement);
+
+    renderer.domElement.addEventListener('webglcontextlost', function (e) {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      contextLost = true;
+      stopRenderLoop();
+    }, false);
+
+    renderer.domElement.addEventListener('webglcontextrestored', function () {
+      contextLost = false;
+      try {
+        if (envMap && typeof envMap.dispose === 'function') envMap.dispose();
+        envMap = createStudioEnvironment(renderer);
+        if (scene) scene.environment = envMap;
+        if (currentContainer) {
+          currentContainer.traverse(function (child) {
+            if (child.isMesh && child.material) {
+              var mats = Array.isArray(child.material) ? child.material : [child.material];
+              for (var i = 0; i < mats.length; i++) {
+                mats[i].envMap = envMap;
+                mats[i].needsUpdate = true;
+              }
+            }
+          });
+        }
+        lastResizeW = 0;
+        lastResizeH = 0;
+        resize();
+        wakeRenderLoop();
+      } catch (err) {
+        if (global.Car3DBridge && typeof global.Car3DBridge.onWebGLError === 'function') {
+          global.Car3DBridge.onWebGLError('WebGL context restore failed: ' + String(err));
+        }
+      }
+    }, false);
 
     scene = new THREE.Scene();
     scene.background = new THREE.Color(BG_HEX);
@@ -2473,7 +2592,6 @@
       } else if (demo === 'open') {
         hasCustomDemoAngle = true;
         state.vehicleLocked = false;
-        state.doorsOpen = true;
         state.trunkOpen = true;
         state.skylightOpen = true;
         state.skylightMode = 'open';
@@ -2511,8 +2629,8 @@
   }
 
   global.Car3D = {
-    loadModel: function (modelKey, customGlbUrl) {
-      loadModel(modelKey, customGlbUrl);
+    loadModel: function (modelKey, customGlbUrl, forceReload) {
+      loadModel(modelKey, customGlbUrl, !!forceReload);
     },
     setState: function (patch) {
       if (!patch || typeof patch !== 'object') return;
@@ -2520,7 +2638,6 @@
         loadModel(patch.modelKey, patch.glbUrl);
       }
       if (typeof patch.vehicleLocked === 'boolean') state.vehicleLocked = patch.vehicleLocked;
-      if (typeof patch.doorsOpen === 'boolean') state.doorsOpen = patch.doorsOpen;
       if (typeof patch.trunkOpen === 'boolean') state.trunkOpen = patch.trunkOpen;
       if (typeof patch.skylightOpen === 'boolean') {
         state.skylightOpen = patch.skylightOpen;
@@ -2539,21 +2656,25 @@
         state.climateTemp = patch.climateTemp;
       }
       if (typeof patch.engineRunning === 'boolean') state.engineRunning = patch.engineRunning;
+      wakeRenderLoop();
     },
     flashLights: function () {
       if (currentEffects && currentEffects.triggerFlash) {
         currentEffects.triggerFlash();
       }
+      wakeRenderLoop();
     },
     triggerHazardBlink: function (pulses) {
       if (currentEffects && currentEffects.triggerHazardBlink) {
         currentEffects.triggerHazardBlink(pulses);
       }
+      wakeRenderLoop();
     },
     triggerActionFeedback: function (actionKey) {
       if (currentEffects && currentEffects.triggerFeedback) {
         currentEffects.triggerFeedback(String(actionKey || ''));
       }
+      wakeRenderLoop();
     },
     resetCamera: function () {
       finishEntranceImmediately();
@@ -2563,6 +2684,7 @@
       orbit.velPhi = 0;
       orbit.targetTheta = activeRestTheta;
       orbit.targetPhi = activeRestPhi;
+      wakeRenderLoop();
     },
     setCollapsedVisibleRatio: function (ratio) {
       if (typeof ratio === 'number' && isFinite(ratio)) {
@@ -2578,6 +2700,7 @@
           }
           updateCameraPosition();
         }
+        wakeRenderLoop();
       }
     },
     setExpandedVisibleRatio: function (ratio) {
@@ -2591,10 +2714,11 @@
           orbit.targetRadius = fitR;
           orbit.radius = fitR;
           updateCameraPosition();
-          if (renderActive && renderer && scene) {
+          if (renderActive && !contextLost && renderer && scene) {
             renderer.render(scene, camera);
           }
         }
+        wakeRenderLoop();
       }
     },
     setDeckProgress: function (progress) {
@@ -2641,9 +2765,10 @@
         orbit.targetRadius = exactR;
       }
       updateCameraPosition();
-      if (renderActive && renderer && scene && camera) {
+      if (renderActive && !contextLost && renderer && scene && camera) {
         renderer.render(scene, camera);
       }
+      wakeRenderLoop();
     },
     setTopDownFocus: function (enabled) {
       global.Car3D.setDeckProgress(enabled ? 1 : 0);
@@ -2653,12 +2778,14 @@
       orbit.velPhi = 0;
       if (typeof theta === 'number') orbit.targetTheta = theta;
       if (typeof phi === 'number') orbit.targetPhi = clampPhi(phi);
+      wakeRenderLoop();
     },
     setRenderActive: function (active) {
       renderActive = !!active;
-      if (renderActive && rafId === null && renderer) {
-        lastTime = performance.now();
-        animate(lastTime);
+      if (!renderActive) {
+        stopRenderLoop();
+      } else {
+        wakeRenderLoop();
       }
     },
     setEntranceStyle: function (style) {
@@ -2667,6 +2794,7 @@
     playEntrance: function (styleOverride) {
       if (!hasCustomDemoAngle) {
         startEntranceAnimation(styleOverride);
+        wakeRenderLoop();
       }
     },
     playEntranceAnimation: function (styleOverride) {

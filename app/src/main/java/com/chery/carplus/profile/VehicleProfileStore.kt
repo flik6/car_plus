@@ -3,10 +3,18 @@ package com.chery.carplus.profile
 import android.content.Context
 import android.content.SharedPreferences
 import android.provider.Settings
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.util.Locale
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 /**
  * A complete digital-key profile belonging to one vehicle/account pairing.
@@ -128,12 +136,15 @@ object VckInfoParser {
         return userId to vin
     }
 
-    /** Chery Android device ID: lowercase MD5("0" + androidId). */
-    fun computeCheryDeviceId(androidId: String): String {
+    /** Lowercase MD5 hex helper (used for raw UUID fallback matching zyhl k.getIdToReDevice()). */
+    fun md5Hex(raw: String): String {
         val digest = MessageDigest.getInstance("MD5")
-            .digest(("0" + androidId.trim()).toByteArray(Charsets.UTF_8))
+            .digest(raw.trim().toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { byte -> "%02x".format(Locale.US, byte.toInt() and 0xFF) }
     }
+
+    /** Chery Android device ID: lowercase MD5("0" + androidId). */
+    fun computeCheryDeviceId(androidId: String): String = md5Hex("0" + androidId.trim())
 
     fun hexToBytes(hex: String): ByteArray {
         val compact = hex.trim()
@@ -160,7 +171,13 @@ class VehicleProfileStore(context: Context) {
     private fun readAccountDraftLocked(): VehicleProfile? {
         val raw = prefs.getString(KEY_ACCOUNT_DRAFT, "").orEmpty().trim()
         if (raw.isBlank()) return null
-        return runCatching { profileFromJson(JSONObject(raw)) }.getOrNull()
+        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val needsMigration = hasLegacyPlaintextSecrets(json)
+        val parsed = runCatching { profileFromJson(json) }.getOrNull() ?: return null
+        if (needsMigration && ProfileSecretCipher.isAvailable()) {
+            writeAccountDraftLocked(parsed)
+        }
+        return parsed
     }
 
     private fun writeAccountDraftLocked(draft: VehicleProfile?) {
@@ -224,7 +241,37 @@ class VehicleProfileStore(context: Context) {
                 prefs.edit().putString(KEY_FALLBACK_DEVICE_UUID, generated).apply()
             }
         }
-        VckInfoParser.computeCheryDeviceId(seed)
+        // zyhl k.getIdToReDevice() hashes raw fallback UUID directly without prepending "0".
+        VckInfoParser.md5Hex(seed)
+    }
+
+    /**
+     * Removes persisted vehicle profiles (and any account draft) that do not belong
+     * to the given [userId] / [mobileNo] account. Safe no-op if both identifiers are blank.
+     * Prevents cross-account vehicle/PIN/BLE-key contamination after 0406 session expiry.
+     */
+    fun pruneProfilesNotMatchingAccount(userId: String, mobileNo: String): Int = synchronized(lock) {
+        val normUserId = userId.trim()
+        val normMobile = normalizeMobileDigits(mobileNo)
+        if (normUserId.isBlank() && normMobile.isBlank()) return@synchronized 0
+
+        val existing = readProfilesLocked()
+        val kept = existing.filter { matchesAccount(it, normUserId, normMobile) }
+        val removed = existing.size - kept.size
+
+        val draft = readAccountDraftLocked()
+        if (draft != null && !matchesAccount(draft, normUserId, normMobile)) {
+            writeAccountDraftLocked(null)
+        }
+
+        if (removed > 0) {
+            val previousActive = prefs.getString(KEY_ACTIVE_VIN, "").orEmpty()
+            val nextActive = previousActive
+                .takeIf { active -> kept.any { it.vin.equals(active, ignoreCase = true) } }
+                ?: kept.firstOrNull()?.vin.orEmpty()
+            persistLocked(kept, nextActive)
+        }
+        removed
     }
 
     fun setActiveVin(vin: String): VehicleProfile? {
@@ -240,25 +287,67 @@ class VehicleProfileStore(context: Context) {
     fun saveProfile(
         profile: VehicleProfile,
         activate: Boolean = true,
-        preserveExistingPinIfBlank: Boolean = true
+        preserveExistingPinIfBlank: Boolean = true,
+        preserveExistingBleKeysIfBlank: Boolean = true
     ): VehicleProfile = synchronized(lock) {
         val existingList = readProfilesLocked()
         val existingForVin = existingList.firstOrNull { it.vin.equals(profile.vin.trim(), ignoreCase = true) }
+        val sameAccount = existingForVin != null && isSameAccount(existingForVin, profile)
         val resolvedPin = profile.controlPin.trim().ifBlank {
-            if (preserveExistingPinIfBlank) existingForVin?.controlPin?.trim().orEmpty() else ""
+            if (sameAccount && preserveExistingPinIfBlank) {
+                existingForVin?.controlPin?.trim().orEmpty()
+            } else {
+                ""
+            }
         }
+        val preserveBle = sameAccount && preserveExistingBleKeysIfBlank && existingForVin != null
+        val incomingRoot = compactHex(profile.rootKeyHex)
+        val incomingInfo = compactHex(profile.infoHex)
+        val incomingEdf = compactHex(profile.edfHex)
+        val incomingHasKeys = incomingRoot.isNotBlank() || incomingInfo.isNotBlank() || incomingEdf.isNotBlank()
         val normalized = profile.copy(
             vin = profile.vin.trim().uppercase(Locale.US),
-            userId = profile.userId.trim(),
-            mobileNo = profile.mobileNo.trim(),
-            bleName = profile.bleName.trim(),
-            bleMac = profile.bleMac.trim().uppercase(Locale.US),
-            deviceId = profile.deviceId.trim(),
-            rootKeyHex = compactHex(profile.rootKeyHex),
-            infoHex = compactHex(profile.infoHex),
-            edfHex = compactHex(profile.edfHex),
-            secAHex = compactHex(profile.secAHex),
-            secBHex = compactHex(profile.secBHex),
+            userId = profile.userId.trim().ifBlank {
+                if (sameAccount) existingForVin?.userId.orEmpty() else ""
+            },
+            mobileNo = profile.mobileNo.trim().ifBlank {
+                if (sameAccount) existingForVin?.mobileNo.orEmpty() else ""
+            },
+            bleName = profile.bleName.trim().ifBlank {
+                if (preserveBle) existingForVin?.bleName.orEmpty() else ""
+            },
+            bleMac = profile.bleMac.trim().uppercase(Locale.US).ifBlank {
+                if (preserveBle) existingForVin?.bleMac.orEmpty() else ""
+            },
+            deviceId = profile.deviceId.trim().ifBlank {
+                if (preserveBle) existingForVin?.deviceId.orEmpty() else ""
+            },
+            rootKeyHex = incomingRoot.ifBlank {
+                if (preserveBle) existingForVin?.rootKeyHex.orEmpty() else ""
+            },
+            infoHex = incomingInfo.ifBlank {
+                if (preserveBle) existingForVin?.infoHex.orEmpty() else ""
+            },
+            edfHex = incomingEdf.ifBlank {
+                if (preserveBle) existingForVin?.edfHex.orEmpty() else ""
+            },
+            validFrom = profile.validFrom.trim().ifBlank {
+                if (preserveBle) existingForVin?.validFrom.orEmpty() else ""
+            },
+            validTo = profile.validTo.trim().ifBlank {
+                if (preserveBle) existingForVin?.validTo.orEmpty() else ""
+            },
+            secAHex = compactHex(profile.secAHex).ifBlank {
+                if (preserveBle) existingForVin?.secAHex.orEmpty() else ""
+            },
+            secBHex = compactHex(profile.secBHex).ifBlank {
+                if (preserveBle) existingForVin?.secBHex.orEmpty() else ""
+            },
+            keyRole = if (!incomingHasKeys && preserveBle) {
+                existingForVin?.keyRole ?: profile.keyRole
+            } else {
+                profile.keyRole
+            },
             controlPin = resolvedPin,
             updatedAt = System.currentTimeMillis()
         )
@@ -420,7 +509,9 @@ class VehicleProfileStore(context: Context) {
         require(info.size == VckInfoParser.INFO_SIZE) {
             "vckInfo must be ${VckInfoParser.INFO_SIZE} bytes, got ${info.size}"
         }
-        require(edf.isNotEmpty()) { "edf is required" }
+        require(edf.size in 68..74) {
+            "edf must be 68..74 bytes, got ${edf.size}"
+        }
 
         val parsed = VckInfoParser.parse(info)
         if (parsed.vin.isNotBlank()) {
@@ -472,14 +563,24 @@ class VehicleProfileStore(context: Context) {
 
     private fun readProfilesLocked(): List<VehicleProfile> {
         val raw = prefs.getString(KEY_PROFILES, null) ?: return emptyList()
-        return runCatching {
+        var needsMigration = false
+        val profiles = runCatching {
             val array = JSONArray(raw)
             buildList {
                 for (index in 0 until array.length()) {
-                    array.optJSONObject(index)?.let { add(profileFromJson(it)) }
+                    array.optJSONObject(index)?.let { obj ->
+                        if (hasLegacyPlaintextSecrets(obj)) needsMigration = true
+                        add(profileFromJson(obj))
+                    }
                 }
             }
         }.getOrDefault(emptyList())
+        if (needsMigration && profiles.isNotEmpty() && ProfileSecretCipher.isAvailable()) {
+            val activeVin = prefs.getString(KEY_ACTIVE_VIN, "").orEmpty()
+                .ifBlank { profiles.first().vin }
+            persistLocked(profiles, activeVin)
+        }
+        return profiles
     }
 
     private fun persistLocked(profiles: List<VehicleProfile>, activeVin: String) {
@@ -491,6 +592,49 @@ class VehicleProfileStore(context: Context) {
             .commit()
     }
 
+    private fun hasLegacyPlaintextSecrets(json: JSONObject): Boolean =
+        SECRET_JSON_FIELDS.any { key ->
+            val raw = json.optString(key).trim()
+            raw.isNotEmpty() && !ProfileSecretCipher.isEncrypted(raw)
+        }
+
+    private fun normalizeMobileDigits(mobile: String): String =
+        mobile.trim().filter(Char::isDigit)
+
+    private fun matchesAccount(
+        profile: VehicleProfile,
+        targetUserId: String,
+        targetMobileDigits: String
+    ): Boolean {
+        val profUserId = profile.userId.trim()
+        val profMobile = normalizeMobileDigits(profile.mobileNo)
+        if (targetUserId.isNotBlank() && profUserId.isNotBlank()) {
+            return profUserId.equals(targetUserId, ignoreCase = true)
+        }
+        if (targetMobileDigits.isNotBlank() && profMobile.isNotBlank()) {
+            return profMobile == targetMobileDigits
+        }
+        return false
+    }
+
+    private fun isSameAccount(existing: VehicleProfile, incoming: VehicleProfile): Boolean {
+        val exUser = existing.userId.trim()
+        val inUser = incoming.userId.trim()
+        val exMobile = normalizeMobileDigits(existing.mobileNo)
+        val inMobile = normalizeMobileDigits(incoming.mobileNo)
+        if (exUser.isNotBlank() && inUser.isNotBlank()) {
+            return exUser.equals(inUser, ignoreCase = true)
+        }
+        if (exMobile.isNotBlank() && inMobile.isNotBlank()) {
+            return exMobile == inMobile
+        }
+        // Only treat as same account when one side carries no identity at all (partial VIN update);
+        // disjoint non-blank identities (e.g. only userId vs only mobileNo) must NOT merge across accounts.
+        val incomingAnonymous = inUser.isBlank() && inMobile.isBlank()
+        val existingAnonymous = exUser.isBlank() && exMobile.isBlank()
+        return incomingAnonymous || existingAnonymous
+    }
+
     private fun profileFromJson(json: JSONObject): VehicleProfile = VehicleProfile(
         vin = json.optString("vin"),
         userId = json.optString("userId"),
@@ -499,17 +643,17 @@ class VehicleProfileStore(context: Context) {
         bleMac = json.optString("bleMac"),
         deviceId = json.optString("deviceId"),
         accountType = json.optInt("accountType", 0),
-        rootKeyHex = json.optString("rootKeyHex"),
-        infoHex = json.optString("infoHex"),
-        edfHex = json.optString("edfHex"),
+        rootKeyHex = ProfileSecretCipher.decrypt(json.optString("rootKeyHex")),
+        infoHex = ProfileSecretCipher.decrypt(json.optString("infoHex")),
+        edfHex = ProfileSecretCipher.decrypt(json.optString("edfHex")),
         validFrom = json.optString("validFrom"),
         validTo = json.optString("validTo"),
-        secAHex = json.optString("secAHex"),
-        secBHex = json.optString("secBHex"),
+        secAHex = ProfileSecretCipher.decrypt(json.optString("secAHex")),
+        secBHex = ProfileSecretCipher.decrypt(json.optString("secBHex")),
         keyRole = json.optInt("keyRole", 1),
-        accessToken = json.optString("accessToken"),
-        sdkToken = json.optString("sdkToken"),
-        controlPin = json.optString("controlPin"),
+        accessToken = ProfileSecretCipher.decrypt(json.optString("accessToken")),
+        sdkToken = ProfileSecretCipher.decrypt(json.optString("sdkToken")),
+        controlPin = ProfileSecretCipher.decrypt(json.optString("controlPin")),
         updatedAt = json.optLong("updatedAt", System.currentTimeMillis())
     )
 
@@ -521,22 +665,135 @@ class VehicleProfileStore(context: Context) {
         put("bleMac", bleMac)
         put("deviceId", deviceId)
         put("accountType", accountType)
-        put("rootKeyHex", rootKeyHex)
-        put("infoHex", infoHex)
-        put("edfHex", edfHex)
+        put("rootKeyHex", ProfileSecretCipher.encrypt(rootKeyHex))
+        put("infoHex", ProfileSecretCipher.encrypt(infoHex))
+        put("edfHex", ProfileSecretCipher.encrypt(edfHex))
         put("validFrom", validFrom)
         put("validTo", validTo)
-        put("secAHex", secAHex)
-        put("secBHex", secBHex)
+        put("secAHex", ProfileSecretCipher.encrypt(secAHex))
+        put("secBHex", ProfileSecretCipher.encrypt(secBHex))
         put("keyRole", keyRole)
-        put("accessToken", accessToken)
-        put("sdkToken", sdkToken)
-        put("controlPin", controlPin)
+        put("accessToken", ProfileSecretCipher.encrypt(accessToken))
+        put("sdkToken", ProfileSecretCipher.encrypt(sdkToken))
+        put("controlPin", ProfileSecretCipher.encrypt(controlPin))
         put("updatedAt", updatedAt)
+    }
+
+    private object ProfileSecretCipher {
+        private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+        private const val KEY_ALIAS = "qiri_profile_secrets_aes_gcm_v1"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val PREFIX = "enc:v1:"
+        private const val GCM_IV_LEN = 12
+        private const val GCM_TAG_BITS = 128
+
+        private val cipherLock = Any()
+        @Volatile
+        private var encryptionOperational: Boolean? = null
+
+        fun isEncrypted(raw: String): Boolean = raw.startsWith(PREFIX)
+
+        fun isAvailable(): Boolean {
+            encryptionOperational?.let { return it }
+            val probe = encrypt("probe")
+            val ok = probe.startsWith(PREFIX)
+            encryptionOperational = ok
+            return ok
+        }
+
+        fun encrypt(plain: String): String {
+            if (plain.isEmpty()) return ""
+            if (plain.startsWith(PREFIX)) return plain
+            return synchronized(cipherLock) {
+                val firstAttempt = runCatching {
+                    val key = getOrCreateSecretKey() ?: return@runCatching null
+                    encryptWithKey(key, plain)
+                }.getOrNull()
+                if (firstAttempt != null) {
+                    encryptionOperational = true
+                    return@synchronized firstAttempt
+                }
+                // Key may be corrupted or permanently invalidated; delete & regenerate once.
+                val retryAttempt = runCatching {
+                    val freshKey = regenerateSecretKey()
+                    encryptWithKey(freshKey, plain)
+                }.getOrNull()
+                if (retryAttempt != null) {
+                    encryptionOperational = true
+                    retryAttempt
+                } else {
+                    encryptionOperational = false
+                    plain
+                }
+            }
+        }
+
+        fun decrypt(stored: String): String {
+            if (stored.isEmpty()) return ""
+            if (!stored.startsWith(PREFIX)) return stored
+            return synchronized(cipherLock) {
+                runCatching {
+                    val key = getOrCreateSecretKey() ?: return@synchronized ""
+                    val packed = Base64.decode(stored.removePrefix(PREFIX), Base64.NO_WRAP)
+                    if (packed.size <= GCM_IV_LEN) return@synchronized ""
+                    val iv = packed.copyOfRange(0, GCM_IV_LEN)
+                    val cipherBytes = packed.copyOfRange(GCM_IV_LEN, packed.size)
+                    val cipher = Cipher.getInstance(TRANSFORMATION)
+                    cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, iv))
+                    String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
+                }.getOrDefault("")
+            }
+        }
+
+        private fun encryptWithKey(key: SecretKey, plain: String): String {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val iv = cipher.iv
+            val cipherBytes = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+            val packed = ByteArray(iv.size + cipherBytes.size)
+            System.arraycopy(iv, 0, packed, 0, iv.size)
+            System.arraycopy(cipherBytes, 0, packed, iv.size, cipherBytes.size)
+            return PREFIX + Base64.encodeToString(packed, Base64.NO_WRAP)
+        }
+
+        private fun getOrCreateSecretKey(): SecretKey? {
+            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val existing = runCatching { ks.getKey(KEY_ALIAS, null) as? SecretKey }.getOrNull()
+            if (existing != null) return existing
+            return generateNewSecretKey()
+        }
+
+        private fun regenerateSecretKey(): SecretKey {
+            runCatching {
+                val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                if (ks.containsAlias(KEY_ALIAS)) {
+                    ks.deleteEntry(KEY_ALIAS)
+                }
+            }
+            return generateNewSecretKey()
+        }
+
+        private fun generateNewSecretKey(): SecretKey {
+            val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+            val spec = KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+            keyGenerator.init(spec)
+            return keyGenerator.generateKey()
+        }
     }
 
     companion object {
         private val storeLock = Any()
+        private val SECRET_JSON_FIELDS = listOf(
+            "rootKeyHex", "infoHex", "edfHex", "secAHex", "secBHex",
+            "accessToken", "sdkToken", "controlPin"
+        )
         const val PREFS_NAME = "car_plus_profiles"
         private const val KEY_PROFILES = "profiles"
         private const val KEY_ACTIVE_VIN = "activeVin"

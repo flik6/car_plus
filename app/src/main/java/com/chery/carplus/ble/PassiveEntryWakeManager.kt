@@ -180,8 +180,9 @@ object PassiveEntryWakeManager {
             else -> "当前系统不支持后台蓝牙感应"
         }
 
+        val persistedEnabled = PassiveEntryStore.load(appContext, profile.vin).enabled
         PassiveEntryRuntime.updateWakeChannelStatus(
-            enabled = ok,
+            enabled = ok || persistedEnabled,
             active = ok,
             channelLabel = label,
             logMessage = msg

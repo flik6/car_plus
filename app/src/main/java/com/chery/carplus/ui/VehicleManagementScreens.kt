@@ -63,7 +63,8 @@ internal class VehicleManagementScreens(
     private val onVehicleUnbound: (vin: String) -> Unit,
     private val onStatusMessage: (String) -> Unit,
     private val vehicleLiveSpecsProvider: (vin: String) -> List<Pair<String, String>> = { emptyList() },
-    private val onOpenVehicleUpgrade: (VehicleUpgradeInfo?) -> Unit = {}
+    private val onOpenVehicleUpgrade: (VehicleUpgradeInfo?) -> Unit = {},
+    private val onVehicleBound: (vin: String, pin: String, isDefault: Boolean) -> Unit = { _, _, _ -> }
 ) {
 
     private var activeDialog: Dialog? = null
@@ -93,7 +94,7 @@ internal class VehicleManagementScreens(
     }
 
     fun dismissAll() {
-        runCatching { activeDialog?.dismiss() }
+        activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         activeDialog = null
         runCatching { activeDropdown?.dismiss() }
         activeDropdown = null
@@ -592,7 +593,7 @@ internal class VehicleManagementScreens(
                 lateinit var revokeBtn: TextView
                 revokeBtn = AppComponents.createActionButton(context, "撤销驾驶员授权", ButtonStyle.DANGER_TEXT) {
                     if (revokingAuth) return@createActionButton
-                    activeDialog?.dismiss()
+                    activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
                     activeDialog = AppComponents.showConfirmDialog(
                         context = context,
                         title = "撤销驾驶员授权",
@@ -890,67 +891,119 @@ internal class VehicleManagementScreens(
         val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         body.addView(listHost, lp())
 
-        fun loadRecords() {
+        val pageSize = 10
+        val loadedRecords = mutableListOf<AuthorizationOperationRecordItem>()
+        var currentPage = 0
+        var hasMore = false
+        var loadingPage = false
+
+        lateinit var renderRecordsList: () -> Unit
+        lateinit var loadRecordsPage: (Boolean) -> Unit
+
+        renderRecordsList = {
             listHost.removeAllViews()
-            listHost.addView(loadingHint("正在查询操作记录..."))
-            val active = profileProvider()
-            scope.launch {
-                val res = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.queryAuthorizationOperationRecords(
-                            accessToken = active.accessToken,
-                            vin = vin,
-                            subAccountId = item.receiverAccountId,
-                            page = 1,
-                            count = 30
+            if (loadedRecords.isEmpty()) {
+                val emptyCard = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
+                    addView(
+                        AppComponents.createEmptyState(
+                            context = context,
+                            icon = AppIconType.CLOCK,
+                            title = "暂无操作记录",
+                            subtitle = "该驾驶员的远程控车记录将在此按时间展示"
                         )
+                    )
+                }
+                listHost.addView(emptyCard, lp())
+            } else {
+                val timelineCard = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
+                    setPadding(dp(16), dp(6), dp(16), dp(6))
+                }
+                loadedRecords.forEachIndexed { idx, rec ->
+                    timelineCard.addView(buildOperationRecordRow(rec), lp())
+                    if (idx < loadedRecords.lastIndex) {
+                        timelineCard.addView(cardHairline())
                     }
                 }
-                listHost.removeAllViews()
-                res.onSuccess { records ->
-                    if (records.isEmpty()) {
-                        val emptyCard = LinearLayout(context).apply {
-                            orientation = LinearLayout.VERTICAL
-                            background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-                            addView(
-                                AppComponents.createEmptyState(
-                                    context = context,
-                                    icon = AppIconType.CLOCK,
-                                    title = "暂无操作记录",
-                                    subtitle = "该驾驶员的远程控车记录将在此按时间展示"
-                                )
-                            )
-                        }
-                        listHost.addView(emptyCard, lp())
+                listHost.addView(timelineCard, lp())
+                if (hasMore) {
+                    val moreBtn = AppComponents.createActionButton(
+                        context,
+                        if (loadingPage) "正在加载..." else "加载更多",
+                        ButtonStyle.SECONDARY
+                    ) {
+                        if (!loadingPage) loadRecordsPage(false)
+                    }
+                    moreBtn.isEnabled = !loadingPage
+                    listHost.addView(moreBtn, lp(top = dp(12), height = dp(44)))
+                }
+            }
+        }
+
+        loadRecordsPage = { reset ->
+            if (!loadingPage) {
+                val subId = item.receiverAccountId.trim()
+                if (subId.isBlank()) {
+                    listHost.removeAllViews()
+                    listHost.addView(errorBanner("缺少驾驶员账号标识，暂无法查询操作记录"))
+                } else {
+                    loadingPage = true
+                    val nextPage = if (reset) 1 else currentPage + 1
+                    if (reset) {
+                        loadedRecords.clear()
+                        currentPage = 0
+                        hasMore = false
+                        listHost.removeAllViews()
+                        listHost.addView(loadingHint("正在查询操作记录..."))
                     } else {
-                        val timelineCard = LinearLayout(context).apply {
-                            orientation = LinearLayout.VERTICAL
-                            background = rounded(CARD_BG, 18f, CARD_BORDER, 0.8f)
-                            setPadding(dp(16), dp(6), dp(16), dp(6))
-                        }
-                        records.forEachIndexed { idx, rec ->
-                            timelineCard.addView(buildOperationRecordRow(rec), lp())
-                            if (idx < records.lastIndex) {
-                                timelineCard.addView(cardHairline())
+                        renderRecordsList()
+                    }
+                    val active = profileProvider()
+                    scope.launch {
+                        val res = runCatching {
+                            withContext(Dispatchers.IO) {
+                                httpClient.queryAuthorizationOperationRecords(
+                                    accessToken = active.accessToken,
+                                    vin = vin,
+                                    subAccountId = subId,
+                                    page = nextPage,
+                                    count = pageSize
+                                )
                             }
                         }
-                        listHost.addView(timelineCard, lp())
+                        loadingPage = false
+                        res.onSuccess { records ->
+                            currentPage = nextPage
+                            if (reset) loadedRecords.clear()
+                            loadedRecords.addAll(records)
+                            hasMore = records.size >= pageSize
+                            renderRecordsList()
+                        }.onFailure { err ->
+                            if (err is CherySessionExpiredException) return@onFailure
+                            if (loadedRecords.isEmpty()) {
+                                listHost.removeAllViews()
+                                listHost.addView(errorBanner("记录加载失败：${err.message.orEmpty().take(90)}"))
+                                listHost.addView(
+                                    AppComponents.createActionButton(context, "重新加载", ButtonStyle.SECONDARY) {
+                                        loadRecordsPage(true)
+                                    },
+                                    lp(top = dp(12), height = dp(44))
+                                )
+                            } else {
+                                toast("加载更多失败：${err.message.orEmpty().take(60)}")
+                                renderRecordsList()
+                            }
+                        }
                     }
-                }.onFailure { err ->
-                    if (err is CherySessionExpiredException) return@onFailure
-                    listHost.addView(errorBanner("记录加载失败：${err.message.orEmpty().take(90)}"))
-                    listHost.addView(
-                        AppComponents.createActionButton(context, "重新加载", ButtonStyle.SECONDARY) {
-                            loadRecords()
-                        },
-                        lp(top = dp(12), height = dp(44))
-                    )
                 }
             }
         }
 
         onPushOverlaySubpage(root, null)
-        loadRecords()
+        loadRecordsPage(true)
     }
 
     private fun buildOperationRecordRow(rec: AuthorizationOperationRecordItem): LinearLayout {
@@ -1127,7 +1180,10 @@ internal class VehicleManagementScreens(
                         rememberVehicleSummaries(loadedVehicles, active.accessToken)
                         loadedVehicles.forEach { v ->
                             if (v.simStatus.isNotBlank()) {
-                                simStatusByVin.putIfAbsent(v.vin.uppercase(Locale.US), v.simStatus)
+                                val vinKey = v.vin.uppercase(Locale.US)
+                                if (!simStatusByVin.containsKey(vinKey)) {
+                                    simStatusByVin[vinKey] = v.simStatus
+                                }
                             }
                         }
                         renderVehicleCards()
@@ -1366,7 +1422,7 @@ internal class VehicleManagementScreens(
             var getPurchaseDateRef: (() -> String)? = null
 
             fun launchCancelCertificationFlow() {
-                activeDialog?.dismiss()
+                activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
                 activeDialog = AppComponents.showConfirmDialog(
                     context = context,
                     title = "取消车辆实名认证",
@@ -1415,7 +1471,7 @@ internal class VehicleManagementScreens(
             }
 
             fun launchUnbindVehicleFlow() {
-                activeDialog?.dismiss()
+                activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
                 activeDialog = AppComponents.showConfirmDialog(
                     context = context,
                     title = "解除车辆绑定",
@@ -2260,6 +2316,10 @@ internal class VehicleManagementScreens(
         val (pinBox, pinInput) = createPasswordToggleUnderlineInput("请设置 6 位数字 PIN 码", maxLength = 6)
         formCard.addView(pinBox, lp(top = dp(2)))
 
+        formCard.addView(formFieldHeader("确认 PIN 码", required = true), lp(top = dp(16)))
+        val (confirmPinBox, confirmPinInput) = createPasswordToggleUnderlineInput("请再次输入 6 位数字 PIN 码", maxLength = 6)
+        formCard.addView(confirmPinBox, lp(top = dp(2)))
+
         var setAsDefault = true
         val defaultSwitch = ToggleSwitch(context).apply {
             checked = true
@@ -2292,6 +2352,7 @@ internal class VehicleManagementScreens(
                 val host = hostInput.text.toString().trim()
                 val purchaseDate = normalizeDateOnly(getPurchaseDate())
                 val pin = pinInput.text.toString().trim()
+                val confirmPin = confirmPinInput.text.toString().trim()
 
                 if (vin.length != 17) {
                     toast("请输入完整的 17 位车架号 (VIN)")
@@ -2303,6 +2364,10 @@ internal class VehicleManagementScreens(
                 }
                 if (pin.length != 6 || !pin.all { it.isDigit() }) {
                     toast("请输入 6 位数字 PIN 码")
+                    return@buildPinnedBottomCta
+                }
+                if (confirmPin != pin) {
+                    toast("两次输入的 PIN 码不一致")
                     return@buildPinnedBottomCta
                 }
 
@@ -2329,6 +2394,7 @@ internal class VehicleManagementScreens(
                         if (ok) {
                             AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
                             toast("车辆添加成功")
+                            onVehicleBound(vin, pin, setAsDefault)
                             onPopOverlaySubpage()
                             onAdded()
                         } else {
@@ -2416,7 +2482,7 @@ internal class VehicleManagementScreens(
                     AppHaptics.perform(this, HapticLevel.LIGHT_TICK)
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     clipboard?.setPrimaryClip(ClipData.newPlainText(label, maskedValue))
-                    toast("已复制${label}")
+                    toast("已复制${label}（已脱敏）")
                 }
             }
             addView(

@@ -499,7 +499,7 @@ object WheelDateTimePicker {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 setColor(ThemeTokens.BG_SURFACE)
-                val r = dpF(context, 20f)
+                val r = dpF(context, 22f)
                 cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
             }
             setPadding(0, dp(context, 10f), 0, dp(context, 24f))
@@ -837,8 +837,13 @@ object WheelDateTimePicker {
         }
 
         AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.62f)
-        dialog.show()
-        MotionSpec.animateSheetEnter(outer)
+        MotionSpec.attachSheetSwipeToDismiss(outer, null, dialog)
+        if (MotionSpec.isHostActivityAlive(context)) {
+            runCatching {
+                dialog.show()
+                MotionSpec.animateSheetEnter(outer)
+            }
+        }
         return dialog
     }
 

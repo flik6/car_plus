@@ -74,6 +74,22 @@ data class VehicleSafetyHint(
         updatedAtMs > 0L && (nowMs - updatedAtMs) in 0L..maxAgeMs
 }
 
+enum class PassiveLockSuppressionReason(val key: String, val label: String) {
+    NONE("", ""),
+    MANUAL_LOCK("manual_lock", "手动锁车"),
+    WALK_AWAY_LOCK("walk_away_lock", "离车自动上锁");
+
+    companion object {
+        fun fromKey(raw: String?): PassiveLockSuppressionReason =
+            values().firstOrNull { it.key.equals(raw?.trim(), ignoreCase = true) } ?: NONE
+    }
+}
+
+data class PassiveLockSuppression(
+    val reason: PassiveLockSuppressionReason = PassiveLockSuppressionReason.NONE,
+    val recordedAtMs: Long = 0L
+)
+
 object PassiveEntryStore {
     private const val PREFS_NAME = "car_plus_passive_entry"
     private const val KEY_ACTIVE_VIN = "active_enabled_vin"
@@ -179,6 +195,63 @@ object PassiveEntryStore {
             locked = intToTriState(p.getInt("${k}hint_locked", -1)),
             updatedAtMs = p.getLong("${k}hint_at", 0L)
         )
+    }
+
+    fun updateVehicleLockHint(
+        context: Context,
+        vin: String,
+        locked: Boolean,
+        updatedAtMs: Long = System.currentTimeMillis()
+    ) {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return
+        val existing = getVehicleSafetyHint(context, normVin).takeIf { it.isFresh(updatedAtMs) }
+        updateVehicleSafetyHint(
+            context = context,
+            vin = normVin,
+            doorsClosed = existing?.doorsClosed,
+            engineStopped = existing?.engineStopped,
+            locked = locked,
+            updatedAtMs = updatedAtMs
+        )
+    }
+
+    fun recordLockSuppression(
+        context: Context,
+        vin: String,
+        reason: PassiveLockSuppressionReason,
+        recordedAtMs: Long = System.currentTimeMillis()
+    ) {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return
+        val k = prefix(normVin)
+        prefs(context).edit().apply {
+            if (reason == PassiveLockSuppressionReason.NONE) {
+                remove("${k}suppress_reason")
+                remove("${k}suppress_at")
+            } else {
+                putString("${k}suppress_reason", reason.key)
+                putLong("${k}suppress_at", recordedAtMs)
+            }
+        }.apply()
+    }
+
+    fun getLockSuppression(context: Context, vin: String): PassiveLockSuppression {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return PassiveLockSuppression()
+        val p = prefs(context)
+        val k = prefix(normVin)
+        val reason = PassiveLockSuppressionReason.fromKey(p.getString("${k}suppress_reason", ""))
+        val atMs = p.getLong("${k}suppress_at", 0L)
+        return if (reason == PassiveLockSuppressionReason.NONE || atMs <= 0L) {
+            PassiveLockSuppression()
+        } else {
+            PassiveLockSuppression(reason = reason, recordedAtMs = atMs)
+        }
+    }
+
+    fun clearLockSuppression(context: Context, vin: String) {
+        recordLockSuppression(context, vin, PassiveLockSuppressionReason.NONE, 0L)
     }
 
     private fun triStateToInt(value: Boolean?): Int = when (value) {

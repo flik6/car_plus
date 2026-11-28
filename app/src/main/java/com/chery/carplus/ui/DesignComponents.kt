@@ -1181,7 +1181,10 @@ object AppComponents {
         panel.alpha = 0f
 
         val xOff = if (alignEnd) anchor.width - popupWidthPx else 0
-        popup.showAsDropDown(anchor, xOff, dp(context, 6f))
+        if (!MotionSpec.isHostActivityAlive(context) || !anchor.isAttachedToWindow || anchor.windowToken == null) {
+            return popup
+        }
+        runCatching { popup.showAsDropDown(anchor, xOff, dp(context, 6f)) }.onFailure { return popup }
         panel.animate()
             .scaleX(1f)
             .scaleY(1f)
@@ -1278,7 +1281,7 @@ object AppComponents {
             }
             MotionSpec.attachPressPhysics(this, pressedScale = 0.96f)
             setOnClickListener {
-                dialog.dismiss()
+                MotionSpec.dismissSheetImmediately(dialog)
                 onConfirm()
             }
         }
@@ -1294,8 +1297,12 @@ object AppComponents {
         card.addView(btnRow)
 
         AppSystemInsets.installModalContent(dialog, card, dimAmount = 0.62f, horizontalMarginDp = 24f)
-        dialog.show()
-        MotionSpec.animateModalEnter(card)
+        if (MotionSpec.isHostActivityAlive(context)) {
+            runCatching {
+                dialog.show()
+                MotionSpec.animateModalEnter(card)
+            }
+        }
         return dialog
     }
 
@@ -1805,8 +1812,12 @@ object SixDigitPinSheet {
 
         AppSystemInsets.installBottomSheetContent(dialog, outer, dimAmount = 0.58f)
         MotionSpec.attachSheetSwipeToDismiss(outer, null, dialog)
-        dialog.show()
-        MotionSpec.animateSheetEnter(outer)
+        if (MotionSpec.isHostActivityAlive(context)) {
+            runCatching {
+                dialog.show()
+                MotionSpec.animateSheetEnter(outer)
+            }
+        }
         return dialog
     }
 }

@@ -129,14 +129,6 @@ class VehicleVisualView @JvmOverloads constructor(
             }
         }
 
-    var doorsOpen: Boolean = false
-        set(value) {
-            if (field != value) {
-                field = value
-                pushStateToScene()
-            }
-        }
-
     var engineRunning: Boolean = false
         set(value) {
             if (field != value) {
@@ -304,7 +296,7 @@ class VehicleVisualView @JvmOverloads constructor(
             setOnClickListener {
                 if (downloadFailed && !isDestroyed) {
                     downloadFailed = false
-                    requestModelLoad(modelKey, isVehicleSwitch = false)
+                    requestModelLoad(modelKey, isVehicleSwitch = false, forceReload = true)
                 }
             }
         }
@@ -344,14 +336,11 @@ class VehicleVisualView @JvmOverloads constructor(
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    @Suppress("DEPRECATION")
     private fun configureWebSettings(s: WebSettings) {
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
-        s.allowFileAccess = true
-        s.allowContentAccess = true
-        s.allowFileAccessFromFileURLs = true
-        s.allowUniversalAccessFromFileURLs = false
+        s.allowFileAccess = false
+        s.allowContentAccess = false
         s.builtInZoomControls = false
         s.displayZoomControls = false
         s.setSupportZoom(false)
@@ -437,7 +426,21 @@ class VehicleVisualView @JvmOverloads constructor(
         }
     }
 
-    private fun requestModelLoad(rawHint: String, isVehicleSwitch: Boolean) {
+    fun reloadCurrentModel() {
+        if (isDestroyed) return
+        activeLoadedKey = null
+        activeLoadedUrl = null
+        sceneReady = false
+        if (engineReady) {
+            requestModelLoad(modelKey, isVehicleSwitch = false, forceReload = true)
+        }
+    }
+
+    private fun requestModelLoad(
+        rawHint: String,
+        isVehicleSwitch: Boolean,
+        forceReload: Boolean = false
+    ) {
         if (isDestroyed || !engineReady) return
         val resolvedKey = VehicleModelRepository.resolveModelKey(rawHint)
         val displayName = VehicleModelRepository.displayNameForKey(resolvedKey)
@@ -489,7 +492,7 @@ class VehicleVisualView @JvmOverloads constructor(
             if (isDestroyed || loadGeneration != gen) return@launch
 
             result.onSuccess { ready ->
-                if (activeLoadedKey == ready.key && activeLoadedUrl == ready.cacheUrl && sceneReady) {
+                if (!forceReload && activeLoadedKey == ready.key && activeLoadedUrl == ready.cacheUrl && sceneReady) {
                     fadeOutPlaceholderAndRevealWebView()
                     return@onSuccess
                 }
@@ -503,13 +506,16 @@ class VehicleVisualView @JvmOverloads constructor(
                 evalJs("window.Car3D && window.Car3D.setCollapsedVisibleRatio($collapsedVisibleRatio);")
                 evalJs("window.Car3D && window.Car3D.setExpandedVisibleRatio && window.Car3D.setExpandedVisibleRatio($expandedVisibleRatio);")
                 pushEntranceStyleToScene()
-                evalJs("window.Car3D && window.Car3D.loadModel($safeKey, $safeUrl);")
+                evalJs("window.Car3D && window.Car3D.loadModel($safeKey, $safeUrl, $forceReload);")
 
                 // Only check manifest in background when loaded from cache; never re-downloads unless updated
                 if (ready.fromCache) {
                     scheduleSilentModelUpdateCheck(ready.key)
                 }
             }.onFailure {
+                activeLoadedKey = null
+                activeLoadedUrl = null
+                sceneReady = false
                 showDownloadError(displayName)
             }
         }
@@ -518,14 +524,11 @@ class VehicleVisualView @JvmOverloads constructor(
     private fun scheduleSilentModelUpdateCheck(key: String) {
         bgUpdateJob?.cancel()
         bgUpdateJob = viewScope.launch(Dispatchers.IO) {
-            val check = runCatching {
+            runCatching {
                 VehicleModelRepository.checkAndUpdateInBackground(context, key)
-            }.getOrNull()
-            if (check?.updated == true && !check.cacheUrl.isNullOrBlank()) {
-                // Updated model is now safely cached on disk and will be used automatically
-                // on the next launch or vehicle switch without disrupting the user's current view.
-                activeLoadedUrl = check.cacheUrl
             }
+            // Do not mutate activeLoadedUrl here: keep activeLoadedUrl pointing at the currently rendered
+            // GLB on the main thread so the newly cached URL (?v=<newSha8>) loads cleanly on next reload/switch.
         }
     }
 
@@ -643,7 +646,6 @@ class VehicleVisualView @JvmOverloads constructor(
         pushEntranceStyleToScene()
         val payload = JSONObject().apply {
             put("vehicleLocked", vehicleLocked)
-            put("doorsOpen", doorsOpen)
             put("trunkOpen", trunkOpen)
             put("skylightOpen", skylightOpen)
             put("skylightMode", skylightMode)
@@ -815,6 +817,7 @@ class VehicleVisualView @JvmOverloads constructor(
                     VehicleModelRepository.getCachedModelFile(context, key)?.delete()
                     activeLoadedKey = null
                     activeLoadedUrl = null
+                    sceneReady = false
                     showPlaceholderOverlay(animateIn = false)
                     showDownloadError(VehicleModelRepository.displayNameForKey(key))
                     return@post

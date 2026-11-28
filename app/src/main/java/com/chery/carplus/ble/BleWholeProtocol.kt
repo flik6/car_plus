@@ -33,6 +33,7 @@ object BleWholeProtocol {
     const val INGEEK_SINGLE_PACKET = 0xA1
     const val INGEEK_LAST_PACKET = 0x01
     const val INGEEK_START_MASK = 0xF0
+    const val INGEEK_MAX_MULTI_PACKETS = 15
 
     enum class FrameFormat {
         /** Requested version/encryption/serial/message-id/length header. */
@@ -161,9 +162,14 @@ object BleWholeProtocol {
                 offset = end
             }
         }
+        require(chunks.size <= INGEEK_MAX_MULTI_PACKETS) {
+            "InGeek extended framing supports at most $INGEEK_MAX_MULTI_PACKETS chunks " +
+                "(payload=${payload.size}B, chunk=${maxPayloadChunkSize}B → ${chunks.size} chunks); " +
+                "negotiate a larger BLE MTU first"
+        }
         return chunks.mapIndexed { index, chunk ->
             val packFlag = if (index == 0) {
-                (INGEEK_START_MASK + (chunks.size and 0x0F)) and 0xFF
+                (INGEEK_START_MASK or chunks.size) and 0xFF
             } else {
                 (chunks.size - index) and 0xFF
             }
@@ -289,7 +295,9 @@ class BleFrameAssembler(
         }
 
         val key = ReassemblyKey(packet.messageId, packet.serialNum)
-        if ((packet.packFlag and BleWholeProtocol.INGEEK_START_MASK) == BleWholeProtocol.INGEEK_START_MASK) {
+        if (packet.packFlag > BleWholeProtocol.INGEEK_START_MASK &&
+            (packet.packFlag and BleWholeProtocol.INGEEK_START_MASK) == BleWholeProtocol.INGEEK_START_MASK
+        ) {
             if (packet.lengthField > maximumPayloadLength) {
                 throw IllegalArgumentException("Declared payload ${packet.lengthField} exceeds limit")
             }

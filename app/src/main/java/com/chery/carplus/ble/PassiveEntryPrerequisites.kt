@@ -18,6 +18,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import com.chery.carplus.profile.VehicleProfile
 import java.util.Locale
@@ -134,7 +135,13 @@ object PassiveEntryPrerequisiteChecker {
 
     fun isCompanionAssociated(context: Context, bleMac: String): Boolean {
         val targetMac = normalizeMac(bleMac) ?: return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
         if (!isCompanionSupported(context)) return false
+        return isCompanionAssociatedApi31(context, targetMac)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun isCompanionAssociatedApi31(context: Context, targetMac: String): Boolean {
         val cdm = context.applicationContext.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
             ?: return false
         return runCatching {
@@ -315,7 +322,7 @@ object PassiveEntryPrerequisiteChecker {
             onError("尚未同步车辆蓝牙信息")
             return
         }
-        if (!isCompanionSupported(activity)) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !isCompanionSupported(activity)) {
             onError("当前系统不支持设备关联，将使用后台省电监听")
             return
         }
@@ -323,6 +330,24 @@ object PassiveEntryPrerequisiteChecker {
             onAlreadyAssociated()
             return
         }
+        requestCompanionAssociationApi31(
+            activity = activity,
+            normalizedMac = normalizedMac,
+            onIntentSenderReady = onIntentSenderReady,
+            onAlreadyAssociated = onAlreadyAssociated,
+            onError = onError
+        )
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    @SuppressLint("MissingPermission")
+    private fun requestCompanionAssociationApi31(
+        activity: Activity,
+        normalizedMac: String,
+        onIntentSenderReady: (IntentSender) -> Unit,
+        onAlreadyAssociated: () -> Unit,
+        onError: (String) -> Unit
+    ) {
         val cdm = activity.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
         if (cdm == null) {
             onError("系统设备关联服务不可用")

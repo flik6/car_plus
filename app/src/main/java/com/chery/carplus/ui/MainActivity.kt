@@ -60,6 +60,7 @@ import com.chery.carplus.ble.PassiveEntryRuntime
 import com.chery.carplus.ble.PassiveEntrySnapshot
 import com.chery.carplus.ble.PassiveEntryStore
 import com.chery.carplus.ble.PassiveEntryWakeManager
+import com.chery.carplus.ble.PassiveLockSuppressionReason
 import com.chery.carplus.ble.PrerequisiteId
 import com.chery.carplus.ble.SessionSnapshot
 import com.chery.carplus.cloud.CheryDeviceBindingRequiredException
@@ -459,8 +460,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     // Active sheet live views (updated if open)
     private var sheetClimateTempView: TextView? = null
-    private var sheetKeyStatusView: TextView? = null
-    private var sheetKeyActionButton: TextView? = null
 
     // Live state
     private var currentProfile: VehicleProfile? = null
@@ -469,8 +468,25 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private var climateTemperatureCelsius = 24.0
     private var bleConnected = false
     private var bleNearby = false
+    private data class PendingBleActionMeta(
+        val label: String,
+        val vin: String,
+        val isPassiveAuto: Boolean
+    )
+
     private var lastPairingPin = ""
-    private var lastBleActionLabel = ""
+    private val pendingBleActionMetaByKey = mutableMapOf<String, ArrayDeque<PendingBleActionMeta>>()
+    private val lastPassiveAutoUnlockActiveByVin = mutableMapOf<String, Boolean>()
+    private var foregroundLiveBleLocked: Boolean? = null
+    private var foregroundLiveBleDoorsOpen: Boolean? = null
+    private var foregroundLiveBleEngineRunning: Boolean? = null
+    private var foregroundLiveBleUpdatedElapsedMs = 0L
+    private var lastTelemetrySyncedElapsedMs = 0L
+    private var foregroundSessionReadyElapsedMs = 0L
+    private var foregroundBleDisconnectedAtElapsedMs = 0L
+    private var foregroundSessionUnlockEvaluated = false
+    private var foregroundConsecutiveNearRssiHits = 0
+    private var pendingForegroundUnlockCheckRunnable: Runnable? = null
     private var energyShowsRange = false
     private var cloudTripTrackEnabled: Boolean? = null
     private var lastKnownAntiTheftEnabled: Boolean? = null
@@ -518,7 +534,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             onVehicleUnbound = { unboundVin -> handleVehicleUnbound(unboundVin) },
             onStatusMessage = { showHomeStatus(it) },
             vehicleLiveSpecsProvider = { vin -> buildActiveVehicleLiveSpecs(vin) },
-            onOpenVehicleUpgrade = { prefetched -> featureSheets.showVehicleUpgradeSheet(prefetched) }
+            onOpenVehicleUpgrade = { prefetched -> featureSheets.showVehicleUpgradeSheet(prefetched) },
+            onVehicleBound = { boundVin, boundPin, isDefault ->
+                handleManagementVehicleBound(boundVin, boundPin, isDefault)
+            }
         )
         featureSheets = VehicleFeatureSheets(
             context = this,
@@ -542,6 +561,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             sessionVehiclePin = newPin
                             currentProfile = updated ?: active
                         }
+                        CarWidgetManager.updateAllWidgets(this@MainActivity)
                     }
                 }
             },
@@ -568,6 +588,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             requirePinEveryTimeProvider = { uiPrefs.getBoolean(KEY_REQUIRE_PIN_EVERY_TIME, true) },
             onRequirePinEveryTimeChanged = { enabled ->
                 uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, enabled).commit()
+                CarWidgetManager.updateAllWidgets(this)
                 showHomeStatus(if (enabled) "已开启每次控车验证 PIN 码" else "已关闭每次控车验证 PIN 码")
             },
             onOpenOverlaySubpage = { view, onDestroy -> pushSubpageOverlay(view, onDestroy) },
@@ -653,14 +674,27 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             onProceedEnableAfterPrerequisites = { profile, onDone ->
                 verifyPinAndEnablePassiveEntry(profile, onDone)
             },
-            onConfigUpdated = {
+            onConfigUpdated = { updatedCfg ->
                 securityPassiveRefreshCallback?.invoke()
+                val vinKey = updatedCfg.vin.trim().uppercase(Locale.US)
+                val prevActive = lastPassiveAutoUnlockActiveByVin[vinKey] ?: false
+                val nowActive = updatedCfg.enabled && updatedCfg.autoUnlockEnabled
+                lastPassiveAutoUnlockActiveByVin[vinKey] = nowActive
+                // P2-29: only clear MANUAL_LOCK suppression & trigger auto-unlock when auto-unlock transitions false -> true
+                if (!prevActive && nowActive) {
+                    PassiveEntryRuntime.clearLockSuppression(this, updatedCfg.vin)
+                    triggerForegroundPassiveAutoUnlockIfReady(forceReevaluate = true)
+                }
             }
         )
 
-        PassiveEntryRuntime.onAutoActionExecuted = { actionKey, _ ->
+        PassiveEntryRuntime.onAutoActionExecuted = { actionKey, vin ->
             runOnUiThread {
-                val label = if (actionKey == "unlock") "靠近自动解锁" else "离车自动上锁"
+                val activeVin = profileStore.getActiveProfile().vin
+                if (activeVin.equals(vin, ignoreCase = true) && (actionKey == "unlock" || actionKey == "lock")) {
+                    applyOptimisticAction(actionKey)
+                }
+                val label = if (actionKey == "unlock") "自动解锁" else "离车自动上锁"
                 showHomeStatus("蓝牙无感已执行：$label")
                 scheduleTelemetryRefresh()
             }
@@ -1054,6 +1088,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
         val wasBg = wasBackgrounded
         wasBackgrounded = false
+        if (::featureSheets.isInitialized) {
+            featureSheets.onHostResume()
+        }
         val homeVisible = currentScreen == Screen.HOME && subpageOverlayStack.isEmpty()
         if (homeVisible) {
             carVisual?.onHostResume()
@@ -1112,6 +1149,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         if (::passiveEntrySheets.isInitialized) {
             passiveEntrySheets.refreshIfOpen()
         }
+        if (bleController.isSessionReady() && !foregroundSessionUnlockEvaluated) {
+            scheduleForegroundPassiveAutoUnlockCheck(forceReevaluate = false)
+        }
     }
 
     private fun cancelPendingEntrancePreview() {
@@ -1122,35 +1162,49 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     override fun onPause() {
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
+        cancelPendingForegroundPassiveUnlockCheck()
         cancelPendingEntrancePreview()
         stopPeriodicHomeRefresh()
         stopForegroundBleRssiPolling()
         stopLiveDeviceLocationUpdates()
         carVisual?.onHostPause()
+        if (::featureSheets.isInitialized) {
+            featureSheets.onHostPause()
+        }
         super.onPause()
     }
 
     override fun onStop() {
         super.onStop()
         wasBackgrounded = true
+        cancelPendingForegroundPassiveUnlockCheck()
         // Snapshot live foreground proximity state BEFORE tearing down GATT for background handoff.
-        val wasNear = bleController.isSessionReady() || bleConnected
-        val lastRssi = bleController.lastProximityRssi
+        val activeVin = profileStore.getActiveProfile().vin.trim().uppercase(Locale.US)
+        val enabledPassiveVin = PassiveEntryStore.getActiveEnabledVin(this).trim().uppercase(Locale.US)
+        val samePassiveVehicle = enabledPassiveVin.isNotBlank() && activeVin == enabledPassiveVin
+        val wasNear = samePassiveVehicle && (bleController.isSessionReady() || bleConnected)
+        val lastRssi = if (samePassiveVehicle) bleController.lastProximityRssi else null
+        val alreadyUnlocked = samePassiveVehicle && (
+            foregroundLiveBleLocked == false || activeTelemetry?.doorLocked == false
+        )
         bleController.stopAutoProximityWatch()
-        if (PassiveEntryStore.getActiveEnabledVin(this).isNotBlank()) {
+        if (enabledPassiveVin.isNotBlank()) {
             bleController.disconnect()
         }
         PassiveEntryRuntime.setForegroundAppActive(
             context = this,
             active = false,
             handoffFromNearSession = wasNear,
-            handoffRssi = lastRssi
+            handoffRssi = lastRssi,
+            handoffVin = activeVin,
+            handoffAlreadyUnlocked = alreadyUnlocked
         )
     }
 
     override fun onDestroy() {
         pendingResumeBleRunnable?.let(mainHandler::removeCallbacks)
         pendingResumeBleRunnable = null
+        cancelPendingForegroundPassiveUnlockCheck()
         cancelPendingEntrancePreview()
         pendingEntrancePreviewStyle = null
         pendingShortcutRunnable?.let(contentFrame::removeCallbacks)
@@ -2039,7 +2093,13 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     sdkToken = login.sdkToken
                 )
                 val saved = withContext(Dispatchers.IO) {
-                    profileStore.saveProfile(profile, activate = true)
+                    profileStore.pruneProfilesNotMatchingAccount(userId, resolvedMobile)
+                    profileStore.saveProfile(
+                        profile = profile,
+                        activate = true,
+                        preserveExistingPinIfBlank = true,
+                        preserveExistingBleKeysIfBlank = true
+                    )
                 }
                 managementScreens.rememberVehicleSummaries(vehicles, saved.accessToken)
                 if (primary != null) {
@@ -2784,8 +2844,32 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         pushSubpageOverlay(addView)
     }
 
-    private fun handleVehicleBound(boundVin: String = "", boundPin: String = "") {
-        popSubpageOverlay()
+    private fun handleManagementVehicleBound(boundVin: String, boundPin: String, isDefault: Boolean) {
+        val activeProfile = profileStore.getActiveProfile()
+        if (isDefault || activeProfile.vin.isBlank()) {
+            handleVehicleBound(boundVin = boundVin, boundPin = boundPin, shouldPopOverlay = false)
+            return
+        }
+        val cleanVin = boundVin.trim().uppercase(Locale.US)
+        val cleanPin = boundPin.trim()
+        if (cleanVin.isNotBlank() && cleanPin.length == 6 && cleanPin.all { it.isDigit() }) {
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) {
+                    profileStore.updateControlPin(cleanVin, cleanPin)
+                }
+            }
+        }
+        syncCloudVehicleMeta()
+    }
+
+    private fun handleVehicleBound(
+        boundVin: String = "",
+        boundPin: String = "",
+        shouldPopOverlay: Boolean = true
+    ) {
+        if (shouldPopOverlay) {
+            popSubpageOverlay()
+        }
         val activeProfile = profileStore.getActiveProfile()
         if (activeProfile.accessToken.isBlank()) return
         lifecycleScope.launch {
@@ -3093,6 +3177,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             onEntranceStyleChanged = { newStyle ->
                 carVisual?.entranceStyle = newStyle
                 pendingEntrancePreviewStyle = newStyle
+            },
+            fetchRegionCities = {
+                val active = profileStore.getActiveProfile()
+                httpClient.fetchRegionCities(active.accessToken)
             }
         )
         settingsScreen = screen
@@ -3355,6 +3443,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                     profileStore.updateControlPin(profile.vin, pin)
                                 } ?: profileStore.getActiveProfile()
                                 uiPrefs.edit().putBoolean(KEY_REQUIRE_PIN_EVERY_TIME, targetChecked).commit()
+                                CarWidgetManager.updateAllWidgets(this@MainActivity)
                                 setChecked(targetChecked, animate = true)
                                 dismiss()
                                 val msg = if (targetChecked) "已开启每次控车验证 PIN 码" else "已关闭每次控车验证 PIN 码"
@@ -3411,6 +3500,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         fun refreshPassiveEntrySecurityRow() {
             val profile = profileStore.getActiveProfile()
             val cfg = PassiveEntryStore.load(this, profile.vin)
+            val vinKey = profile.vin.trim().uppercase(Locale.US)
+            if (vinKey.isNotBlank()) {
+                lastPassiveAutoUnlockActiveByVin[vinKey] = cfg.enabled && cfg.autoUnlockEnabled
+            }
             val report = PassiveEntryPrerequisiteChecker.evaluate(this, profile)
             val snap = PassiveEntryRuntime.currentSnapshot()
             passiveSwitch.setChecked(cfg.enabled, animate = false)
@@ -3471,6 +3564,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     ) {
                         val currentCfg = PassiveEntryStore.load(this@MainActivity, profile.vin)
                         PassiveEntryStore.save(this@MainActivity, currentCfg.copy(enabled = false))
+                        val vinKey = profile.vin.trim().uppercase(Locale.US)
+                        if (vinKey.isNotBlank()) {
+                            lastPassiveAutoUnlockActiveByVin[vinKey] = false
+                        }
                         PassiveEntryWakeManager.disable(this@MainActivity, profile.bleMac)
                         passiveSwitch.setChecked(false, animate = true)
                         refreshPassiveEntrySecurityRow()
@@ -3581,6 +3678,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         withContext(Dispatchers.IO) {
                             profileStore.updateControlPin(profile.vin, "")
                         }?.let { currentProfile = it }
+                        CarWidgetManager.updateAllWidgets(this@MainActivity)
                     }
                     Toast.makeText(this@MainActivity, "本机 PIN 码已失效，请重新验证", Toast.LENGTH_SHORT).show()
                     promptAntiTheftPin(targetEnabled)
@@ -3622,6 +3720,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         currentProfile = withContext(Dispatchers.IO) {
                             profileStore.updateControlPin(profile.vin, pin)
                         } ?: profileStore.getActiveProfile()
+                        CarWidgetManager.updateAllWidgets(this@MainActivity)
                         dismiss()
                         submitAntiTheftToggle(targetEnabled, pin)
                     } else {
@@ -5836,7 +5935,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         carVisual?.apply {
             modelKey = modelName.ifBlank { "arrizo8" }
             vehicleLocked = effectiveLocked
-            doorsOpen = physicalDoorsOpen
             climateOn = acActive
             climateTemp = climateTemperatureCelsius
             trunkOpen = trunkIsOpen
@@ -6000,6 +6098,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private fun getBestDeviceGcj02Location(): Pair<Double, Double>? {
         if (!hasDeviceLocationPermission()) return null
         val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
@@ -6493,6 +6592,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             if (cloud != null) {
                 persistVehicleMetadata(cloud)
             } else {
+                clearVehicleMetadata()
                 uiPrefs.edit()
                     .putString(KEY_MODEL_NAME, item.displayName)
                     .putString(KEY_PLATE_NO, item.plateNo)
@@ -6537,6 +6637,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             refreshHomeHeaderAndRows()
             startProximityWhenPermitted()
+            syncCloudVehicleMeta()
             refreshTelemetry(silent = false)
             if (!hasCompleteKeyMaterial(saved)) {
                 launchCloudProvision(saved, automatic = true)
@@ -7020,35 +7121,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     private fun refreshSecuritySheetIfOpen() {
         securityPassiveRefreshCallback?.invoke()
         if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
-        val statusTv = sheetKeyStatusView ?: return
-        val profile = profileStore.getActiveProfile()
-        val ready = hasCompleteKeyMaterial(profile)
-        val bleReady = bleConnected || bleController.isSessionReady()
-        val lines = mutableListOf<String>()
-        lines += when {
-            bleReady -> "通道状态：手机钥匙已连接（蓝牙直连）"
-            bleNearby || bleController.isVehicleNearby -> "通道状态：发现附近车辆，正在建立蓝牙连接..."
-            else -> "通道状态：手机钥匙已断开连接（当前使用远程网络）"
-        }
-        lines += if (ready) {
-            "本地钥匙材料：已就绪（靠近车辆自动无感连接）"
-        } else {
-            "本地钥匙材料：尚未同步，请点击下方一键拉取"
-        }
-        if (lastPairingPin.isNotBlank() && !bleReady) {
-            lines += "最近动态配对码：$lastPairingPin"
-        }
-        statusTv.text = lines.joinToString("\n")
-
-        sheetKeyActionButton?.apply {
-            isEnabled = !provisioningActive
-            alpha = if (provisioningActive) 0.6f else 1f
-            text = when {
-                provisioningActive -> "正在从云端拉取并解封..."
-                ready -> "重新从云端拉取并更新钥匙"
-                else -> "从云端一键拉取并解封新车钥匙"
-            }
-        }
     }
 
     private fun showPinConfigSheet(profile: VehicleProfile) {
@@ -7071,6 +7143,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 if (updated != null && profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
                     currentProfile = updated
                 }
+                CarWidgetManager.updateAllWidgets(this@MainActivity)
             }
             showHomeStatus("PIN 码已保存")
         }
@@ -7080,27 +7153,53 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     // Smart Dual-Mode Command Router (BLE Nearby -> HTTP Fallback)
     // =========================================================================
 
+    private fun enqueuePendingBleActionMeta(actionKey: String, meta: PendingBleActionMeta) {
+        val queue = pendingBleActionMetaByKey.getOrPut(actionKey) { ArrayDeque() }
+        while (queue.size >= 8) {
+            queue.removeFirst()
+        }
+        queue.addLast(meta)
+    }
+
+    private fun popLastPendingBleActionMeta(actionKey: String) {
+        val queue = pendingBleActionMetaByKey[actionKey] ?: return
+        if (queue.isNotEmpty()) queue.removeLast()
+        if (queue.isEmpty()) pendingBleActionMetaByKey.remove(actionKey)
+    }
+
+    private fun consumePendingBleActionMeta(actionKey: String): PendingBleActionMeta? {
+        val queue = pendingBleActionMetaByKey[actionKey] ?: return null
+        val meta = queue.removeFirstOrNull()
+        if (queue.isEmpty()) pendingBleActionMetaByKey.remove(actionKey)
+        return meta
+    }
+
     private fun executeBleActionImmediate(
         actionKey: String,
         label: String,
         temperatureCelsius: Double?
     ): Boolean {
-        lastBleActionLabel = label
+        val activeVin = profileStore.getActiveProfile().vin
+        enqueuePendingBleActionMeta(
+            actionKey,
+            PendingBleActionMeta(label = label, vin = activeVin, isPassiveAuto = false)
+        )
         val accepted = if (temperatureCelsius != null) {
             bleController.sendVehicleAction(actionKey, temperatureCelsius, 10)
         } else {
             bleController.sendVehicleAction(actionKey)
         }
         if (accepted) {
-            applyOptimisticAction(actionKey)
+            // P2-31: wait for T-Box 0x04 confirmation in onActionResult() before committing optimistic lock/widget/cooldown state.
             showHomeStatus(
                 if (bleController.isSessionReady()) {
-                    "蓝牙直连已发送：$label"
+                    "蓝牙直连指令已下发：$label..."
                 } else {
                     "蓝牙钥匙连接中，已排队：$label"
                 }
             )
-            scheduleTelemetryRefresh()
+        } else {
+            popLastPendingBleActionMeta(actionKey)
         }
         return accepted
     }
@@ -7170,6 +7269,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                                 profile
                             }
                             currentProfile = latestProfile
+                            if (!offlineBleMatch) {
+                                CarWidgetManager.updateAllWidgets(this@MainActivity)
+                            }
                             dismiss()
                             if (!executeBleActionImmediate(actionKey, label, temperatureCelsius)) {
                                 sendHttpVehicleCommand(latestProfile, actionKey, label, temperatureCelsius, pin, extraParams)
@@ -7223,9 +7325,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             val params = buildMap {
                 putAll(extraParams)
                 if (temperatureCelsius != null) {
-                    val rounded = temperatureCelsius.roundToInt().toString()
-                    put("temperature", rounded)
-                    put("airTemperature", rounded)
+                    val formatted = CheryHttpClient.formatAcTemperatureParam(temperatureCelsius)
+                    put("temperature", formatted)
+                    put("airTemperature", formatted)
                 }
             }
             lifecycleScope.launch {
@@ -7266,6 +7368,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                             if (cleared != null && profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
                                 currentProfile = cleared
                             }
+                            CarWidgetManager.updateAllWidgets(this@MainActivity)
                         }
                     }
                     val pinErrMsg = result.resultMessage.ifBlank { "PIN 码错误，请重新输入" }.take(40)
@@ -7285,6 +7388,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         profile
                     }
                     if (isStillActive) currentProfile = updatedProfile
+                    CarWidgetManager.updateAllWidgets(this@MainActivity)
                     dismiss()
                     handleRemoteResult(result, updatedProfile, actionKey, label, temperatureCelsius, pin, extraParams)
                 }
@@ -7308,9 +7412,9 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         val params = buildMap {
             putAll(extraParams)
             if (temperatureCelsius != null) {
-                val rounded = temperatureCelsius.roundToInt().toString()
-                put("temperature", rounded)
-                put("airTemperature", rounded)
+                val formatted = CheryHttpClient.formatAcTemperatureParam(temperatureCelsius)
+                put("temperature", formatted)
+                put("airTemperature", formatted)
             }
         }
         showHomeStatus("正在下发：$label...")
@@ -7359,11 +7463,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         if (saved != null && profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
                             currentProfile = saved
                         }
+                        CarWidgetManager.updateAllWidgets(this@MainActivity)
                     }
                 }
             }
             if (isStillActive) {
-                applyOptimisticAction(actionKey)
+                if (actionKey == "lock") {
+                    recordManualLockOrUnlockForPassive(profile.vin, locked = true)
+                } else if (actionKey == "unlock") {
+                    recordManualLockOrUnlockForPassive(profile.vin, locked = false)
+                }
+                applyOptimisticAction(actionKey, extraParams)
                 showHomeStatus("已完成：$label")
                 scheduleTelemetryRefresh()
             }
@@ -7376,6 +7486,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     } ?: profileStore.getActiveProfile()
                     if (profileStore.getActiveProfile().vin.equals(profile.vin, ignoreCase = true)) {
                         currentProfile = cleared
+                        CarWidgetManager.updateAllWidgets(this@MainActivity)
                         showHomeStatus("本机 PIN 码已失效，请重新验证")
                         showVehiclePinSheet(cleared, actionKey, label, temperatureCelsius, extraParams)
                     }
@@ -7391,7 +7502,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
     }
 
-    private fun applyOptimisticAction(actionKey: String) {
+    private fun applyOptimisticAction(
+        actionKey: String,
+        extraParams: Map<String, String> = emptyMap()
+    ) {
         // Cancel any pre-action telemetry request so its stale response cannot revert optimistic UI.
         telemetryJob?.cancel()
         val current = activeTelemetry
@@ -7399,8 +7513,30 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             activeTelemetry = when (actionKey) {
                 "lock" -> current.copy(doorLocked = true, doorLockState = "0", doorLock = "0")
                 "unlock" -> current.copy(doorLocked = false, doorLockState = "1", doorLock = "1")
-                "ac_on" -> current.copy(acOn = true, acState = "1", airState = "1")
-                "ac_off" -> current.copy(acOn = false, acState = "0", airState = "0")
+                "ac_on" -> current.copy(
+                    acOn = true,
+                    acState = "1",
+                    airState = "1",
+                    airPurification = extraParams["airPM"] ?: current.airPurification,
+                    fWinHeatingState = extraParams["frontDefrost"] ?: current.fWinHeatingState,
+                    rWinHeatingState = extraParams["rearDefrost"] ?: current.rWinHeatingState,
+                    dSeatHeatingState = extraParams["driverHeating"] ?: current.dSeatHeatingState,
+                    pSeatHeatingState = extraParams["passengerHeating"] ?: current.pSeatHeatingState,
+                    dSeatVentilateState = extraParams["driverVent"] ?: current.dSeatVentilateState,
+                    pSeatVentilateState = extraParams["passengerVent"] ?: current.pSeatVentilateState
+                )
+                "ac_off" -> current.copy(
+                    acOn = false,
+                    acState = "0",
+                    airState = "0",
+                    airPurification = "0",
+                    fWinHeatingState = "0",
+                    rWinHeatingState = "0",
+                    dSeatHeatingState = "0",
+                    pSeatHeatingState = "0",
+                    dSeatVentilateState = "0",
+                    pSeatVentilateState = "0"
+                )
                 "tailgate_open", "trunk_open" -> current.copy(trunkOpen = true, trunkState = "1", tailgateState = "1")
                 "tailgate_close", "trunk_close" -> current.copy(trunkOpen = false, trunkState = "0", tailgateState = "0")
                 "skylight_open" -> current.copy(skylightState = "open")
@@ -7490,6 +7626,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
             }
             result.onSuccess {
                 activeTelemetry = it
+                lastTelemetrySyncedElapsedMs = SystemClock.elapsedRealtime()
                 syncPassiveEntrySafetyHint(profile.vin, it)
                 val resolvedPlate = firstNonBlank(
                     it.licensePlate,
@@ -7891,10 +8028,17 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         ) { requestBluetoothEnable() }
     }
 
+    @android.annotation.SuppressLint("MissingPermission")
     private fun requestBluetoothEnable() {
         val manager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         val adapter = manager?.adapter ?: return
         if (adapter.isEnabled) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ensureBlePermissions()
+            return
+        }
         runCatching {
             startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
         }.onFailure {
@@ -7946,12 +8090,21 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         }
     }
 
+    override fun onConnectionStateChanged(connected: Boolean, stateName: String) {
+        runOnUiThread {
+            if (!connected) {
+                handleForegroundBleDisconnected()
+            }
+        }
+    }
+
     override fun onChannelModeChanged(
         isBleConnected: Boolean,
         rssi: Int?,
         statusText: String
     ) {
         runOnUiThread {
+            val wasConnected = bleConnected
             bleConnected = isBleConnected
             bleNearby = !isBleConnected && (
                 bleController.isVehicleNearby ||
@@ -7961,13 +8114,20 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                     statusText.contains("蓝牙数字钥匙正在连接") ||
                     statusText.contains("正在握手")
                 )
+            if (!isBleConnected && wasConnected) {
+                handleForegroundBleDisconnected()
+            }
             updateSecurityRow()
             if (isBleConnected) {
                 lastPairingPin = ""
                 dismissTopPairingPinDrawer()
                 showHomeStatus("手机钥匙已连接")
             }
-            PassiveEntryRuntime.reportForegroundBleRssi(rssi, isBleConnected)
+            PassiveEntryRuntime.reportForegroundBleRssi(
+                rssi = rssi,
+                sessionReady = isBleConnected,
+                vin = profileStore.getActiveProfile().vin
+            )
             securityPassiveRefreshCallback?.invoke()
         }
     }
@@ -7975,7 +8135,15 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     override fun onRssiUpdated(rssi: Int) {
         runOnUiThread {
             updateSecurityRow()
-            PassiveEntryRuntime.reportForegroundBleRssi(rssi, bleConnected || bleController.isSessionReady())
+            val ready = bleConnected || bleController.isSessionReady()
+            PassiveEntryRuntime.reportForegroundBleRssi(
+                rssi = rssi,
+                sessionReady = ready,
+                vin = profileStore.getActiveProfile().vin
+            )
+            if (ready) {
+                evaluateForegroundRssiUnlockRecovery(rssi)
+            }
             if (::passiveEntrySheets.isInitialized) {
                 passiveEntrySheets.refreshIfOpen()
             }
@@ -8174,8 +8342,14 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                         }
                     )
                     PassiveEntryStore.save(this@MainActivity, updated)
+                    val vinKey = savedProfile.vin.trim().uppercase(Locale.US)
+                    if (vinKey.isNotBlank()) {
+                        lastPassiveAutoUnlockActiveByVin[vinKey] = updated.enabled && updated.autoUnlockEnabled
+                    }
+                    PassiveEntryRuntime.clearLockSuppression(this@MainActivity, savedProfile.vin)
                     PassiveEntryRuntime.setForegroundAppActive(this@MainActivity, true)
                     Toast.makeText(this@MainActivity, "已开启蓝牙无感（${wakeResult.channelLabel}）", Toast.LENGTH_SHORT).show()
+                    triggerForegroundPassiveAutoUnlockIfReady(forceReevaluate = true)
                     onCompleted(true)
                 } else {
                     Toast.makeText(this@MainActivity, "后台唤醒注册失败：${wakeResult.message}", Toast.LENGTH_LONG).show()
@@ -8188,10 +8362,195 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     override fun onAuthenticated(sessionSnapshot: SessionSnapshot) {
         runOnUiThread {
+            val nowElapsed = SystemClock.elapsedRealtime()
             bleConnected = true
             bleNearby = false
+            foregroundSessionReadyElapsedMs = nowElapsed
+            foregroundSessionUnlockEvaluated = false
+            foregroundConsecutiveNearRssiHits = 0
+            val activeVin = profileStore.getActiveProfile().vin
+            if (activeVin.isNotBlank() &&
+                foregroundBleDisconnectedAtElapsedMs > 0L &&
+                (nowElapsed - foregroundBleDisconnectedAtElapsedMs) >= FOREGROUND_DEPARTURE_RESET_MS
+            ) {
+                PassiveEntryRuntime.clearLockSuppression(this, activeVin)
+            }
+            foregroundBleDisconnectedAtElapsedMs = 0L
             dismissTopPairingPinDrawer()
             updateSecurityRow()
+            bleController.requestRemoteRssi()
+            scheduleForegroundPassiveAutoUnlockCheck(forceReevaluate = false)
+        }
+    }
+
+    private fun cancelPendingForegroundPassiveUnlockCheck() {
+        pendingForegroundUnlockCheckRunnable?.let(mainHandler::removeCallbacks)
+        pendingForegroundUnlockCheckRunnable = null
+    }
+
+    private fun handleForegroundBleDisconnected() {
+        cancelPendingForegroundPassiveUnlockCheck()
+        foregroundSessionUnlockEvaluated = false
+        foregroundConsecutiveNearRssiHits = 0
+        foregroundLiveBleLocked = null
+        foregroundLiveBleDoorsOpen = null
+        foregroundLiveBleEngineRunning = null
+        foregroundLiveBleUpdatedElapsedMs = 0L
+        if (foregroundBleDisconnectedAtElapsedMs == 0L) {
+            foregroundBleDisconnectedAtElapsedMs = SystemClock.elapsedRealtime()
+        }
+    }
+
+    private fun recordManualLockOrUnlockForPassive(vin: String, locked: Boolean) {
+        if (vin.isBlank()) return
+        cancelPendingForegroundPassiveUnlockCheck()
+        foregroundSessionUnlockEvaluated = true
+        foregroundConsecutiveNearRssiHits = 0
+        foregroundLiveBleLocked = locked
+        foregroundLiveBleUpdatedElapsedMs = SystemClock.elapsedRealtime()
+        PassiveEntryStore.updateVehicleLockHint(this, vin, locked = locked)
+        if (locked) {
+            PassiveEntryRuntime.recordLockSuppression(this, vin, PassiveLockSuppressionReason.MANUAL_LOCK)
+            PassiveEntryRuntime.appendLog("手动锁车已触发，启用临时防误解保护")
+        } else {
+            PassiveEntryRuntime.clearLockSuppression(this, vin)
+        }
+    }
+
+    private fun triggerForegroundPassiveAutoUnlockIfReady(forceReevaluate: Boolean) {
+        if (!bleController.isSessionReady()) return
+        scheduleForegroundPassiveAutoUnlockCheck(forceReevaluate = forceReevaluate)
+    }
+
+    private fun scheduleForegroundPassiveAutoUnlockCheck(forceReevaluate: Boolean) {
+        cancelPendingForegroundPassiveUnlockCheck()
+        if (!bleController.isSessionReady()) return
+        if (!forceReevaluate && foregroundSessionUnlockEvaluated) return
+        val profile = profileStore.getActiveProfile()
+        if (profile.vin.isBlank()) return
+        val cfg = PassiveEntryStore.load(this, profile.vin)
+        if (!cfg.enabled || !cfg.autoUnlockEnabled) return
+        if (!PassiveEntryStore.getActiveEnabledVin(this).equals(profile.vin, ignoreCase = true)) return
+
+        val hasSessionLiveLock = foregroundLiveBleLocked != null &&
+            foregroundLiveBleUpdatedElapsedMs >= (foregroundSessionReadyElapsedMs - 2_000L)
+        if (hasSessionLiveLock || forceReevaluate) {
+            evaluateForegroundPassiveAutoUnlock(
+                triggerSource = if (hasSessionLiveLock) "蓝牙实时车况" else "无感开关开启",
+                forceReevaluate = forceReevaluate
+            )
+            return
+        }
+        val task = Runnable {
+            pendingForegroundUnlockCheckRunnable = null
+            evaluateForegroundPassiveAutoUnlock(
+                triggerSource = "蓝牙连接完成",
+                forceReevaluate = false
+            )
+        }
+        pendingForegroundUnlockCheckRunnable = task
+        mainHandler.postDelayed(task, FOREGROUND_CONNECT_STATUS_SETTLE_MS)
+    }
+
+    private fun evaluateForegroundPassiveAutoUnlock(
+        triggerSource: String,
+        forceReevaluate: Boolean = false
+    ) {
+        if (!forceReevaluate && foregroundSessionUnlockEvaluated) return
+        if (!bleController.isSessionReady()) return
+        if (isFinishing || isDestroyed) return
+        val profile = profileStore.getActiveProfile()
+        if (profile.vin.isBlank()) return
+        val cfg = PassiveEntryStore.load(this, profile.vin)
+        if (!cfg.enabled || !cfg.autoUnlockEnabled) return
+        if (!PassiveEntryStore.getActiveEnabledVin(this).equals(profile.vin, ignoreCase = true)) return
+
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val suppression = PassiveEntryRuntime.activeLockSuppressionReason(this, profile.vin, nowElapsed)
+        if (suppression != PassiveLockSuppressionReason.NONE) {
+            foregroundSessionUnlockEvaluated = true
+            PassiveEntryRuntime.appendLog(
+                "前台蓝牙已连接（$triggerSource），处于${suppression.label}保护期，跳过自动解锁"
+            )
+            return
+        }
+
+        val liveFresh = foregroundLiveBleUpdatedElapsedMs > 0L &&
+            (nowElapsed - foregroundLiveBleUpdatedElapsedMs) in 0L..FOREGROUND_LIVE_BLE_TTL_MS
+        val telemetryFresh = lastTelemetrySyncedElapsedMs > 0L &&
+            (nowElapsed - lastTelemetrySyncedElapsedMs) in 0L..FOREGROUND_UNLOCK_HINT_TTL_MS
+        val hint = PassiveEntryStore.getVehicleSafetyHint(this, profile.vin)
+        val hintFresh = hint.isFresh(maxAgeMs = FOREGROUND_UNLOCK_HINT_TTL_MS)
+
+        val engineRunning = when {
+            liveFresh && foregroundLiveBleEngineRunning != null -> foregroundLiveBleEngineRunning == true
+            telemetryFresh && activeTelemetry?.engineRunning != null -> activeTelemetry?.engineRunning == true
+            hintFresh && hint.engineStopped != null -> hint.engineStopped == false
+            else -> false
+        }
+        if (engineRunning) {
+            foregroundSessionUnlockEvaluated = true
+            PassiveEntryRuntime.appendLog("前台蓝牙已连接（$triggerSource），车况显示处于启动状态，跳过自动解锁")
+            return
+        }
+
+        val resolvedLocked: Boolean? = when {
+            liveFresh && foregroundLiveBleLocked != null -> foregroundLiveBleLocked
+            telemetryFresh && activeTelemetry?.doorLocked != null -> activeTelemetry?.doorLocked
+            hintFresh && hint.locked != null -> hint.locked
+            else -> null
+        }
+        if (resolvedLocked == false) {
+            foregroundSessionUnlockEvaluated = true
+            PassiveEntryStore.updateVehicleLockHint(this, profile.vin, locked = false)
+            PassiveEntryRuntime.appendLog("前台蓝牙已连接（$triggerSource），车辆已处于解锁状态，跳过自动解锁")
+            return
+        }
+
+        if (PassiveEntryRuntime.isAutoUnlockInCooldown(profile.vin, nowElapsed)) {
+            foregroundSessionUnlockEvaluated = true
+            PassiveEntryRuntime.appendLog("前台蓝牙已连接（$triggerSource），处于防抖冷却期内，跳过重复解锁")
+            return
+        }
+
+        enqueuePendingBleActionMeta(
+            "unlock",
+            PendingBleActionMeta(label = "连接自动解锁", vin = profile.vin, isPassiveAuto = true)
+        )
+        val accepted = bleController.sendVehicleAction("unlock")
+        if (accepted) {
+            // Mark evaluated while awaiting T-Box 0x04 confirmation in onActionResult();
+            // if T-Box rejects or times out, onActionResult() resets foregroundSessionUnlockEvaluated.
+            foregroundSessionUnlockEvaluated = true
+            PassiveEntryRuntime.appendLog("前台蓝牙已发起$triggerSource 自动解锁，等待车端确认")
+        } else {
+            popLastPendingBleActionMeta("unlock")
+            PassiveEntryRuntime.appendLog("前台蓝牙连接自动解锁指令未能发送")
+        }
+    }
+
+    private fun evaluateForegroundRssiUnlockRecovery(rssi: Int) {
+        val profile = profileStore.getActiveProfile()
+        if (profile.vin.isBlank()) return
+        val cfg = PassiveEntryStore.load(this, profile.vin)
+        if (!cfg.enabled || !cfg.autoUnlockEnabled) return
+        if (!PassiveEntryStore.getActiveEnabledVin(this).equals(profile.vin, ignoreCase = true)) return
+
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val suppression = PassiveEntryRuntime.activeLockSuppressionReason(this, profile.vin, nowElapsed)
+        if (suppression != PassiveLockSuppressionReason.WALK_AWAY_LOCK) {
+            foregroundConsecutiveNearRssiHits = 0
+            return
+        }
+        if (PassiveEntryRuntime.isAutoUnlockInCooldown(profile.vin, nowElapsed) || rssi < cfg.effectiveUnlockRssi) {
+            foregroundConsecutiveNearRssiHits = 0
+            return
+        }
+        foregroundConsecutiveNearRssiHits++
+        if (foregroundConsecutiveNearRssiHits >= 2) {
+            foregroundConsecutiveNearRssiHits = 0
+            PassiveEntryRuntime.clearLockSuppression(this, profile.vin)
+            evaluateForegroundPassiveAutoUnlock(triggerSource = "离车后再次靠近", forceReevaluate = true)
         }
     }
 
@@ -8223,11 +8582,7 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 showHomeStatus("已触发云端车辆列表同步")
             },
             onReload3dModel = {
-                carVisual?.let { view ->
-                    val targetKey = view.modelKey
-                    view.modelKey = targetKey
-                    view.playEntranceAnimation()
-                }
+                carVisual?.reloadCurrentModel()
                 showHomeStatus("已触发 3D 车模重载")
             },
             onReconnectBle = {
@@ -8487,6 +8842,33 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
 
     override fun onVehicleResponse(parsedResponse: ParsedTBoxResponse) {
         runOnUiThread {
+            var bleStateChanged = false
+            parsedResponse.doorLocked?.let {
+                foregroundLiveBleLocked = it
+                bleStateChanged = true
+            }
+            parsedResponse.doorsOpen?.let {
+                foregroundLiveBleDoorsOpen = it
+                bleStateChanged = true
+            }
+            parsedResponse.engineRunning?.let {
+                foregroundLiveBleEngineRunning = it
+                bleStateChanged = true
+            }
+            if (bleStateChanged) {
+                foregroundLiveBleUpdatedElapsedMs = SystemClock.elapsedRealtime()
+                val activeVin = profileStore.getActiveProfile().vin
+                if (activeVin.isNotBlank()) {
+                    val prev = PassiveEntryStore.getVehicleSafetyHint(this, activeVin).takeIf { it.isFresh() }
+                    PassiveEntryStore.updateVehicleSafetyHint(
+                        context = this,
+                        vin = activeVin,
+                        doorsClosed = foregroundLiveBleDoorsOpen?.let { !it } ?: prev?.doorsClosed,
+                        engineStopped = foregroundLiveBleEngineRunning?.let { !it } ?: prev?.engineStopped,
+                        locked = foregroundLiveBleLocked ?: prev?.locked
+                    )
+                }
+            }
             val existing = activeTelemetry
             if (existing != null) {
                 activeTelemetry = existing.copy(
@@ -8507,18 +8889,75 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 )
             }
             parsedResponse.doorLocked?.let { carVisual?.vehicleLocked = it }
-            parsedResponse.doorsOpen?.let { carVisual?.doorsOpen = it }
             parsedResponse.trunkOpen?.let { carVisual?.trunkOpen = it }
             parsedResponse.acOn?.let { carVisual?.climateOn = it }
             parsedResponse.engineRunning?.let { carVisual?.engineRunning = it }
             refreshHomeHeaderAndRows()
+            if (parsedResponse.doorLocked != null &&
+                pendingForegroundUnlockCheckRunnable != null &&
+                bleController.isSessionReady()
+            ) {
+                cancelPendingForegroundPassiveUnlockCheck()
+                evaluateForegroundPassiveAutoUnlock(triggerSource = "蓝牙实时车况")
+            }
         }
     }
 
     override fun onActionDispatched(actionKey: String, serial: Int) {
+        // Wait for onActionResult (T-Box 0x04 confirmation) before committing UI/optimistic state.
+    }
+
+    override fun onActionResult(
+        actionKey: String,
+        serial: Int,
+        success: Boolean,
+        parsedResponse: ParsedTBoxResponse?,
+        errorMessage: String?
+    ) {
         runOnUiThread {
-            if (lastBleActionLabel.isNotBlank()) {
-                showHomeStatus("蓝牙直连已发送：$lastBleActionLabel")
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val activeVin = profileStore.getActiveProfile().vin
+            val meta = consumePendingBleActionMeta(actionKey)
+            val targetVin = meta?.vin?.takeIf { it.isNotBlank() } ?: activeVin
+            val wasPassive = actionKey == "unlock" && meta?.isPassiveAuto == true
+            val label = meta?.label?.takeIf { it.isNotBlank() } ?: actionKey
+
+            if (success) {
+                if (wasPassive) {
+                    foregroundSessionUnlockEvaluated = true
+                    foregroundLiveBleLocked = false
+                    foregroundLiveBleUpdatedElapsedMs = SystemClock.elapsedRealtime()
+                    PassiveEntryRuntime.reportForegroundAutoUnlock(
+                        context = this,
+                        vin = targetVin,
+                        label = "连接自动解锁"
+                    )
+                    if (activeVin.equals(targetVin, ignoreCase = true)) {
+                        applyOptimisticAction("unlock")
+                    }
+                    showHomeStatus("蓝牙无感已自动解锁")
+                    securityPassiveRefreshCallback?.invoke()
+                    if (::passiveEntrySheets.isInitialized) passiveEntrySheets.refreshIfOpen()
+                } else {
+                    if (actionKey == "lock") {
+                        recordManualLockOrUnlockForPassive(targetVin, locked = true)
+                    } else if (actionKey == "unlock") {
+                        recordManualLockOrUnlockForPassive(targetVin, locked = false)
+                    }
+                    if (activeVin.equals(targetVin, ignoreCase = true)) {
+                        applyOptimisticAction(actionKey)
+                    }
+                    showHomeStatus("蓝牙直连已完成：$label")
+                }
+                scheduleTelemetryRefresh()
+            } else {
+                if (wasPassive) {
+                    foregroundSessionUnlockEvaluated = false
+                    PassiveEntryRuntime.appendLog("前台蓝牙无感解锁未确认：${errorMessage ?: "车端未响应"}")
+                }
+                AppHaptics.perform(contentFrame, HapticLevel.ERROR_REJECT)
+                val reason = errorMessage?.trim().orEmpty().ifBlank { "车端未确认执行" }.take(60)
+                showHomeStatus("蓝牙控制失败：$reason")
             }
         }
     }
@@ -8607,8 +9046,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
     ) {
         dismissAppDialogImmediately()
         sheetClimateTempView = null
-        sheetKeyStatusView = null
-        sheetKeyActionButton = null
 
         var bypassImmediate = false
         var sheetRootView: View? = null
@@ -8675,8 +9112,6 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
                 appDialog = null
                 dismissAppDialogSync = null
                 sheetClimateTempView = null
-                sheetKeyStatusView = null
-                sheetKeyActionButton = null
             }
             onDismiss?.invoke()
         }
@@ -8990,6 +9425,10 @@ class MainActivity : AppCompatActivity(), CheryBleController.Listener {
         private const val KEY_ENTRANCE_STYLE = "car3d_entrance_style"
         private const val DEFAULT_ENTRANCE_STYLE = "auto"
         private const val MAX_DEVICE_LOCATION_AGE_MS = 15L * 60L * 1000L
+        private const val FOREGROUND_DEPARTURE_RESET_MS = 30_000L
+        private const val FOREGROUND_CONNECT_STATUS_SETTLE_MS = 600L
+        private const val FOREGROUND_LIVE_BLE_TTL_MS = 60_000L
+        private const val FOREGROUND_UNLOCK_HINT_TTL_MS = 120_000L
 
         private val MOBILE_REGEX = Regex("^1\\d{10}$")
         private val PIN_REGEX = Regex("^\\d{6}$")

@@ -3,16 +3,60 @@ plugins {
     id "org.jetbrains.kotlin.android"
 }
 
+def localKeystoreProps = new Properties()
+["keystore.properties", "local.properties"].each { name ->
+    def f = rootProject.file(name)
+    if (f.exists()) {
+        f.withInputStream { localKeystoreProps.load(it) }
+    }
+}
+
+def propOrEnv = { String key ->
+    def propVal = project.findProperty(key)
+    if (propVal != null && propVal.toString().trim()) return propVal.toString().trim()
+    def envVal = System.getenv(key)
+    if (envVal != null && envVal.trim()) return envVal.trim()
+    def fileVal = localKeystoreProps.getProperty(key)
+    if (fileVal != null && fileVal.trim()) return fileVal.trim()
+    return ""
+}
+
+// Public dev/CI debug keystore fallback keeps continuous in-place upgrades working
+// across GitHub Actions debug builds while allowing env/property overrides.
+def debugStorePath = propOrEnv("QIRI_DEBUG_STORE_FILE") ?: "carplus-debug.jks"
+def debugStoreFile = file(debugStorePath)
+def debugStorePassword = propOrEnv("QIRI_DEBUG_STORE_PASSWORD") ?: "carplus123"
+def debugKeyAlias = propOrEnv("QIRI_DEBUG_KEY_ALIAS") ?: "carplusdebug"
+def debugKeyPassword = propOrEnv("QIRI_DEBUG_KEY_PASSWORD") ?: debugStorePassword
+
+// Release signing is strictly externalized via Gradle properties, keystore.properties, or CI env vars.
+def releaseStorePath = propOrEnv("QIRI_RELEASE_STORE_FILE")
+def releaseStorePassword = propOrEnv("QIRI_RELEASE_STORE_PASSWORD")
+def releaseKeyAlias = propOrEnv("QIRI_RELEASE_KEY_ALIAS")
+def releaseKeyPassword = propOrEnv("QIRI_RELEASE_KEY_PASSWORD") ?: releaseStorePassword
+def hasReleaseSigning = !releaseStorePath.isEmpty() && file(releaseStorePath).exists() &&
+        !releaseStorePassword.isEmpty() && !releaseKeyAlias.isEmpty()
+
 android {
     namespace "com.chery.carplus"
     compileSdk 34
 
     signingConfigs {
-        debug {
-            storeFile file("carplus-debug.jks")
-            storePassword "carplus123"
-            keyAlias "carplusdebug"
-            keyPassword "carplus123"
+        if (debugStoreFile.exists()) {
+            debug {
+                storeFile debugStoreFile
+                storePassword debugStorePassword
+                keyAlias debugKeyAlias
+                keyPassword debugKeyPassword
+            }
+        }
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseStorePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
         }
     }
 
@@ -28,6 +72,14 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

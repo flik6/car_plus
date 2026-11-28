@@ -194,6 +194,7 @@ class DebugDiagnosticsScreen(
     }
 
     fun buildView(): Pair<View, () -> Unit> {
+        cleanupOrphanedDiagFiles()
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(ThemeTokens.BG_CANVAS)
@@ -1467,7 +1468,8 @@ class DebugDiagnosticsScreen(
 
     private fun handlePreviewPairing() {
         val ble = bleController.getDebugSnapshot(profileProvider())
-        val samplePin = lastPairingPinProvider().ifBlank { "482915" }
+        // Per DESIGN_SYSTEM.md §10.4, preview mode must never expose the live pairing PIN.
+        val samplePin = "000000"
         val devName = ble.targetBleName.ifBlank { modelNameProvider().ifBlank { "Qiri+" } }
         val devMac = ble.targetBleMac.ifBlank { "AA:BB:CC:DD:EE:FF" }
         appendLocalLog("[蓝牙] 预览配对弹窗")
@@ -1526,10 +1528,6 @@ class DebugDiagnosticsScreen(
     private fun handleExportLogs() {
         val report = buildSanitizedReportText()
         val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        runCatching {
-            val outFile = File(context.cacheDir, "qiri_diag_$ts.txt")
-            outFile.writeText(report)
-        }
         appendLocalLog("[会话] 导出脱敏日志")
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -1548,6 +1546,16 @@ class DebugDiagnosticsScreen(
             toast("已生成脱敏日志")
         }
         refreshInPlace(forceInspectRebuild = true)
+    }
+
+    private fun cleanupOrphanedDiagFiles() {
+        runCatching {
+            context.cacheDir.listFiles()?.forEach { file ->
+                if (file.isFile && file.name.startsWith("qiri_diag_") && file.name.endsWith(".txt")) {
+                    file.delete()
+                }
+            }
+        }
     }
 
     private fun handleClearLogs() {
@@ -1852,6 +1860,7 @@ class DebugDiagnosticsScreen(
     }
 
     private fun toast(msg: String) {
+        if (destroyed) return
         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
     }
 

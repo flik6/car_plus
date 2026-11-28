@@ -76,6 +76,7 @@ class PassiveEntrySheets(
         inspectOnly: Boolean = false,
         onEnabledCallback: ((Boolean) -> Unit)? = null
     ) {
+        if (!MotionSpec.isHostActivityAlive(context)) return
         dismiss()
         val outer = createSheetShell()
         val (dialog, immediateDismiss) = createAnimatedSheetDialog(outer)
@@ -173,6 +174,7 @@ class PassiveEntrySheets(
      * Shows the redesigned, compact "蓝牙无感" configuration & proximity calibration sheet.
      */
     fun showPassiveEntryConfigSheet() {
+        if (!MotionSpec.isHostActivityAlive(context)) return
         dismiss()
         val profile = profileProvider()
         if (profile.vin.isBlank()) {
@@ -259,7 +261,7 @@ class PassiveEntrySheets(
             buildSimpleToggleRow(
                 icon = AppIconType.LOCK_OPEN,
                 title = "靠近自动解锁",
-                subtitle = "携带手机走近车门自动解锁",
+                subtitle = "蓝牙连接后，若车辆未解锁则自动解锁",
                 toggle = unlockSwitch
             ),
             lp()
@@ -424,6 +426,7 @@ class PassiveEntrySheets(
 
             statusMainTv.text = when {
                 !report.allRequiredSatisfied -> "还有 ${report.missingRequiredCount} 项必备设置待完成"
+                snap.state == PassiveState.UNLOCKED_NEAR -> "已连接车辆 · 车辆已处于解锁状态"
                 bleReady && liveRssi != null && liveRssi >= cfg.effectiveUnlockRssi -> "就在车旁 · 信号很强"
                 bleReady -> "已连接车辆 · 蓝牙信号良好"
                 liveRssi != null -> "已检测到附近车辆"

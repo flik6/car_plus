@@ -1,5 +1,6 @@
 package com.chery.carplus.ble
 
+import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanResult
@@ -8,9 +9,11 @@ import android.companion.CompanionDeviceService
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
 import com.chery.carplus.profile.VehicleProfileStore
 
 /**
@@ -32,14 +35,27 @@ class PassiveEntryScanReceiver : BroadcastReceiver() {
             ?: store.getActiveProfile().takeIf { it.vin.equals(activeVin, ignoreCase = true) }
             ?: return
         val targetMac = PassiveEntryPrerequisiteChecker.normalizeMac(profile.bleMac) ?: return
+        val targetMacCompact = targetMac.replace(":", "")
+        val targetBleName = profile.bleName.trim()
 
         val results: List<ScanResult> = extractScanResults(intent)
         if (results.isEmpty()) return
 
         val matched = results.firstOrNull { result ->
             val addr = PassiveEntryPrerequisiteChecker.normalizeMac(result.device?.address)
-            addr != null && addr.equals(targetMac, ignoreCase = true)
+            if (addr != null && addr.equals(targetMac, ignoreCase = true)) {
+                return@firstOrNull true
+            }
+            val scanName = safeScannedDeviceName(appContext, result)
+            val nameSuffix = BlePairingPinCalculator.extractBleNameSuffix(scanName)
+            if (!nameSuffix.isNullOrBlank() && nameSuffix.equals(targetMacCompact, ignoreCase = true)) {
+                return@firstOrNull true
+            }
+            targetBleName.isNotBlank() &&
+                !scanName.isNullOrBlank() &&
+                targetBleName.equals(scanName, ignoreCase = true)
         } ?: return
+        val liveMac = PassiveEntryPrerequisiteChecker.normalizeMac(matched.device?.address) ?: targetMac
 
         val now = SystemClock.elapsedRealtime()
         if (PassiveEntryRuntime.isServiceRunning()) {
@@ -51,7 +67,13 @@ class PassiveEntryScanReceiver : BroadcastReceiver() {
             PassiveEntryRuntime.appendLog("前台活跃期间收到 PendingIntent 广播 (${matched.rssi} dBm)，交由前台协同")
             return
         }
-        val throttleReason = PassiveEntryRuntime.shouldThrottleScanWake(matched.rssi, cfg, now)
+        val throttleReason = PassiveEntryRuntime.shouldThrottleScanWake(
+            context = appContext,
+            vin = profile.vin,
+            rssi = matched.rssi,
+            cfg = cfg,
+            nowElapsed = now
+        )
         if (throttleReason != null) {
             return
         }
@@ -61,11 +83,27 @@ class PassiveEntryScanReceiver : BroadcastReceiver() {
         PassiveEntryService.startForWake(
             context = appContext,
             vin = profile.vin,
-            bleMac = targetMac,
+            bleMac = liveMac,
             bleName = profile.bleName,
             initialRssi = matched.rssi,
             wakeSource = "PendingIntent"
         )
+    }
+
+    private fun safeScannedDeviceName(context: Context, result: ScanResult): String? {
+        val fromRecord = result.scanRecord?.deviceName?.trim()?.ifBlank { null }
+        if (fromRecord != null) return fromRecord
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return null
+        }
+        return try {
+            result.device?.name?.trim()?.ifBlank { null }
+        } catch (_: SecurityException) {
+            null
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -179,7 +217,7 @@ class PassiveEntryCompanionService : CompanionDeviceService() {
 
     private fun handleDisappeared(rawAddress: String) {
         val mac = PassiveEntryPrerequisiteChecker.normalizeMac(rawAddress) ?: return
-        PassiveEntryRuntime.markCompanionDisappeared()
+        PassiveEntryRuntime.markCompanionDisappeared(applicationContext)
         PassiveEntryRuntime.appendLog("伴随设备报告本车远离 ($mac)")
         PassiveEntryService.notifyCompanionDisappeared(applicationContext, mac)
     }

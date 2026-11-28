@@ -109,6 +109,26 @@ internal class VehicleFeatureSheets(
     private var activeDialog: Dialog? = null
     private var activeImmediateDismiss: (() -> Unit)? = null
     private var secondaryDialog: Dialog? = null
+    private val activeMapWebViews = linkedSetOf<WebView>()
+    private val geofenceAddressCache = mutableMapOf<String, String>()
+
+    fun onHostPause() {
+        activeMapWebViews.toList().forEach { wv ->
+            runCatching {
+                wv.evaluateJavascript("window.CarMap && window.CarMap.setPaused && window.CarMap.setPaused(true);", null)
+                wv.onPause()
+            }
+        }
+    }
+
+    fun onHostResume() {
+        activeMapWebViews.toList().forEach { wv ->
+            runCatching {
+                wv.onResume()
+                wv.evaluateJavascript("window.CarMap && window.CarMap.setPaused && window.CarMap.setPaused(false);", null)
+            }
+        }
+    }
 
     fun dismissAll() {
         runCatching { secondaryDialog?.dismiss() }
@@ -384,24 +404,6 @@ internal class VehicleFeatureSheets(
         return root
     }
 
-    fun showMessageAndAlertCenterSheet(@Suppress("UNUSED_PARAMETER") initialTab: Int = 0) {
-        val profile = profileProvider()
-        showSheet("消息") { body, _ ->
-            val contentHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-            body.addView(contentHost, lp(top = dp(10)))
-            loadMessagesTab(contentHost, profile)
-        }
-    }
-
-    fun showAntiTheftSheet() {
-        val profile = profileProvider()
-        showSheet("防盗与车辆体检") { body, _ ->
-            val contentHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-            body.addView(contentHost, lp(top = dp(10)))
-            loadAntiTheftAndMaintenanceTab(contentHost, profile)
-        }
-    }
-
     fun showGeofenceSheet() {
         val profile = profileProvider()
         showSheet("电子围栏") { body, _ ->
@@ -412,662 +414,6 @@ internal class VehicleFeatureSheets(
                 loadGeofenceTab(contentHost, profile) { reload() }
             }
             reload()
-        }
-    }
-
-    fun showRemoteAuthSheet() {
-        val delegate = onOpenRemoteAuthManagement
-        if (delegate != null) {
-            delegate()
-            return
-        }
-        val pushOverlay = onOpenOverlaySubpage
-        if (pushOverlay != null) {
-            pushOverlay(buildRemoteAuthSubpageView(onBack = { onPopOverlaySubpage?.invoke() }), null)
-            return
-        }
-        val profile = profileProvider()
-        showSheet("驾驶员") { body, _ ->
-            val contentHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-            body.addView(contentHost, lp(top = dp(10)))
-            fun reload() {
-                contentHost.removeAllViews()
-                loadRemoteAuthTab(contentHost, profile) { reload() }
-            }
-            reload()
-        }
-    }
-
-    /**
-     * Full-screen minimalist Vehicle Management subpage ("车辆管理") with borderless AppListRow items.
-     */
-    fun buildVehicleManagementSubpageView(
-        onBack: () -> Unit,
-        onVehiclesUpdated: () -> Unit = onVehiclesChanged
-    ): View {
-        val profile = profileProvider()
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(ThemeTokens.BG_CANVAS)
-            isClickable = true
-            isFocusable = true
-        }
-
-        val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        var reloadVehicles: () -> Unit = {}
-
-        fun openAddVehicle() {
-            val pushOverlay = onOpenOverlaySubpage
-            if (pushOverlay != null) {
-                val addView = buildAddVehicleSubpageView(
-                    onBack = { onPopOverlaySubpage?.invoke() },
-                    onVehicleBound = { boundVin, boundPin ->
-                        if (boundVin.isNotBlank() && boundPin.isNotBlank()) {
-                            onPinUpdated(boundVin, boundPin)
-                        }
-                        onPopOverlaySubpage?.invoke()
-                        onVehiclesUpdated()
-                        reloadVehicles()
-                    }
-                )
-                pushOverlay(addView, null)
-            }
-        }
-
-        fun openEditVehicle(vehicle: VehicleSummary) {
-            val pushOverlay = onOpenOverlaySubpage
-            val editView = buildEditVehicleSubpageView(
-                vehicle = vehicle,
-                onBack = { onPopOverlaySubpage?.invoke() },
-                onSaved = {
-                    onPopOverlaySubpage?.invoke()
-                    onVehiclesUpdated()
-                    reloadVehicles()
-                },
-                onUnbound = {
-                    onPopOverlaySubpage?.invoke()
-                    onVehiclesUpdated()
-                    reloadVehicles()
-                }
-            )
-            if (pushOverlay != null) {
-                pushOverlay(editView, null)
-            } else {
-                secondaryDialog?.dismiss()
-                val dialog = Dialog(context, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
-                dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-                val fallbackView = buildEditVehicleSubpageView(
-                    vehicle = vehicle,
-                    onBack = { dialog.dismiss() },
-                    onSaved = {
-                        dialog.dismiss()
-                        onVehiclesUpdated()
-                        reloadVehicles()
-                    },
-                    onUnbound = {
-                        dialog.dismiss()
-                        onVehiclesUpdated()
-                        reloadVehicles()
-                    }
-                )
-                dialog.setContentView(fallbackView)
-                dialog.window?.apply {
-                    statusBarColor = ThemeTokens.BG_CANVAS
-                    navigationBarColor = ThemeTokens.BG_CANVAS
-                    setLayout(MATCH_PARENT, MATCH_PARENT)
-                }
-                dialog.setOnDismissListener { if (secondaryDialog === dialog) secondaryDialog = null }
-                secondaryDialog = dialog
-                dialog.show()
-            }
-        }
-
-        root.addView(
-            AppComponents.createTopBar(
-                context = context,
-                title = "车辆管理",
-                onBack = onBack,
-                rightText = "添加",
-                rightEnabled = true,
-                onRightClick = { openAddVehicle() }
-            ),
-            lp()
-        )
-
-        val scroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-        AppSystemInsets.applyBottomNavPadding(scroll)
-        scroll.addView(listHost, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-
-        reloadVehicles = {
-            listHost.removeAllViews()
-            listHost.addView(loadingHint("正在加载车辆列表..."))
-            scope.launch {
-                val res = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.fetchVehicleList(profile.accessToken)
-                    }
-                }
-                listHost.removeAllViews()
-                res.onSuccess { vehicles ->
-                    if (vehicles.isEmpty()) {
-                        listHost.addView(
-                            AppComponents.createEmptyState(
-                                context = context,
-                                icon = AppIconType.CAR_CONTROLS,
-                                title = "暂无绑定车辆",
-                                subtitle = "点击右上角「添加」绑定新车辆"
-                            ),
-                            lp(top = dp(48))
-                        )
-                    } else {
-                        vehicles.forEachIndexed { idx, v ->
-                            val baseName = v.seriesName.ifBlank { v.vehicleName }.ifBlank { "奇瑞座驾" }
-                            val isDefault = v.selected == "1"
-                            val sub = listOfNotNull(
-                                v.plateNo.takeIf { it.isNotBlank() },
-                                maskedVin(v.vin)
-                            ).joinToString(" · ")
-                            val row = AppComponents.createListRow(
-                                context = context,
-                                icon = AppIconType.CAR_CONTROLS,
-                                title = baseName,
-                                subtitle = sub.ifBlank { null },
-                                trailingText = if (isDefault) "默认" else null,
-                                showChevron = true,
-                                onClick = { openEditVehicle(v) }
-                            )
-                            if (isDefault) {
-                                (row.findViewWithTag<TextView>("row_trailing_text"))?.setTextColor(ThemeTokens.ACCENT_LIGHT)
-                            }
-                            listHost.addView(row, lp())
-                            if (idx < vehicles.lastIndex) {
-                                listHost.addView(AppComponents.createHairline(context, startInsetDp = 58))
-                            }
-                        }
-                    }
-                }.onFailure { err ->
-                    listHost.addView(errorHint("车辆列表加载失败：${err.message.orEmpty().take(90)}"), lp(top = dp(12)))
-                    listHost.addView(
-                        secondaryBtn("轻触重试") { reloadVehicles() },
-                        LinearLayout.LayoutParams(MATCH_PARENT, dp(44)).apply {
-                            marginStart = dp(20); marginEnd = dp(20); topMargin = dp(10)
-                        }
-                    )
-                }
-            }
-        }
-        reloadVehicles()
-        return root
-    }
-
-    /**
-     * Full-screen Edit Vehicle Level-3 subpage ("编辑车辆").
-     * Dangerous action ("解绑此车辆") is hidden by default inside collapsible "更多操作"
-     * and guarded by a strict 2-step confirmation (Confirm Dialog + VIN last-4 input).
-     */
-    fun buildEditVehicleSubpageView(
-        vehicle: VehicleSummary,
-        onBack: () -> Unit,
-        onSaved: () -> Unit,
-        onUnbound: () -> Unit
-    ): View {
-        val profile = profileProvider()
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(ThemeTokens.BG_CANVAS)
-            isClickable = true
-            isFocusable = true
-        }
-
-        val (plateWrap, plateEt) = AppComponents.createUnderlineInput(
-            context = context,
-            hint = "车牌号（如 浙A12345）",
-            initialValue = vehicle.plateNo,
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-        )
-        val (ownerWrap, ownerEt) = AppComponents.createUnderlineInput(
-            context = context,
-            hint = "车主姓名（选填）",
-            initialValue = "",
-            inputType = InputType.TYPE_CLASS_TEXT
-        )
-        val (purchaseDateField, getPurchaseDate) = AppComponents.createDateTimePickerField(
-            context = context,
-            hint = "购车日期（选填）",
-            initialValue = "",
-            mode = DateTimeMode.DATE
-        )
-        var setAsDefault = vehicle.selected == "1"
-        val initiallyDefault = setAsDefault
-        var saving = false
-
-        fun saveVehicleChanges() {
-            if (saving) return
-            val plate = plateEt.text.toString().trim()
-            val owner = ownerEt.text.toString().trim()
-            val purchaseDate = getPurchaseDate().trim()
-            if (plate.isBlank()) {
-                toast("请填写车牌号")
-                return
-            }
-            saving = true
-            scope.launch {
-                val res = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.saveVehicleInfo(
-                            accessToken = profile.accessToken,
-                            vin = vehicle.vin,
-                            plateNo = plate,
-                            hostName = owner,
-                            purchaseDate = purchaseDate
-                        )
-                        if (setAsDefault && !initiallyDefault) {
-                            httpClient.setDefaultVehicle(profile.accessToken, vehicle.vin)
-                        }
-                    }
-                }
-                saving = false
-                res.onSuccess {
-                    AppHaptics.perform(root, HapticLevel.MEDIUM_CONFIRM)
-                    toast("车辆信息已保存")
-                    onSaved()
-                }.onFailure { err ->
-                    AppHaptics.perform(root, HapticLevel.ERROR_REJECT)
-                    toast("保存失败：${err.message.orEmpty().take(70)}")
-                }
-            }
-        }
-
-        root.addView(
-            AppComponents.createTopBar(
-                context = context,
-                title = "编辑车辆",
-                onBack = onBack,
-                rightText = "保存",
-                rightEnabled = true,
-                onRightClick = { saveVehicleChanges() }
-            ),
-            lp()
-        )
-
-        val scroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-        AppSystemInsets.applyBottomNavPadding(scroll)
-        val content = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(32))
-        }
-        scroll.addView(content, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-
-        val modelTitle = vehicle.seriesName.ifBlank { vehicle.vehicleName }.ifBlank { "奇瑞座驾" }
-        content.addView(text(modelTitle, 18f, TEXT_PRIMARY, Typeface.BOLD))
-        content.addView(text("车架号：${maskedVin(vehicle.vin)}", 13f, TEXT_SUB), lp(top = dp(4), bottom = dp(18)))
-
-        content.addView(plateWrap, lp(top = dp(4)))
-        content.addView(ownerWrap, lp(top = dp(10)))
-        content.addView(purchaseDateField, lp(top = dp(10)))
-
-        val defaultRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(20), 0, dp(16))
-        }
-        val defaultCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        defaultCol.addView(text("设为默认车辆", 15.5f, TEXT_PRIMARY))
-        defaultCol.addView(text("作为首页默认显示与主控车辆", 12.5f, TEXT_SUB), lp(top = dp(2)))
-        defaultRow.addView(defaultCol, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        val defaultSwitch = ToggleSwitch(context).apply {
-            setChecked(setAsDefault, animate = false)
-            onToggleAttempt = { target ->
-                setAsDefault = target
-                setChecked(target, animate = true)
-            }
-        }
-        defaultRow.addView(defaultSwitch, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        content.addView(defaultRow, lp())
-
-        val linePx = dpF(0.6f).roundToInt().coerceAtLeast(1)
-        content.addView(
-            View(context).apply { setBackgroundColor(ThemeTokens.DIVIDER) },
-            LinearLayout.LayoutParams(MATCH_PARENT, linePx).apply { topMargin = dp(8) }
-        )
-
-        // Collapsed danger zone: "更多操作" -> expands "解绑此车辆"
-        var moreExpanded = false
-        val chevron = AppIconView(context, AppIconType.CHEVRON_DOWN, Color.rgb(112, 116, 126))
-        val dangerActionRow = text("解绑此车辆", 15f, ThemeTokens.DANGER, Typeface.BOLD).apply {
-            setPadding(0, dp(14), 0, dp(14))
-            visibility = View.GONE
-            isClickable = true
-            isFocusable = true
-            MotionSpec.attachPressPhysics(this, pressedScale = 0.98f)
-            setOnClickListener {
-                // Step 1 Confirmation
-                AppComponents.showConfirmDialog(
-                    context = context,
-                    title = "确认解绑车辆？",
-                    message = "解绑后将移除该车辆的远程控车与数字钥匙权限，此操作不可撤销。",
-                    confirmText = "继续解绑",
-                    cancelText = "取消",
-                    dangerConfirm = true
-                ) {
-                    // Step 2: VIN last-4 security verification modal
-                    showUnbindVinConfirmModal(vehicle, profile, onUnbound)
-                }
-            }
-        }
-
-        val moreRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(16), 0, dp(12))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                moreExpanded = !moreExpanded
-                chevron.animate().rotation(if (moreExpanded) 180f else 0f)
-                    .setDuration(180L)
-                    .setInterpolator(MotionSpec.EASE_OUT_EXPO)
-                    .start()
-                dangerActionRow.visibility = if (moreExpanded) View.VISIBLE else View.GONE
-                if (moreExpanded) {
-                    dangerActionRow.alpha = 0f
-                    dangerActionRow.animate().alpha(1f).setDuration(180L).start()
-                }
-            }
-        }
-        moreRow.addView(
-            text("更多操作", 13.5f, Color.rgb(112, 116, 126)),
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-        )
-        moreRow.addView(chevron, LinearLayout.LayoutParams(dp(16), dp(16)))
-        content.addView(moreRow, lp())
-        content.addView(dangerActionRow, lp())
-
-        return root
-    }
-
-    private fun showUnbindVinConfirmModal(
-        vehicle: VehicleSummary,
-        profile: VehicleProfile,
-        onUnbound: () -> Unit
-    ) {
-        val last4 = vehicle.vin.trim().uppercase(Locale.US).takeLast(4)
-        showModalDialog("最终安全确认") { box, dialog ->
-            box.addView(
-                text(
-                    "请输入车架号后 4 位（$last4）以确认解绑车辆，解绑后需重新验证方可绑定。",
-                    13.5f,
-                    TEXT_SUB
-                ).apply { setLineSpacing(0f, 1.4f) },
-                lp(top = dp(10))
-            )
-
-            val (vin4Wrap, vin4Et) = AppComponents.createUnderlineInput(
-                context = context,
-                hint = "输入车架号后 4 位 ($last4)",
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS,
-                maxLength = 4
-            )
-            box.addView(vin4Wrap, lp(top = dp(12)))
-
-            val btns = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            box.addView(btns, lp(top = dp(20)))
-            btns.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(44)))
-
-            var confirmBtn: TextView? = null
-            confirmBtn = text("确认解绑", 14.5f, Color.WHITE, Typeface.BOLD).apply {
-                gravity = Gravity.CENTER
-                background = rounded(ThemeTokens.DANGER, 8f)
-                alpha = 0.38f
-                isEnabled = false
-                isClickable = true
-                isFocusable = true
-                MotionSpec.attachPressPhysics(this, pressedScale = 0.96f)
-                setOnClickListener {
-                    val typed = vin4Et.text.toString().trim().uppercase(Locale.US)
-                    if (typed != last4) {
-                        AppHaptics.perform(this, HapticLevel.ERROR_REJECT)
-                        MotionSpec.shakeError(vin4Wrap)
-                        return@setOnClickListener
-                    }
-                    fun performUnbind(verifiedPin: String, onPinError: ((String) -> Unit)? = null, onDismissPin: (() -> Unit)? = null) {
-                        scope.launch {
-                            val res = runCatching {
-                                withContext(Dispatchers.IO) {
-                                    httpClient.unbindVehicle(profile.accessToken, vehicle.vin, verifiedPin)
-                                }
-                            }
-                            res.onSuccess { ok ->
-                                if (ok) {
-                                    onDismissPin?.invoke()
-                                    AppHaptics.perform(box, HapticLevel.MEDIUM_CONFIRM)
-                                    toast("车辆已解绑")
-                                    onUnbound()
-                                } else {
-                                    onPinError?.invoke("PIN 码校验失败，请重试")
-                                        ?: toast("解绑失败，请核对 PIN 码或稍后重试")
-                                }
-                            }.onFailure { err ->
-                                if (err is CherySessionExpiredException) {
-                                    onDismissPin?.invoke()
-                                } else {
-                                    val msg = friendlyErrorMessage(err, "解绑失败，请稍后重试")
-                                    onPinError?.invoke(msg) ?: toast(msg)
-                                }
-                            }
-                        }
-                    }
-                    val cachedPin = cachedPinProvider().ifBlank { profile.controlPin }.trim()
-                    dialog.dismiss()
-                    if (cachedPin.length == 6 && cachedPin.all { it.isDigit() }) {
-                        performUnbind(cachedPin)
-                    } else {
-                        secondaryDialog = SixDigitPinSheet.showVerifyPinSheet(
-                            context = context,
-                            title = "验证 PIN 码",
-                            subtitle = "请输入 6 位车控 PIN 码以解绑车辆"
-                        ) { pin, showError, dismissPin ->
-                            performUnbind(pin, showError, dismissPin)
-                        }
-                    }
-                }
-            }
-            vin4Et.addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-                override fun afterTextChanged(s: Editable?) {
-                    val matched = s?.toString()?.trim()?.uppercase(Locale.US) == last4
-                    confirmBtn?.isEnabled = matched
-                    confirmBtn?.alpha = if (matched) 1f else 0.38f
-                }
-            })
-            btns.addView(confirmBtn, weightLp(dp(10), dp(44)))
-        }
-    }
-
-    /**
-     * Full-screen minimalist Remote Authorization subpage ("远程授权").
-     */
-    fun buildRemoteAuthSubpageView(onBack: () -> Unit): View {
-        val profile = profileProvider()
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(ThemeTokens.BG_CANVAS)
-            isClickable = true
-            isFocusable = true
-        }
-
-        val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        var reloadList: () -> Unit = {}
-
-        root.addView(
-            AppComponents.createTopBar(
-                context = context,
-                title = "驾驶员",
-                onBack = onBack,
-                rightText = "新增",
-                rightEnabled = true,
-                onRightClick = { showGrantRemoteAuthModal(profile) { reloadList() } }
-            ),
-            lp()
-        )
-
-        val scroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-        AppSystemInsets.applyBottomNavPadding(scroll)
-        scroll.addView(listHost, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-
-        reloadList = {
-            listHost.removeAllViews()
-            listHost.addView(loadingHint("正在加载远程授权..."))
-            scope.launch {
-                val res = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.fetchRemoteAuthList(profile.vin, profile.accessToken)
-                    }
-                }
-                listHost.removeAllViews()
-                res.onSuccess { list ->
-                    if (list.isEmpty()) {
-                        listHost.addView(
-                            AppComponents.createEmptyState(
-                                context = context,
-                                icon = AppIconType.KEY_ROUND,
-                                title = "暂无远程授权",
-                                subtitle = "点击右上角「新增」授权亲友远程控车"
-                            ),
-                            lp(top = dp(48))
-                        )
-                    } else {
-                        list.forEachIndexed { idx, item ->
-                            val title = SensitiveUiText.maskIfPhone(item.receiverName).ifBlank {
-                                SensitiveUiText.maskPhone(item.receiverMobile).ifBlank { "被授权人" }
-                            }
-                            val range = formatAuthDateRange(item.startTime, item.endTime)
-                            val (statusLabel, isActive) = formatAuthStatus(item.status)
-                            val row = AppComponents.createListRow(
-                                context = context,
-                                icon = null,
-                                title = title,
-                                subtitle = range.ifBlank { item.authorityDesc.ifBlank { null } },
-                                trailingText = statusLabel,
-                                showChevron = true,
-                                onClick = { showRemoteAuthActionModal(item, profile) { reloadList() } }
-                            )
-                            (row.findViewWithTag<TextView>("row_trailing_text"))?.setTextColor(
-                                if (isActive) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_SUB
-                            )
-                            listHost.addView(row, lp())
-                            if (idx < list.lastIndex) {
-                                listHost.addView(AppComponents.createHairline(context, startInsetDp = 20))
-                            }
-                        }
-                    }
-                }.onFailure { err ->
-                    listHost.addView(errorHint("远程授权加载失败：${err.message.orEmpty().take(90)}"), lp(top = dp(12)))
-                    listHost.addView(
-                        secondaryBtn("轻触重试") { reloadList() },
-                        LinearLayout.LayoutParams(MATCH_PARENT, dp(44)).apply {
-                            marginStart = dp(20); marginEnd = dp(20); topMargin = dp(10)
-                        }
-                    )
-                }
-            }
-        }
-        reloadList()
-        return root
-    }
-
-    private fun showRemoteAuthActionModal(
-        item: VehicleAuthorizationItem,
-        profile: VehicleProfile,
-        onReload: () -> Unit
-    ) {
-        val name = SensitiveUiText.maskIfPhone(item.receiverName).ifBlank {
-            SensitiveUiText.maskPhone(item.receiverMobile).ifBlank { "被授权人" }
-        }
-        showModalDialog("远程授权详情") { box, dialog ->
-            val infoTv = text(
-                listOf(
-                    "被授权人：$name",
-                    "生效时间：${formatAuthDateRange(item.startTime, item.endTime).ifBlank { "--" }}",
-                    "授权权限：${item.authorityDesc.ifBlank { item.authority.ifBlank { "--" } }}"
-                ).joinToString("\n"),
-                13.5f,
-                TEXT_BODY
-            ).apply { setLineSpacing(0f, 1.5f) }
-            box.addView(infoTv, lp(top = dp(12)))
-
-            val btns = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            box.addView(btns, lp(top = dp(20)))
-            btns.addView(secondaryBtn("关闭") { dialog.dismiss() }, weightLp(0, dp(44)))
-            btns.addView(
-                AppComponents.createActionButton(context, "撤销授权", ButtonStyle.DANGER_TEXT) {
-                    val pin = cachedPinProvider().ifBlank { profile.controlPin }
-                    if (pin.isBlank()) {
-                        toast("请先在安全性中设置 6 位 PIN 码")
-                        showPinManagementModal(profile)
-                        return@createActionButton
-                    }
-                    AppComponents.showConfirmDialog(
-                        context = context,
-                        title = "撤销远程控车授权",
-                        message = "确认撤销「$name」的远程控车权限？",
-                        confirmText = "撤销",
-                        cancelText = "取消",
-                        dangerConfirm = true
-                    ) {
-                        dialog.dismiss()
-                        scope.launch {
-                            val ok = runCatching {
-                                withContext(Dispatchers.IO) {
-                                    httpClient.revokeRemoteAuth(profile.vin, item.keyId, pin, "0", profile.accessToken)
-                                }
-                            }.getOrDefault(false)
-                            toast(if (ok) "远程授权已撤销" else "撤销远程授权失败")
-                            if (ok) onReload()
-                        }
-                    }
-                },
-                weightLp(dp(10), dp(44))
-            )
-        }
-    }
-
-    private fun formatAuthDateRange(start: String, end: String): String {
-        fun short(raw: String): String {
-            val s = raw.trim()
-            if (s.length >= 16) return s.substring(5, 16).replace('-', '/')
-            return s
-        }
-        val a = short(start)
-        val b = short(end)
-        return when {
-            a.isNotBlank() && b.isNotBlank() -> "$a – $b"
-            a.isNotBlank() -> a
-            b.isNotBlank() -> b
-            else -> ""
-        }
-    }
-
-    private fun formatAuthStatus(rawStatus: String): Pair<String, Boolean> {
-        val s = rawStatus.trim()
-        return when {
-            s == "1" || s.contains("生效") || s.contains("有效") || s.equals("active", ignoreCase = true) -> "生效中" to true
-            s == "0" || s.contains("过期") || s.contains("失效") || s.contains("撤销") -> "已过期" to false
-            s.isBlank() -> "生效中" to true
-            else -> s to false
         }
     }
 
@@ -1125,91 +471,6 @@ internal class VehicleFeatureSheets(
         }
     }
 
-    private fun loadAntiTheftAndMaintenanceTab(container: LinearLayout, profile: VehicleProfile) {
-        container.addView(loadingHint("正在查询防盗提醒与保养告警..."))
-        scope.launch {
-            val antiTheft = runCatching {
-                withContext(Dispatchers.IO) {
-                    httpClient.fetchAntiTheftSettings(profile.vin, profile.accessToken)
-                }
-            }
-            val reminders = runCatching {
-                withContext(Dispatchers.IO) {
-                    httpClient.fetchMaintenanceReminders(profile.vin, 1, 15, profile.accessToken)
-                }
-            }
-            container.removeAllViews()
-
-            // Anti-theft & speed limit status card
-            val statusCard = cardBox()
-            statusCard.addView(text("防盗提醒与限速状态", 15f, TEXT_PRIMARY, Typeface.BOLD))
-            antiTheft.onSuccess { st: AntiTheftStatus ->
-                statusCard.addView(kvRow("防盗报警提醒", if (st.theftRemindEnabled) "已开启" else "未开启"), lp(top = dp(10)))
-                statusCard.addView(kvRow("车速限制提醒", if (st.speedLimitEnabled) "已开启" else "未开启"))
-                if (st.speedLimitKmh.isNotBlank() && st.speedLimitKmh != "0") {
-                    statusCard.addView(kvRow("限速阈值", "${st.speedLimitKmh} km/h"))
-                }
-            }.onFailure { err ->
-                statusCard.addView(text("查询失败：${err.message.orEmpty().take(80)}", 13f, ERROR_RED), lp(top = dp(8)))
-            }
-            container.addView(statusCard, lp(bottom = dp(12)))
-
-            // Remote vehicle diagnosis trigger
-            container.addView(primaryBtn("远程车辆体检诊断") {
-                runVehicleDiagnosis(profile)
-            }, lp(bottom = dp(14), height = dp(46)))
-
-            // Maintenance & service reminders
-            container.addView(text("保养与车辆提醒", 14f, TEXT_SUB, Typeface.BOLD), lp(bottom = dp(8)))
-            reminders.onSuccess { list ->
-                if (list.isEmpty()) {
-                    container.addView(emptyHint("暂无保养或车辆告警提醒"))
-                } else {
-                    list.forEach { msg ->
-                        container.addView(messageCard(msg) { openMessageDetail(msg, profile) }, lp(bottom = dp(8)))
-                    }
-                }
-            }.onFailure { err ->
-                container.addView(errorHint("提醒查询失败：${err.message.orEmpty().take(80)}"))
-            }
-        }
-    }
-
-    private fun runVehicleDiagnosis(profile: VehicleProfile) {
-        showModalDialog("远程车辆体检诊断") { box, dialog ->
-            val statusTv = text("正在向车辆下发远程体检请求...", 14f, TEXT_BODY).apply {
-                setLineSpacing(0f, 1.45f)
-            }
-            box.addView(statusTv, lp(top = dp(12)))
-            box.addView(primaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(20), height = dp(44)))
-
-            scope.launch {
-                val res = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.fetchVehicleDiagnosis(profile.vin, profile.accessToken)
-                    }
-                }
-                res.onSuccess { json: JSONObject ->
-                    if (json.length() == 0) {
-                        statusTv.text = "体检完成：未检出异常故障项。"
-                    } else {
-                        val lines = mutableListOf<String>()
-                        val keys = json.keys()
-                        while (keys.hasNext()) {
-                            val k = keys.next()
-                            val v = json.optString(k)
-                            if (v.isNotBlank() && v != "null") lines += "$k: $v"
-                        }
-                        statusTv.text = if (lines.isEmpty()) "体检完成，车辆状态正常。"
-                        else lines.take(16).joinToString("\n")
-                    }
-                }.onFailure { err ->
-                    statusTv.text = "远程体检失败：${err.message.orEmpty().take(120)}"
-                }
-            }
-        }
-    }
-
     private fun loadGeofenceTab(
         container: LinearLayout,
         profile: VehicleProfile,
@@ -1223,8 +484,13 @@ internal class VehicleFeatureSheets(
                 }
             }
             container.removeAllViews()
+            val loadedCount = res.getOrNull()?.size ?: 0
             container.addView(primaryBtn("+ 新增电子围栏") {
-                openGeofenceEditor(existing = null, onReload = onReload)
+                if (loadedCount >= MAX_GEOFENCE_COUNT) {
+                    toast("最多可设置 $MAX_GEOFENCE_COUNT 个电子围栏，请先删除不需要的围栏")
+                } else {
+                    openGeofenceEditor(existing = null, currentFenceCount = loadedCount, onReload = onReload)
+                }
             }, lp(bottom = dp(12), height = dp(46)))
 
             res.onSuccess { fences ->
@@ -1232,17 +498,20 @@ internal class VehicleFeatureSheets(
                     container.addView(emptyHint("暂未设置电子围栏"))
                 } else {
                     fences.forEach { fence ->
-                        container.addView(geofenceCard(fence, profile, onReload), lp(bottom = dp(10)))
+                        container.addView(geofenceCard(fence, fences.size, profile, onReload), lp(bottom = dp(10)))
                     }
                 }
             }.onFailure { err ->
-                container.addView(errorHint("电子围栏查询失败：${err.message.orEmpty().take(90)}"))
+                if (err !is CherySessionExpiredException) {
+                    container.addView(errorHint("电子围栏查询失败：${err.message.orEmpty().take(90)}"))
+                }
             }
         }
     }
 
     private fun geofenceCard(
         fence: GeofenceItem,
+        totalFenceCount: Int,
         profile: VehicleProfile,
         onReload: () -> Unit
     ): LinearLayout = cardBox().apply {
@@ -1251,7 +520,7 @@ internal class VehicleFeatureSheets(
         isClickable = true
         isFocusable = true
         MotionSpec.attachPressPhysics(this, pressedScale = 0.985f)
-        setOnClickListener { openGeofenceEditor(existing = fence, onReload = onReload) }
+        setOnClickListener { openGeofenceEditor(existing = fence, currentFenceCount = totalFenceCount, onReload = onReload) }
 
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1305,12 +574,33 @@ internal class VehicleFeatureSheets(
         headerRow.addView(toggleSwitch, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         addView(headerRow)
 
-        val detail = listOfNotNull(
-            fence.radiusMeters.takeIf { it.isNotBlank() }?.let { "半径 ${it}m" },
-            if (fence.lat.isNotBlank() && fence.lon.isNotBlank()) "${fence.lat}, ${fence.lon}" else null
-        ).joinToString(" · ")
-        if (detail.isNotBlank()) {
-            addView(text(detail, 12.5f, TEXT_SUB), lp(top = dp(4)))
+        val alertLabel = if (fence.type.trim() == "0") "进入提醒" else "驶出提醒"
+        val radiusLabel = fence.radiusMeters.takeIf { it.isNotBlank() }?.let { "半径 ${it}m" }
+        val coordKey = if (fence.lat.isNotBlank() && fence.lon.isNotBlank()) "${fence.lat},${fence.lon}" else ""
+        val cachedAddr = coordKey.takeIf { it.isNotBlank() }?.let { geofenceAddressCache[it] }.orEmpty()
+        val detailTv = text(
+            listOfNotNull(radiusLabel, alertLabel, cachedAddr.takeIf { it.isNotBlank() }).joinToString(" · "),
+            12.5f,
+            TEXT_SUB
+        )
+        addView(detailTv, lp(top = dp(4)))
+
+        if (cachedAddr.isBlank() && coordKey.isNotBlank()) {
+            val fLat = fence.lat.toDoubleOrNull()
+            val fLon = fence.lon.toDoubleOrNull()
+            if (fLat != null && fLon != null && (fLat != 0.0 || fLon != 0.0)) {
+                scope.launch {
+                    val resolved = runCatching {
+                        withContext(Dispatchers.IO) {
+                            httpClient.reverseGeocodeApproxAddress(fLat, fLon)
+                        }
+                    }.getOrNull().orEmpty().trim()
+                    if (resolved.isNotBlank()) {
+                        geofenceAddressCache[coordKey] = resolved
+                        detailTv.text = listOfNotNull(radiusLabel, alertLabel, resolved).joinToString(" · ")
+                    }
+                }
+            }
         }
 
         var deletingFence = false
@@ -1362,13 +652,18 @@ internal class VehicleFeatureSheets(
         addView(deleteBtn, lp(top = dp(8), height = dp(38)))
     }
 
-    private fun openGeofenceEditor(existing: GeofenceItem?, onReload: () -> Unit) {
+    private fun openGeofenceEditor(
+        existing: GeofenceItem?,
+        currentFenceCount: Int = 0,
+        onReload: () -> Unit
+    ) {
         val hadActiveSheet = activeDialog?.isShowing == true
         activeImmediateDismiss?.invoke() ?: activeDialog?.dismiss()
         val pushOverlay = onOpenOverlaySubpage
         if (pushOverlay != null) {
             val (editorView, destroyCb) = buildGeofenceEditorSubpageView(
                 existing = existing,
+                currentFenceCount = currentFenceCount,
                 onBack = { onPopOverlaySubpage?.invoke() },
                 onSaved = {
                     onPopOverlaySubpage?.invoke()
@@ -1384,11 +679,13 @@ internal class VehicleFeatureSheets(
         }
 
         // Fallback full-screen dark modal Dialog when overlay stack callback is not wired
+        if (!MotionSpec.isHostActivityAlive(context)) return
         secondaryDialog?.dismiss()
         val dialog = Dialog(context, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val (editorView, destroyCb) = buildGeofenceEditorSubpageView(
             existing = existing,
+            currentFenceCount = currentFenceCount,
             onBack = { dialog.dismiss() },
             onSaved = {
                 dialog.dismiss()
@@ -1409,8 +706,15 @@ internal class VehicleFeatureSheets(
             destroyCb()
             if (secondaryDialog === dialog) secondaryDialog = null
         }
+        if (!MotionSpec.isHostActivityAlive(context)) {
+            destroyCb()
+            return
+        }
         secondaryDialog = dialog
-        dialog.show()
+        runCatching { dialog.show() }.onFailure {
+            destroyCb()
+            if (secondaryDialog === dialog) secondaryDialog = null
+        }
     }
 
     /**
@@ -1420,6 +724,7 @@ internal class VehicleFeatureSheets(
     @SuppressLint("SetJavaScriptEnabled")
     fun buildGeofenceEditorSubpageView(
         existing: GeofenceItem? = null,
+        currentFenceCount: Int = 0,
         onBack: () -> Unit,
         onSaved: () -> Unit
     ): Pair<View, () -> Unit> {
@@ -1466,35 +771,133 @@ internal class VehicleFeatureSheets(
             val latStr = String.format(Locale.US, "%.6f", selectedLat)
             val lonStr = String.format(Locale.US, "%.6f", selectedLon)
             val radiusStr = selectedRadiusMeters.toString()
+            val preservedType = existing?.type?.trim()?.takeIf { it == "0" || it == "1" } ?: "1"
+            val preservedShape = existing?.shape?.trim()?.takeIf { it == "1" || it == "2" } ?: "1"
+            val wasDisabled = existing != null && existing.status.trim() == "0"
             saving = true
             scope.launch {
                 val res = runCatching {
                     withContext(Dispatchers.IO) {
-                        val savedOk = httpClient.saveGeofence(
-                            vin = profile.vin,
-                            name = name,
-                            lat = latStr,
-                            lon = lonStr,
-                            radiusMeters = radiusStr,
-                            accessToken = profile.accessToken
-                        )
-                        if (savedOk && existing != null && existing.keyId.isNotBlank()) {
-                            runCatching {
-                                httpClient.deleteOrToggleGeofence(
-                                    keyId = existing.keyId,
-                                    type = "2",
+                        var deleteWarning: String? = null
+                        val existingId = existing?.keyId.orEmpty().trim()
+                        val savedOk = if (existing != null && existingId.isNotBlank() && currentFenceCount >= MAX_GEOFENCE_COUNT) {
+                            // Server enforces a 5-fence cap (zyhl MapFenceListActivity:200); free slot first
+                            val deletedOld = httpClient.deleteOrToggleGeofence(
+                                keyId = existingId,
+                                type = "2",
+                                accessToken = profile.accessToken
+                            )
+                            if (!deletedOld) {
+                                return@withContext false to "已达围栏上限且旧围栏移除失败，请稍后重试"
+                            }
+                            val createRes = runCatching {
+                                httpClient.saveGeofence(
+                                    vin = profile.vin,
+                                    name = name,
+                                    lat = latStr,
+                                    lon = lonStr,
+                                    radiusMeters = radiusStr,
+                                    type = preservedType,
+                                    shape = preservedShape,
                                     accessToken = profile.accessToken
                                 )
                             }
+                            createRes.exceptionOrNull()?.let { err ->
+                                if (err is kotlinx.coroutines.CancellationException || err is CherySessionExpiredException) {
+                                    throw err
+                                }
+                            }
+                            val created = createRes.getOrDefault(false)
+                            if (!created) {
+                                // Best-effort rollback of original fence (preserving disabled state) on false or thrown error
+                                val restoredName = existing.name.ifBlank { "安全围栏" }
+                                val restoredOk = runCatching {
+                                    httpClient.saveGeofence(
+                                        vin = profile.vin,
+                                        name = restoredName,
+                                        lat = existing.lat,
+                                        lon = existing.lon,
+                                        radiusMeters = existing.radiusMeters.ifBlank { radiusStr },
+                                        type = preservedType,
+                                        shape = preservedShape,
+                                        accessToken = profile.accessToken
+                                    )
+                                }.getOrDefault(false)
+                                if (restoredOk && wasDisabled) {
+                                    runCatching {
+                                        val restoredList = httpClient.fetchGeofences(profile.vin, profile.accessToken)
+                                        val restored = restoredList.lastOrNull { item ->
+                                            item.keyId.isNotBlank() &&
+                                                item.keyId != existingId &&
+                                                item.name == restoredName
+                                        }
+                                        if (restored != null && restored.status != "0") {
+                                            httpClient.deleteOrToggleGeofence(
+                                                keyId = restored.keyId,
+                                                type = "0",
+                                                accessToken = profile.accessToken
+                                            )
+                                        }
+                                    }
+                                }
+                                return@withContext false to "更新围栏失败，已尝试恢复原围栏"
+                            }
+                            true
+                        } else {
+                            val created = httpClient.saveGeofence(
+                                vin = profile.vin,
+                                name = name,
+                                lat = latStr,
+                                lon = lonStr,
+                                radiusMeters = radiusStr,
+                                type = preservedType,
+                                shape = preservedShape,
+                                accessToken = profile.accessToken
+                            )
+                            if (created && existing != null && existingId.isNotBlank()) {
+                                val deletedOld = runCatching {
+                                    httpClient.deleteOrToggleGeofence(
+                                        keyId = existingId,
+                                        type = "2",
+                                        accessToken = profile.accessToken
+                                    )
+                                }.getOrDefault(false)
+                                if (!deletedOld) {
+                                    deleteWarning = "新围栏已保存，但旧围栏未能自动删除，请在列表中手动清理"
+                                }
+                            }
+                            created
                         }
-                        savedOk
+
+                        if (savedOk && wasDisabled) {
+                            runCatching {
+                                val updatedList = httpClient.fetchGeofences(profile.vin, profile.accessToken)
+                                val newest = updatedList.lastOrNull { item ->
+                                    item.keyId.isNotBlank() &&
+                                        item.keyId != existingId &&
+                                        item.name == name
+                                }
+                                if (newest != null && newest.status != "0") {
+                                    httpClient.deleteOrToggleGeofence(
+                                        keyId = newest.keyId,
+                                        type = "0",
+                                        accessToken = profile.accessToken
+                                    )
+                                }
+                            }
+                        }
+                        savedOk to deleteWarning
                     }
                 }
                 saving = false
                 if (mapDestroyed) return@launch
-                res.onSuccess { ok ->
-                    toast(if (ok) "电子围栏已保存" else "保存围栏失败，请重试")
-                    if (ok) onSaved()
+                res.onSuccess { (ok, msg) ->
+                    if (ok) {
+                        toast(msg ?: "电子围栏已保存")
+                        onSaved()
+                    } else {
+                        toast(msg ?: "保存围栏失败，请重试")
+                    }
                 }.onFailure { err ->
                     if (err !is CherySessionExpiredException) {
                         toast(friendlyErrorMessage(err, "保存围栏失败，请重试"))
@@ -1619,6 +1022,7 @@ internal class VehicleFeatureSheets(
             loadUrl("https://appassets.androidplatform.net/assets/map/index.html")
         }
         mapWebView = wv
+        activeMapWebViews.add(wv)
         mapContainer.addView(wv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         root.addView(
             mapContainer,
@@ -1659,6 +1063,7 @@ internal class VehicleFeatureSheets(
                 mapDestroyed = true
                 mapReady = false
                 mapWebView?.let { webView ->
+                    activeMapWebViews.remove(webView)
                     webView.removeJavascriptInterface("CarMapBridge")
                     webView.stopLoading()
                     webView.loadUrl("about:blank")
@@ -1815,12 +1220,11 @@ internal class VehicleFeatureSheets(
                             if (mapDestroyed) return@post
                             pickedPoiLat = lat
                             pickedPoiLon = lon
-                            val coordStr = String.format(Locale.US, "%.4f, %.4f", lat, lon)
                             pickedPoiName = "地图选点"
-                            pickedPoiAddress = coordStr
-                            pickedTitleView?.text = "定位解析中..."
-                            pickedSubView?.text = coordStr
-                            pickedSubView?.visibility = View.VISIBLE
+                            pickedPoiAddress = ""
+                            pickedTitleView?.text = "正在解析地址..."
+                            pickedSubView?.text = ""
+                            pickedSubView?.visibility = View.GONE
                             pickedBannerView?.visibility = View.VISIBLE
                             searchDestPillView?.visibility = View.GONE
                             scope.launch {
@@ -1836,7 +1240,9 @@ internal class VehicleFeatureSheets(
                                     pickedTitleView?.text = resolved
                                     pickedSubView?.visibility = View.GONE
                                 } else {
-                                    pickedTitleView?.text = "地图选点"
+                                    pickedTitleView?.text = "已选地图位置"
+                                    pickedSubView?.text = "可点击右侧发送到车机导航"
+                                    pickedSubView?.visibility = View.VISIBLE
                                 }
                             }
                         }
@@ -1879,6 +1285,7 @@ internal class VehicleFeatureSheets(
             loadUrl("https://appassets.androidplatform.net/assets/map/index.html")
         }
         mapWebView = wv
+        activeMapWebViews.add(wv)
         mapContainer.addView(wv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
         // Embedded Navigation pill inside the map overlay (bottom-right next to recenter control)
@@ -2172,6 +1579,7 @@ internal class VehicleFeatureSheets(
                 mapReady = false
                 pendingMapJs = null
                 mapWebView?.let { webView ->
+                    activeMapWebViews.remove(webView)
                     webView.removeJavascriptInterface("CarMapBridge")
                     webView.stopLoading()
                     webView.loadUrl("about:blank")
@@ -2264,271 +1672,6 @@ internal class VehicleFeatureSheets(
                 }
             }
         }
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    fun showLocationAndTripsSheet(initialTab: Int = 0) {
-        val profile = profileProvider()
-        val startTab = initialTab.coerceIn(0, 1)
-        var mapWebView: WebView? = null
-        var mapReady = false
-        var mapDestroyed = false
-        var pendingMapJs: String? = null
-
-        fun runMapJs(js: String) {
-            if (mapDestroyed) return
-            val wv = mapWebView ?: return
-            if (mapReady) {
-                wv.evaluateJavascript(js, null)
-            } else {
-                pendingMapJs = js
-            }
-        }
-
-        fun centerMapOnVehicle() {
-            val t = telemetryProvider()
-            val lat = t?.latitude
-            val lon = t?.longitude
-            if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-                runMapJs("window.CarMap && window.CarMap.setVehicleLocation($lat, $lon, ${JSONObject.quote("当前车辆位置")});")
-            }
-        }
-
-        fun plotTripOnMap(trip: TripRecordItem): Boolean {
-            if (trip.points.isEmpty()) return false
-            val ptsJson = JSONArray()
-            trip.points.forEach { pt ->
-                ptsJson.put(JSONObject().put("lat", pt.lat).put("lon", pt.lon))
-            }
-            val label = buildString {
-                val timePart = listOf(trip.startTime, trip.endTime)
-                    .filter { it.isNotBlank() }
-                    .joinToString(" → ")
-                append(timePart.ifBlank { trip.curDate.ifBlank { "行驶轨迹" } })
-                if (trip.mileageKm.isNotBlank()) append(" · ${trip.mileageKm} km")
-            }
-            runMapJs("window.CarMap && window.CarMap.showTripRoute($ptsJson, ${JSONObject.quote(label)});")
-            return true
-        }
-
-        activeImmediateDismiss?.invoke() ?: activeDialog?.let { MotionSpec.dismissSheetImmediately(it) }
-        var depthRestored = false
-        lateinit var outer: LinearLayout
-        val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
-            fun restoreDepthIfNeeded() {
-                if (activeDialog === this && !depthRestored) {
-                    depthRestored = true
-                    onDepthRecede(false)
-                }
-            }
-
-            fun dismissImmediately() {
-                outer.animate().cancel()
-                restoreDepthIfNeeded()
-                MotionSpec.dismissSheetImmediately(this)
-            }
-
-            override fun dismiss() {
-                if (!isShowing || MotionSpec.isBypassingSheetDismiss(this)) {
-                    runCatching { super.dismiss() }
-                    return
-                }
-                MotionSpec.dismissSheetAnimated(outer, this) {
-                    restoreDepthIfNeeded()
-                }
-            }
-        }
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-
-        val sheetHeight = (context.resources.displayMetrics.heightPixels * 0.90f).roundToInt()
-        val mapHeight = (sheetHeight * 0.38f).roundToInt().coerceIn(dp(248), dp(310))
-
-        outer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            background = topRounded(CARD_MODAL, 20f)
-            setPadding(dp(20), dp(12), dp(20), dp(18))
-        }
-        val handle = View(context).apply { background = rounded(Color.rgb(72, 74, 82), 2f) }
-        outer.addView(handle, LinearLayout.LayoutParams(dp(38), dp(4)).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            bottomMargin = dp(12)
-        })
-
-        val header = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        outer.addView(header)
-        header.addView(
-            text("地点与行程", 20f, TEXT_PRIMARY, Typeface.BOLD),
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-        )
-
-        // Pinned Top Map (~38% of 90% sheet height) — never scrolls off-screen
-        val mapContainer = FrameLayout(context).apply {
-            background = rounded(MAP_BG, 12f)
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, dpF(12f))
-                }
-            }
-            clipToOutline = true
-        }
-        val assetLoader = WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
-            .build()
-        val wv = object : WebView(context) {
-            @SuppressLint("ClickableViewAccessibility")
-            override fun onTouchEvent(event: MotionEvent): Boolean {
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN,
-                    MotionEvent.ACTION_POINTER_DOWN,
-                    MotionEvent.ACTION_MOVE -> {
-                        parent?.requestDisallowInterceptTouchEvent(true)
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        parent?.requestDisallowInterceptTouchEvent(false)
-                    }
-                }
-                return super.onTouchEvent(event)
-            }
-        }.apply {
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            setBackgroundColor(MAP_BG)
-            isHorizontalScrollBarEnabled = false
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(
-                    view: WebView,
-                    request: WebResourceRequest
-                ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
-
-                override fun onPageFinished(view: WebView, url: String?) {
-                    if (mapDestroyed) return
-                    mapReady = true
-                    val t = telemetryProvider()
-                    val lat = t?.latitude
-                    val lon = t?.longitude
-                    if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-                        view.evaluateJavascript(
-                            "window.CarMap && window.CarMap.setVehicleLocation($lat, $lon, ${JSONObject.quote("当前车辆位置")});",
-                            null
-                        )
-                    }
-                    pendingMapJs?.let { js ->
-                        pendingMapJs = null
-                        view.evaluateJavascript(js, null)
-                    }
-                }
-            }
-            loadUrl("https://appassets.androidplatform.net/assets/map/index.html")
-        }
-        mapWebView = wv
-        mapContainer.addView(wv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        outer.addView(mapContainer, lp(top = dp(10), bottom = dp(12), height = mapHeight))
-
-        // Middle Pinned 2-Tab Sliding Segmented Bar
-        val lowerScroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-        AppSystemInsets.applyBottomNavPadding(lowerScroll)
-        val contentHost = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, dp(12))
-        }
-        lowerScroll.addView(contentHost, ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        var currentTab = startTab
-        var renderTab: (Int) -> Unit = {}
-
-        val tabs = segmentedBar(listOf("实时位置", "历史行程"), startTab) { idx ->
-            currentTab = idx
-            renderTab(idx)
-        }
-        outer.addView(tabs, lp(bottom = dp(12)))
-        outer.addView(lowerScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-
-        renderTab = { tab ->
-            lowerScroll.scrollTo(0, 0)
-            contentHost.removeAllViews()
-            when (tab) {
-                0 -> {
-                    centerMapOnVehicle()
-                    renderLiveLocationTab(contentHost, dialog)
-                }
-                else -> loadTripHistoryTab(
-                    container = contentHost,
-                    profile = profile,
-                    isTabActive = { !mapDestroyed && currentTab == 1 },
-                    onPlotTrip = { plotTripOnMap(it) }
-                )
-            }
-            animateTabContent(contentHost)
-        }
-        renderTab(currentTab)
-
-        AppSystemInsets.installBottomSheetContent(dialog, outer, fixedSheetHeightPx = sheetHeight, dimAmount = 0.68f)
-        MotionSpec.attachSheetSwipeToDismiss(outer, lowerScroll, dialog) {
-            dialog.restoreDepthIfNeeded()
-        }
-        dialog.setOnDismissListener {
-            mapDestroyed = true
-            mapReady = false
-            pendingMapJs = null
-            mapWebView?.let { webView ->
-                webView.stopLoading()
-                (webView.parent as? ViewGroup)?.removeView(webView)
-                webView.destroy()
-            }
-            mapWebView = null
-            if (activeDialog === dialog) {
-                activeDialog = null
-                activeImmediateDismiss = null
-                if (!depthRestored) {
-                    depthRestored = true
-                    onDepthRecede(false)
-                }
-            }
-        }
-        activeDialog = dialog
-        activeImmediateDismiss = { dialog.dismissImmediately() }
-        dialog.show()
-        onDepthRecede(true)
-        MotionSpec.animateSheetEnter(outer)
-    }
-
-    private fun renderLiveLocationTab(
-        container: LinearLayout,
-        dialog: Dialog
-    ) {
-        val t = telemetryProvider()
-        val hasCoords = t?.latitude != null && t.longitude != null && (t.latitude != 0.0 || t.longitude != 0.0)
-        val onlineText = when (t?.online?.trim()?.lowercase(Locale.US)) {
-            "1", "true", "online", "在线" -> "在线"
-            "0", "false", "offline", "离线" -> "离线"
-            else -> if (t != null) "在线" else "未获取"
-        }
-        val locationStatus = if (hasCoords) "$onlineText · 已定位" else "$onlineText · 暂无定位"
-
-        val card = cardBox()
-        val resolvedPlate = plateNoProvider().ifBlank { t?.licensePlate.orEmpty() }
-        val rows = buildList {
-            if (resolvedPlate.isNotBlank()) add("车牌号码" to resolvedPlate)
-            add("车辆位置" to if (hasCoords) liveAddressLabelProvider().ifBlank { "已定位" } else "位置暂不可用")
-            add("距离" to if (hasCoords) liveDistanceLabelProvider().ifBlank { "距离暂不可用" } else "距离暂不可用")
-            add("车辆在线 / 定位状态" to locationStatus)
-            t?.time?.takeIf { it.isNotBlank() }?.let { add("定位时间" to it) }
-        }
-        rows.forEachIndexed { idx, (k, v) ->
-            card.addView(kvRow(k, v), lp(top = if (idx == 0) 0 else dp(2)))
-        }
-        container.addView(card)
     }
 
     private fun loadTripHistoryTab(
@@ -2867,351 +2010,8 @@ internal class VehicleFeatureSheets(
     }
 
     // =========================================================================
-    // 3. Menu Row 4 (安全性和驾驶员): 数字钥匙 / 远程授权管理 / 防盗 & 密码
+    // 3. 车辆升级 (OTA) 与账户安全/密码管理
     // =========================================================================
-
-    fun showSecurityAndDriverSheet(initialTab: Int = 0) {
-        val profile = profileProvider()
-        showSheet("安全性和驾驶员") { body, dialog ->
-            val contentHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-            var currentTab = if (initialTab > 0) 1 else 0
-            var renderTab: (Int) -> Unit = {}
-
-            val tabs = segmentedBar(listOf("数字钥匙", "远程授权"), currentTab) { idx ->
-                currentTab = idx
-                renderTab(idx)
-            }
-            body.addView(tabs, lp(top = dp(10), bottom = dp(14)))
-            body.addView(contentHost, lp())
-
-            renderTab = { tab ->
-                contentHost.removeAllViews()
-                when (tab) {
-                    0 -> renderDigitalKeySecurityTab(contentHost, profile, dialog)
-                    else -> {
-                        val delegate = onOpenRemoteAuthManagement
-                        if (delegate != null) {
-                            dialog.dismiss()
-                            delegate()
-                        } else {
-                            loadRemoteAuthTab(contentHost, profile) { renderTab(1) }
-                        }
-                    }
-                }
-                animateTabContent(contentHost)
-            }
-            renderTab(currentTab)
-        }
-    }
-
-    private fun renderDigitalKeySecurityTab(
-        container: LinearLayout,
-        profile: VehicleProfile,
-        dialog: Dialog
-    ) {
-        val keyCard = cardBox()
-        keyCard.addView(text("手机蓝牙数字钥匙", 15f, TEXT_PRIMARY, Typeface.BOLD))
-        val bleReady = isBleConnected()
-        val ready = hasLocalKeyMaterial(profile)
-        val lines = mutableListOf<String>()
-        lines += when {
-            bleReady -> "通道状态：手机钥匙已连接（蓝牙直连）"
-            isBleNearby() -> "通道状态：发现附近车辆，正在建立蓝牙连接..."
-            else -> "通道状态：手机钥匙已断开连接（当前远程网络）"
-        }
-        lines += if (ready) {
-            "本地钥匙材料：已就绪（靠近车辆自动无感切换蓝牙）"
-        } else {
-            "本地钥匙材料：尚未同步，请点击下方一键拉取解封"
-        }
-        val pinHint = lastPairingPinProvider()
-        if (pinHint.isNotBlank() && !bleReady) {
-            lines += "最近动态配对码：$pinHint"
-        }
-        keyCard.addView(text(lines.joinToString("\n"), 13f, TEXT_SUB).apply {
-            setLineSpacing(0f, 1.45f)
-        }, lp(top = dp(6)))
-        container.addView(keyCard)
-
-        container.addView(primaryBtn(
-            if (ready) "重新从云端拉取并更新数字钥匙" else "从云端一键拉取并解封新车钥匙"
-        ) {
-            dialog.dismiss()
-            onTriggerCloudKeyProvision()
-        }, lp(top = dp(14), height = dp(48)))
-
-        container.addView(secondaryBtn("立即扫描并连接附近蓝牙钥匙") {
-            dialog.dismiss()
-            onScanNearbyBle()
-            onStatusMessage("正在扫描附近车辆蓝牙...")
-        }, lp(top = dp(10), height = dp(46)))
-
-        // Quick security actions (OTA upgrade belongs in top-right account/system menu)
-        container.addView(smallBtn("防盗与电子围栏") {
-            dialog.dismiss()
-            showAntiTheftSheet()
-        }, lp(top = dp(14), height = dp(42)))
-
-        val quickRow2 = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-        container.addView(quickRow2, lp(top = dp(8)))
-        quickRow2.addView(smallBtn("修改登录密码") {
-            showChangeLoginPasswordModal(profile)
-        }, weightLp(0, dp(42)))
-        quickRow2.addView(smallBtn("修改/设置车控 PIN") {
-            showPinManagementModal(profile)
-        }, weightLp(dp(8), dp(42)))
-    }
-
-    private fun loadRemoteAuthTab(
-        container: LinearLayout,
-        profile: VehicleProfile,
-        onReload: () -> Unit
-    ) {
-        container.addView(loadingHint("正在查询远程控车授权列表..."))
-        scope.launch {
-            val res = runCatching {
-                withContext(Dispatchers.IO) {
-                    httpClient.fetchRemoteAuthList(profile.vin, profile.accessToken)
-                }
-            }
-            container.removeAllViews()
-
-            val actions = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            container.addView(actions, lp(bottom = dp(12)))
-            actions.addView(primaryBtn("+ 新增远程授权") {
-                showGrantRemoteAuthModal(profile, onReload)
-            }, weightLp(0, dp(44)))
-            actions.addView(secondaryBtn("授权操作记录") {
-                showAuthorizedOperateRecordsModal(profile)
-            }, weightLp(dp(8), dp(44)))
-
-            res.onSuccess { list ->
-                if (list.isEmpty()) {
-                    container.addView(emptyHint("当前暂无远程控车授权人"))
-                } else {
-                    list.forEach { item ->
-                        container.addView(remoteAuthCard(item, profile, onReload), lp(bottom = dp(10)))
-                    }
-                }
-            }.onFailure { err ->
-                container.addView(errorHint("远程授权查询失败：${err.message.orEmpty().take(90)}"))
-            }
-        }
-    }
-
-    private fun remoteAuthCard(
-        item: VehicleAuthorizationItem,
-        profile: VehicleProfile,
-        onReload: () -> Unit
-    ): LinearLayout = cardBox().apply {
-        val title = SensitiveUiText.maskIfPhone(item.receiverName).ifBlank {
-            SensitiveUiText.maskPhone(item.receiverMobile).ifBlank { "授权人 #${item.keyId}" }
-        }
-        addView(text(title, 15f, TEXT_PRIMARY, Typeface.BOLD))
-        val sub = listOfNotNull(
-            item.authorityDesc.takeIf { it.isNotBlank() },
-            item.status.takeIf { it.isNotBlank() }?.let { "状态:$it" }
-        ).joinToString(" · ")
-        if (sub.isNotBlank()) addView(text(sub, 12.5f, TEXT_SUB), lp(top = dp(4)))
-        if (item.startTime.isNotBlank() || item.endTime.isNotBlank()) {
-            addView(text("期限：${item.startTime} ~ ${item.endTime}", 12f, TEXT_SUB), lp(top = dp(3)))
-        }
-
-        val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-        addView(row, lp(top = dp(10)))
-        row.addView(smallBtn("查看详情") {
-            showRemoteAuthDetailModal(item, profile)
-        }, weightLp(0, dp(38)))
-        row.addView(smallBtn("撤销授权", danger = true) {
-            val pin = cachedPinProvider().ifBlank { profile.controlPin }
-            if (pin.isBlank()) {
-                toast("请先在安全性中设置 6 位 PIN 码")
-                showPinManagementModal(profile)
-                return@smallBtn
-            }
-            AppComponents.showConfirmDialog(
-                context = context,
-                title = "撤销远程控车授权",
-                message = "确认撤销「$title」的远程控车权限？",
-                confirmText = "撤销",
-                cancelText = "取消",
-                dangerConfirm = true
-            ) {
-                scope.launch {
-                    val ok = runCatching {
-                        withContext(Dispatchers.IO) {
-                            httpClient.revokeRemoteAuth(profile.vin, item.keyId, pin, "0", profile.accessToken)
-                        }
-                    }.getOrDefault(false)
-                    toast(if (ok) "远程授权已撤销" else "撤销远程授权失败")
-                    if (ok) onReload()
-                }
-            }
-        }, weightLp(dp(8), dp(38)))
-    }
-
-    private fun showRemoteAuthDetailModal(item: VehicleAuthorizationItem, profile: VehicleProfile) {
-        showModalDialog("远程授权详情") { box, dialog ->
-            val tv = text("正在获取授权详情...", 13.5f, TEXT_BODY).apply { setLineSpacing(0f, 1.45f) }
-            box.addView(tv, lp(top = dp(12)))
-            box.addView(primaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(18), height = dp(44)))
-
-            scope.launch {
-                val detail = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.fetchRemoteAuthDetail(item.keyId, profile.accessToken)
-                    }
-                }.getOrDefault(item)
-                tv.text = listOf(
-                    "被授权账号：${SensitiveUiText.maskPhone(detail.receiverMobile).ifBlank { SensitiveUiText.maskIfPhone(detail.receiverName).ifBlank { SensitiveUiText.MISSING } }}",
-                    "授权编号：${detail.keyId}",
-                    "开始时间：${detail.startTime.ifBlank { "--" }}",
-                    "结束时间：${detail.endTime.ifBlank { "--" }}",
-                    "授权权限：${detail.authorityDesc.ifBlank { detail.authority.ifBlank { "--" } }}"
-                ).joinToString("\n")
-            }
-        }
-    }
-
-    private fun showGrantRemoteAuthModal(profile: VehicleProfile, onGranted: () -> Unit) {
-        val (defStart, defEnd) = defaultAuthWindow()
-        showModalDialog("新增远程控车授权") { box, dialog ->
-            val mobileEt = modalInput("被授权人手机号", InputType.TYPE_CLASS_PHONE)
-            val (startField, getStartTime) = AppComponents.createDateTimePickerField(
-                context = context,
-                hint = "开始时间",
-                initialValue = defStart,
-                mode = DateTimeMode.DATE_TIME
-            )
-            val (endField, getEndTime) = AppComponents.createDateTimePickerField(
-                context = context,
-                hint = "结束时间",
-                initialValue = defEnd,
-                mode = DateTimeMode.DATE_TIME
-            )
-            val authEt = modalInput("权限码（默认 1,2,3）").apply { setText("1,2,3") }
-            val pinEt = modalInput(
-                "6 位 PIN 码",
-                InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
-            ).apply {
-                val cached = cachedPinProvider().ifBlank { profile.controlPin }
-                if (cached.isNotBlank()) setText(cached)
-            }
-            box.addView(mobileEt, lp(top = dp(12), height = dp(46)))
-            box.addView(startField, lp(top = dp(10)))
-            box.addView(endField, lp(top = dp(8)))
-            box.addView(authEt, lp(top = dp(12), height = dp(46)))
-            box.addView(pinEt, lp(top = dp(10), height = dp(46)))
-
-            val btns = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            box.addView(btns, lp(top = dp(18)))
-            btns.addView(secondaryBtn("取消") { dialog.dismiss() }, weightLp(0, dp(44)))
-            btns.addView(primaryBtn("确认新增") {
-                val mobile = mobileEt.text.toString().trim()
-                val start = getStartTime().trim()
-                val end = getEndTime().trim()
-                val authority = authEt.text.toString().trim().ifBlank { "1,2,3" }
-                val pin = pinEt.text.toString().trim()
-                if (mobile.length < 11 || pin.isBlank()) {
-                    toast("请填写正确手机号和车控 PIN")
-                    return@primaryBtn
-                }
-                dialog.dismiss()
-                scope.launch {
-                    val ok = runCatching {
-                        withContext(Dispatchers.IO) {
-                            httpClient.grantRemoteAuth(
-                                vin = profile.vin,
-                                receiverMobile = mobile,
-                                startTime = start,
-                                endTime = end,
-                                pin = pin,
-                                authority = authority,
-                                accessToken = profile.accessToken
-                            )
-                        }
-                    }.getOrDefault(false)
-                    toast(if (ok) "远程控车授权已添加" else "新增远程授权失败")
-                    if (ok) onGranted()
-                }
-            }, weightLp(dp(10), dp(44)))
-        }
-    }
-
-    private fun showAuthorizedOperateRecordsModal(profile: VehicleProfile) {
-        showModalDialog("被授权人操作记录") { box, dialog ->
-            val tv = text("正在加载授权操作日志...", 13f, TEXT_BODY).apply { setLineSpacing(0f, 1.45f) }
-            box.addView(tv, lp(top = dp(12)))
-            box.addView(primaryBtn("关闭") { dialog.dismiss() }, lp(top = dp(18), height = dp(44)))
-
-            scope.launch {
-                val res = runCatching {
-                    withContext(Dispatchers.IO) {
-                        httpClient.fetchAuthorizedOperateRecords(profile.vin, "", 1, 15, profile.accessToken)
-                    }
-                }
-                res.onSuccess { items ->
-                    tv.text = if (items.isEmpty()) "暂无被授权人远程控车操作记录。"
-                    else items.take(10).joinToString("\n\n") { it.toString().take(160) }
-                }.onFailure { err ->
-                    tv.text = "记录加载失败：${err.message.orEmpty().take(100)}"
-                }
-            }
-        }
-    }
-
-    // =========================================================================
-    // 4. Top-Right Menu: 账户安全、车辆升级 (OTA) 与修改密码
-    // =========================================================================
-
-    fun showAccountAndMenuSheet() {
-        val profile = profileProvider()
-        val modelName = modelNameProvider().ifBlank { "我的座驾" }
-        val plate = plateNoProvider()
-
-        showSheet("账户与车辆设置") { body, dialog ->
-            val infoBox = cardBox()
-            infoBox.addView(text(modelName, 17f, TEXT_PRIMARY, Typeface.BOLD))
-            val meta = listOfNotNull(
-                plate.takeIf { it.isNotBlank() },
-                maskedVin(profile.vin),
-                SensitiveUiText.maskPhone(profile.mobileNo).takeIf { it.isNotBlank() }
-            ).joinToString("  ·  ")
-            infoBox.addView(text(meta, 13f, TEXT_SUB), lp(top = dp(6)))
-            body.addView(infoBox, lp(top = dp(10)))
-
-            body.addView(secondaryBtn("车辆升级") {
-                dialog.dismiss()
-                showVehicleUpgradeSheet()
-            }, lp(top = dp(14), height = dp(46)))
-
-            body.addView(secondaryBtn("修改登录密码") {
-                showChangeLoginPasswordModal(profile)
-            }, lp(top = dp(10), height = dp(46)))
-
-            body.addView(secondaryBtn("车控安防密码 (PIN)") {
-                showPinManagementModal(profile)
-            }, lp(top = dp(10), height = dp(46)))
-
-            body.addView(secondaryBtn("消息提醒") {
-                dialog.dismiss()
-                showMessageAndAlertCenterSheet()
-            }, lp(top = dp(10), height = dp(46)))
-
-            val logoutBtn = text("退出登录", 15f, ERROR_RED, Typeface.BOLD).apply {
-                gravity = Gravity.CENTER
-                background = rounded(BTN_SECONDARY, 6f)
-                isClickable = true
-                isFocusable = true
-                setOnClickListener {
-                    dialog.dismiss()
-                    onLogout()
-                }
-                MotionSpec.attachPressPhysics(this, pressedScale = 0.96f)
-            }
-            body.addView(logoutBtn, lp(top = dp(16), height = dp(46)))
-        }
-    }
 
     fun showVehicleUpgradeSheet(prefetchedInfo: VehicleUpgradeInfo? = null) {
         val profile = profileProvider()
@@ -3841,25 +2641,43 @@ internal class VehicleFeatureSheets(
                 lp(top = dp(4))
             )
 
-            val vinEt = modalInput("17 位车架号 VIN", InputType.TYPE_CLASS_TEXT).apply {
-                if (profile.vin.isNotBlank()) setText(profile.vin)
+            val backingVin = profile.vin.trim().uppercase(Locale.US)
+            val backingSn = defaultSn.trim()
+            val backingIccid = defaultIccid.trim()
+            val backingMobile = profile.mobileNo.trim()
+
+            val vinHint = if (backingVin.isNotBlank()) {
+                "车架号 VIN（留空默认 ${SensitiveUiText.identifier(backingVin)}）"
+            } else {
+                "17 位车架号 VIN"
             }
-            val snEt = modalInput("车辆序列号 (SN)", InputType.TYPE_CLASS_TEXT).apply {
-                if (defaultSn.isNotBlank()) setText(defaultSn)
+            val snHint = if (backingSn.isNotBlank()) {
+                "车辆序列号 SN（留空默认 ${SensitiveUiText.identifier(backingSn)}）"
+            } else {
+                "车辆序列号 (SN)"
             }
-            val iccidEt = modalInput("车载 SIM 卡 ICCID", InputType.TYPE_CLASS_TEXT).apply {
-                if (defaultIccid.isNotBlank()) setText(defaultIccid)
+            val iccidHint = if (backingIccid.isNotBlank()) {
+                "车载 SIM 卡 ICCID（留空默认 ${SensitiveUiText.identifier(backingIccid)}）"
+            } else {
+                "车载 SIM 卡 ICCID"
             }
-            val mobileEt = modalInput("账号手机号", InputType.TYPE_CLASS_PHONE).apply {
-                if (profile.mobileNo.isNotBlank()) setText(profile.mobileNo)
+            val mobileHint = if (backingMobile.isNotBlank()) {
+                "账号手机号（留空默认 ${SensitiveUiText.maskPhone(backingMobile)}）"
+            } else {
+                "账号手机号"
             }
+
+            val vinEt = modalInput(vinHint, InputType.TYPE_CLASS_TEXT)
+            val snEt = modalInput(snHint, InputType.TYPE_CLASS_TEXT)
+            val iccidEt = modalInput(iccidHint, InputType.TYPE_CLASS_TEXT)
+            val mobileEt = modalInput(mobileHint, InputType.TYPE_CLASS_PHONE)
 
             val codeRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
             val codeEt = modalInput("短信验证码", InputType.TYPE_CLASS_NUMBER)
             lateinit var sendBtn: TextView
             sendBtn = secondaryBtn("获取验证码") {
                 if (smsJob?.isActive == true) return@secondaryBtn
-                val m = mobileEt.text.toString().trim()
+                val m = mobileEt.text.toString().trim().ifBlank { backingMobile }
                 if (m.length < 11) {
                     toast("请输入正确手机号")
                     return@secondaryBtn
@@ -3921,10 +2739,10 @@ internal class VehicleFeatureSheets(
             lateinit var submitBtn: TextView
             submitBtn = primaryBtn("验证并重置") {
                 if (submitting) return@primaryBtn
-                val v = vinEt.text.toString().trim().uppercase(Locale.US)
-                val s = snEt.text.toString().trim()
-                val ic = iccidEt.text.toString().trim()
-                val m = mobileEt.text.toString().trim()
+                val v = vinEt.text.toString().trim().uppercase(Locale.US).ifBlank { backingVin }
+                val s = snEt.text.toString().trim().ifBlank { backingSn }
+                val ic = iccidEt.text.toString().trim().ifBlank { backingIccid }
+                val m = mobileEt.text.toString().trim().ifBlank { backingMobile }
                 val c = codeEt.text.toString().trim()
                 val np = newPinEt.text.toString().trim()
                 if (v.length != 17 || s.isBlank() || ic.isBlank() || m.length < 11 || c.isBlank() || np.length != 6) {
@@ -4542,11 +3360,18 @@ internal class VehicleFeatureSheets(
             val nameEt = modalInput("目的地名称（车机显示）", InputType.TYPE_CLASS_TEXT).apply {
                 if (initialName.isNotBlank()) setText(initialName)
             }
+            val initialSafeAddr = selectedAddress.takeIf {
+                it.isNotBlank() && !RAW_COORD_REGEX.matches(it)
+            }.orEmpty()
             val coordHintTv = text(
                 if (selectedLat != null && selectedLon != null) {
-                    "已锁定坐标：${String.format(Locale.US, "%.5f, %.5f", selectedLat, selectedLon)}"
+                    if (initialSafeAddr.isNotBlank()) {
+                        "已锁定位置：${initialSafeAddr.take(44)}"
+                    } else {
+                        "已锁定地图位置，可直接发送到车"
+                    }
                 } else {
-                    "尚未选择坐标：请先搜索地点或在地图点击选点"
+                    "尚未选择位置：请先搜索地点或在地图点选"
                 },
                 12f,
                 if (selectedLat != null) Color.parseColor("#10B981") else TEXT_SUB
@@ -4557,7 +3382,12 @@ internal class VehicleFeatureSheets(
                 selectedLon = poi.lon
                 selectedAddress = poi.address
                 nameEt.setText(poi.name)
-                coordHintTv.text = "已锁定：${poi.address.take(44)}（${String.format(Locale.US, "%.5f, %.5f", poi.lat, poi.lon)}）"
+                val displayAddr = poi.address.trim().takeIf { it.isNotBlank() && !RAW_COORD_REGEX.matches(it) }
+                coordHintTv.text = if (displayAddr != null) {
+                    "已锁定：${displayAddr.take(44)}"
+                } else {
+                    "已锁定目的地：${poi.name.take(36)}"
+                }
                 coordHintTv.setTextColor(Color.parseColor("#10B981"))
                 onDestinationPreview?.invoke(poi.lat, poi.lon, poi.name)
             }
@@ -4770,14 +3600,23 @@ internal class VehicleFeatureSheets(
                 }
             }
         }
+        if (!MotionSpec.isHostActivityAlive(context)) return
         activeDialog = dialog
         activeImmediateDismiss = { dialog.dismissImmediately() }
-        dialog.show()
-        onDepthRecede(true)
-        MotionSpec.animateSheetEnter(outer)
+        runCatching {
+            dialog.show()
+            onDepthRecede(true)
+            MotionSpec.animateSheetEnter(outer)
+        }.onFailure {
+            if (activeDialog === dialog) {
+                activeDialog = null
+                activeImmediateDismiss = null
+            }
+        }
     }
 
     private fun showModalDialog(title: String, build: (LinearLayout, Dialog) -> Unit) {
+        if (!MotionSpec.isHostActivityAlive(context)) return
         secondaryDialog?.dismiss()
         var modalCardRef: View? = null
         val dialog = object : Dialog(context, R.style.Theme_CarPlus_BottomSheetDialog) {
@@ -4804,9 +3643,14 @@ internal class VehicleFeatureSheets(
 
         AppSystemInsets.installModalContent(dialog, scroll, dimAmount = 0.68f, horizontalMarginDp = 20f)
         dialog.setOnDismissListener { if (secondaryDialog === dialog) secondaryDialog = null }
+        if (!MotionSpec.isHostActivityAlive(context)) return
         secondaryDialog = dialog
-        dialog.show()
-        MotionSpec.animateModalEnter(scroll)
+        runCatching {
+            dialog.show()
+            MotionSpec.animateModalEnter(scroll)
+        }.onFailure {
+            if (secondaryDialog === dialog) secondaryDialog = null
+        }
     }
 
     private fun segmentedBar(
@@ -5046,6 +3890,8 @@ internal class VehicleFeatureSheets(
     companion object {
         private const val MATCH_PARENT = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP_CONTENT = ViewGroup.LayoutParams.WRAP_CONTENT
+        private const val MAX_GEOFENCE_COUNT = 5
+        private val RAW_COORD_REGEX = Regex("""^\s*-?\d+\.\d+\s*,\s*-?\d+\.\d+\s*$""")
 
         private val BG_HOME = ThemeTokens.BG_CANVAS
         private val MAP_BG = Color.rgb(20, 22, 27)

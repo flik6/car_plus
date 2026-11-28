@@ -1,6 +1,7 @@
 package com.chery.carplus.ui
 
 import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
@@ -169,6 +170,7 @@ class AppIconView(
     private val drawPath = Path()
     private var cachedPath: Path? = null
 
+    @SuppressLint("RestrictedApi")
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val availW = (width - paddingLeft - paddingRight).toFloat()

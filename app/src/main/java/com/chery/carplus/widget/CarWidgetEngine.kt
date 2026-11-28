@@ -1,11 +1,15 @@
 package com.chery.carplus.widget
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -15,6 +19,8 @@ import android.os.Looper
 import android.view.View
 import android.widget.RemoteViews
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.chery.carplus.R
 import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.RemoteCommand
@@ -34,8 +40,10 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 enum class CarWidgetStyle(val layoutRes: Int) {
     BAR(R.layout.widget_car_bar),
@@ -338,22 +346,43 @@ object CarWidgetManager {
             return
         }
 
+        val forceSync = minStaleMs <= 0L
         val now = System.currentTimeMillis()
         val snap = CarWidgetStateStore.load(appCtx)
-        if (snap.loggedIn && snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) {
+        if (!forceSync && snap.loggedIn && snap.updatedAtMs > 0L && now - snap.updatedAtMs < minStaleMs) {
             pendingResult?.finish()
             return
         }
 
-        val prevAttempt = lastAutoSyncAttemptMs.get()
-        if (now - prevAttempt < 60_000L || !lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) {
-            pendingResult?.finish()
-            return
+        if (forceSync) {
+            lastAutoSyncAttemptMs.set(now)
+        } else {
+            val prevAttempt = lastAutoSyncAttemptMs.get()
+            if (now - prevAttempt < 60_000L || !lastAutoSyncAttemptMs.compareAndSet(prevAttempt, now)) {
+                pendingResult?.finish()
+                return
+            }
         }
 
-        bgSyncScope.launch {
+        val mainHandler = Handler(Looper.getMainLooper())
+        val finished = AtomicBoolean(false)
+        fun finishOnce() {
+            if (finished.compareAndSet(false, true)) {
+                runCatching { pendingResult?.finish() }
+            }
+        }
+        var syncJob: kotlinx.coroutines.Job? = null
+        val watchdog = Runnable {
+            syncJob?.cancel()
+            finishOnce()
+        }
+        if (pendingResult != null) {
+            mainHandler.postDelayed(watchdog, 7_000L)
+        }
+
+        syncJob = bgSyncScope.launch {
             try {
-                kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                kotlinx.coroutines.withTimeoutOrNull(6_500L) {
                     val client = CheryHttpClient(
                         defaultDeviceId = store.defaultDeviceId(),
                         connectTimeoutMs = 2_000,
@@ -392,7 +421,8 @@ object CarWidgetManager {
                     )
                 }
             } finally {
-                pendingResult?.finish()
+                mainHandler.removeCallbacks(watchdog)
+                finishOnce()
             }
         }
     }
@@ -527,15 +557,32 @@ object CarWidgetManager {
         val file = File(File(context.applicationContext.filesDir, "widget_models"), "$cleanKey.png")
         if (!file.exists() || file.length() <= 0L) return null
         return runCatching {
+            val maxDimPx = 480
+            val maxBytes = 350 * 1024
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, bounds)
             val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
             var sample = 1
-            while (maxDim > 0 && maxDim / sample > 840) {
+            while (maxDim > 0 && maxDim / sample > maxDimPx) {
                 sample *= 2
             }
             val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            BitmapFactory.decodeFile(file.absolutePath, opts)
+            val decoded = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return@runCatching null
+            val w = decoded.width
+            val h = decoded.height
+            val bytes = decoded.allocationByteCount
+            if (w <= maxDimPx && h <= maxDimPx && bytes <= maxBytes) {
+                decoded
+            } else {
+                val dimScale = if (maxOf(w, h) > maxDimPx) maxDimPx.toFloat() / maxOf(w, h).toFloat() else 1f
+                val byteScale = if (bytes > maxBytes) sqrt(maxBytes.toDouble() / bytes.toDouble()).toFloat() else 1f
+                val scale = minOf(dimScale, byteScale).coerceIn(0.1f, 1f)
+                val targetW = (w * scale).roundToInt().coerceAtLeast(1)
+                val targetH = (h * scale).roundToInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(decoded, targetW, targetH, true).also {
+                    if (it !== decoded) decoded.recycle()
+                }
+            }
         }.getOrNull()
     }
 
@@ -653,6 +700,15 @@ object CarWidgetManager {
             rv.setOnClickPendingIntent(R.id.widget_btn_refresh, buildActionPendingIntent(context, CMD_REFRESH, 100))
         }
 
+        // Android 10-15 BAL compliance: when PIN verification or PIN caching is required,
+        // bind remote control buttons directly to PendingIntent.getActivity instead of a
+        // BroadcastReceiver trampoline (which Android BAL blocks when backgrounded).
+        val uiPrefs = context.applicationContext.getSharedPreferences("car_plus_consumer_ui", Context.MODE_PRIVATE)
+        val requirePinEveryTime = uiPrefs.getBoolean("require_pin_every_time", true)
+        val savedPin = runCatching { VehicleProfileStore(context).getActiveProfile().controlPin.trim() }.getOrDefault("")
+        val launchAppForControl = requirePinEveryTime || savedPin.length != 6
+        val needPinCache = !requirePinEveryTime && savedPin.length != 6
+
         // Control 1: Lock / Unlock (frameless; circular halo only when active)
         val unlocked = !s.doorLocked
         rv.setImageViewResource(
@@ -665,7 +721,10 @@ object CarWidgetManager {
             "setBackgroundResource",
             if (unlocked) R.drawable.widget_icon_halo_active else 0
         )
-        rv.setOnClickPendingIntent(R.id.widget_btn_lock, buildActionPendingIntent(context, CMD_TOGGLE_LOCK, 101))
+        rv.setOnClickPendingIntent(
+            R.id.widget_btn_lock,
+            buildControlPendingIntent(context, CMD_TOGGLE_LOCK, 101, launchAppForControl, needPinCache)
+        )
         if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
             rv.setTextViewText(R.id.widget_label_lock, if (unlocked) "锁车" else "解锁")
             rv.setTextColor(R.id.widget_label_lock, if (unlocked) COLOR_ACTIVE else COLOR_LABEL_IDLE)
@@ -678,7 +737,10 @@ object CarWidgetManager {
             "setBackgroundResource",
             if (s.acOn) R.drawable.widget_icon_halo_active else 0
         )
-        rv.setOnClickPendingIntent(R.id.widget_btn_ac, buildActionPendingIntent(context, CMD_TOGGLE_AC, 102))
+        rv.setOnClickPendingIntent(
+            R.id.widget_btn_ac,
+            buildControlPendingIntent(context, CMD_TOGGLE_AC, 102, launchAppForControl, needPinCache)
+        )
         if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
             rv.setTextViewText(R.id.widget_label_ac, if (s.acOn) "关空调" else "空调")
             rv.setTextColor(R.id.widget_label_ac, if (s.acOn) COLOR_ACTIVE else COLOR_LABEL_IDLE)
@@ -688,7 +750,10 @@ object CarWidgetManager {
         if (style != CarWidgetStyle.COMPACT) {
             rv.setInt(R.id.widget_icon_flash, "setColorFilter", COLOR_WHITE)
             rv.setInt(R.id.widget_halo_flash, "setBackgroundResource", 0)
-            rv.setOnClickPendingIntent(R.id.widget_btn_flash, buildActionPendingIntent(context, CMD_FIND_CAR, 103))
+            rv.setOnClickPendingIntent(
+                R.id.widget_btn_flash,
+                buildControlPendingIntent(context, CMD_FIND_CAR, 103, launchAppForControl, needPinCache)
+            )
 
             rv.setInt(R.id.widget_icon_trunk, "setColorFilter", if (s.trunkOpen) COLOR_ACTIVE else COLOR_WHITE)
             rv.setInt(
@@ -696,7 +761,10 @@ object CarWidgetManager {
                 "setBackgroundResource",
                 if (s.trunkOpen) R.drawable.widget_icon_halo_active else 0
             )
-            rv.setOnClickPendingIntent(R.id.widget_btn_trunk, buildActionPendingIntent(context, CMD_TOGGLE_TRUNK, 104))
+            rv.setOnClickPendingIntent(
+                R.id.widget_btn_trunk,
+                buildControlPendingIntent(context, CMD_TOGGLE_TRUNK, 104, launchAppForControl, needPinCache)
+            )
             if (style == CarWidgetStyle.MEDIUM || style == CarWidgetStyle.LARGE) {
                 rv.setTextViewText(R.id.widget_label_trunk, if (s.trunkOpen) "关尾箱" else "后备箱")
                 rv.setTextColor(R.id.widget_label_trunk, if (s.trunkOpen) COLOR_ACTIVE else COLOR_LABEL_IDLE)
@@ -711,7 +779,10 @@ object CarWidgetManager {
                 "setBackgroundResource",
                 if (s.engineRunning) R.drawable.widget_icon_halo_active else 0
             )
-            rv.setOnClickPendingIntent(R.id.widget_btn_engine, buildActionPendingIntent(context, CMD_TOGGLE_ENGINE, 105))
+            rv.setOnClickPendingIntent(
+                R.id.widget_btn_engine,
+                buildControlPendingIntent(context, CMD_TOGGLE_ENGINE, 105, launchAppForControl, needPinCache)
+            )
             rv.setTextViewText(R.id.widget_label_engine, if (s.engineRunning) "熄火" else "启动")
             rv.setTextColor(R.id.widget_label_engine, if (s.engineRunning) COLOR_ACTIVE else COLOR_LABEL_IDLE)
         }
@@ -726,6 +797,86 @@ object CarWidgetManager {
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
         return PendingIntent.getActivity(context, 90, intent, flags)
+    }
+
+    private fun buildControlPendingIntent(
+        context: Context,
+        cmd: String,
+        requestCode: Int,
+        launchAppDirectly: Boolean,
+        needPinCache: Boolean
+    ): PendingIntent {
+        return if (launchAppDirectly) {
+            buildLaunchActionPendingIntent(context, cmd, requestCode + 200, needPinCache)
+        } else {
+            buildActionPendingIntent(context, cmd, requestCode)
+        }
+    }
+
+    internal fun buildLaunchActionPendingIntent(
+        context: Context,
+        cmd: String,
+        requestCode: Int,
+        needPinCache: Boolean = false
+    ): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            action = "$ACTION_WIDGET_CMD.$cmd"
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_SHORTCUT_ACTION, cmd)
+            putExtra(EXTRA_NEED_PIN_CACHE, needPinCache)
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+        return PendingIntent.getActivity(context, requestCode, intent, flags)
+    }
+
+    internal fun postActionPromptNotification(
+        context: Context,
+        title: String,
+        message: String,
+        cmd: String = "",
+        needPinCache: Boolean = false,
+        openAppOnly: Boolean = false
+    ) {
+        val appCtx = context.applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(appCtx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val nm = appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        val channelId = "widget_action_alerts"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val existing = nm.getNotificationChannel(channelId)
+            if (existing == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        channelId,
+                        "小组件控车提示",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "小组件控车需要验证 PIN 或重新登录时的快捷跳转提示"
+                    }
+                )
+            }
+        }
+        val contentPi = if (openAppOnly || cmd.isBlank()) {
+            buildOpenAppPendingIntent(appCtx)
+        } else {
+            val reqCode = 400 + (cmd.hashCode() and 0xFF)
+            buildLaunchActionPendingIntent(appCtx, cmd, reqCode, needPinCache)
+        }
+        val notification = NotificationCompat.Builder(appCtx, channelId)
+            .setSmallIcon(R.drawable.ic_widget_lock_closed)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setAutoCancel(true)
+            .setContentIntent(contentPi)
+            .build()
+        runCatching { nm.notify(4201, notification) }
     }
 
     private fun buildActionPendingIntent(context: Context, cmd: String, requestCode: Int): PendingIntent {
@@ -766,7 +917,12 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
 
         if (profile.vin.isBlank() || profile.accessToken.isBlank()) {
             CarWidgetManager.markLoggedOut(appCtx, expired = false)
-            launchAppForAction(appCtx, cmd)
+            CarWidgetManager.postActionPromptNotification(
+                context = appCtx,
+                title = "请先登录 Qiri+",
+                message = "轻触打开应用登录账号后使用远程控车",
+                openAppOnly = true
+            )
             return
         }
 
@@ -776,35 +932,51 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
         val needsPin = cmd != CarWidgetManager.CMD_REFRESH
         if (needsPin && (requirePinEveryTime || savedPin.length != 6)) {
             val needPinCache = !requirePinEveryTime && savedPin.length != 6
+            // Rebind widget buttons directly to PendingIntent.getActivity so next tap opens app without BAL block
+            CarWidgetStateStore.setTransientHint(
+                appCtx,
+                if (needPinCache) "请打开应用验证 PIN" else "轻触再次验证 PIN"
+            )
+            CarWidgetManager.updateAllWidgets(appCtx)
+            CarWidgetManager.postActionPromptNotification(
+                context = appCtx,
+                title = "需要验证 PIN 码",
+                message = if (needPinCache) "本机尚未缓存 PIN 码，轻触验证一次后即可小组件免密控车" else "轻触打开 Qiri+ 完成 6 位 PIN 码验证",
+                cmd = cmd,
+                needPinCache = needPinCache
+            )
             if (needPinCache) {
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(
                         appCtx,
-                        "本机尚未缓存 PIN 码，验证一次后小组件即可免密控车",
+                        "本机尚未缓存 PIN 码，请点击通知或再次点击小组件验证",
                         Toast.LENGTH_SHORT
                     ).show()
                 }
             }
-            launchAppForAction(appCtx, cmd, needPinCache = needPinCache)
             return
         }
 
         val pendingResult = goAsync()
         val mainHandler = Handler(Looper.getMainLooper())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val finished = AtomicBoolean(false)
         fun finishReceiverOnce() {
             if (finished.compareAndSet(false, true)) {
                 runCatching { pendingResult.finish() }
             }
         }
-        val watchdog = Runnable { finishReceiverOnce() }
-        mainHandler.postDelayed(watchdog, 8_800L)
+        var actionJob: kotlinx.coroutines.Job? = null
+        val watchdog = Runnable {
+            actionJob?.cancel()
+            finishReceiverOnce()
+        }
+        mainHandler.postDelayed(watchdog, 7_000L)
 
-        scope.launch {
+        actionJob = scope.launch {
             var commandSucceeded = false
             try {
-                val completed = kotlinx.coroutines.withTimeoutOrNull(8_000L) {
+                val completed = kotlinx.coroutines.withTimeoutOrNull(6_500L) {
                     val client = CheryHttpClient(
                         defaultDeviceId = store.defaultDeviceId(),
                         connectTimeoutMs = 2_000,
@@ -840,9 +1012,14 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                                 store.clearTokensPreserveOfflineKeys()
                             }
                             CarWidgetManager.markLoggedOut(appCtx, expired = true)
+                            CarWidgetManager.postActionPromptNotification(
+                                context = appCtx,
+                                title = "Qiri+ 登录已失效",
+                                message = "账号凭证已过期，轻触打开应用重新登录",
+                                openAppOnly = true
+                            )
                             mainHandler.post {
                                 Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
-                                launchAppForAction(appCtx, cmd, needPinCache = false)
                             }
                             return@withTimeoutOrNull
                         }
@@ -870,7 +1047,14 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                         }
                         CarWidgetManager.CMD_TOGGLE_AC -> {
                             if (snap.acOn) Triple(RemoteCommand.AC_OFF, "关闭空调", mapOf("airType" to airType))
-                            else Triple(RemoteCommand.AC_ON, "开启空调", mapOf("temperature" to "23", "airType" to airType))
+                            else Triple(
+                                RemoteCommand.AC_ON,
+                                "开启空调",
+                                mapOf(
+                                    "temperature" to CheryHttpClient.formatAcTemperatureParam(24.0),
+                                    "airType" to airType
+                                )
+                            )
                         }
                         CarWidgetManager.CMD_FIND_CAR -> Triple(RemoteCommand.FIND_CAR, "寻车", emptyMap())
                         CarWidgetManager.CMD_TOGGLE_TRUNK -> {
@@ -910,20 +1094,31 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                             store.clearTokensPreserveOfflineKeys()
                         }
                         CarWidgetManager.markLoggedOut(appCtx, expired = true)
+                        CarWidgetManager.postActionPromptNotification(
+                            context = appCtx,
+                            title = "Qiri+ 登录已失效",
+                            message = "账号凭证已过期，轻触打开应用重新登录",
+                            openAppOnly = true
+                        )
                         mainHandler.post {
                             Toast.makeText(appCtx, "登录已失效，请打开应用重新登录", Toast.LENGTH_SHORT).show()
-                            launchAppForAction(appCtx, cmd, needPinCache = false)
                         }
                         return@withTimeoutOrNull
                     }
 
                     if (result?.isPinError == true) {
                         store.updateControlPin(profile.vin, "")
-                        CarWidgetStateStore.setTransientHint(appCtx, "")
+                        CarWidgetStateStore.setTransientHint(appCtx, "PIN 已失效，请重验")
                         CarWidgetManager.updateAllWidgets(appCtx)
+                        CarWidgetManager.postActionPromptNotification(
+                            context = appCtx,
+                            title = "PIN 码验证失效",
+                            message = "本机缓存的 PIN 码已失效，轻触打开应用重新验证",
+                            cmd = cmd,
+                            needPinCache = true
+                        )
                         mainHandler.post {
                             Toast.makeText(appCtx, "本机缓存的 PIN 码已失效，请重新验证", Toast.LENGTH_SHORT).show()
-                            launchAppForAction(appCtx, cmd, needPinCache = true)
                         }
                         return@withTimeoutOrNull
                     }
@@ -987,14 +1182,5 @@ class CarWidgetActionReceiver : BroadcastReceiver() {
                 finishReceiverOnce()
             }
         }
-    }
-
-    private fun launchAppForAction(context: Context, cmd: String, needPinCache: Boolean = false) {
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra(CarWidgetManager.EXTRA_SHORTCUT_ACTION, cmd)
-            putExtra(CarWidgetManager.EXTRA_NEED_PIN_CACHE, needPinCache)
-        }
-        runCatching { context.startActivity(intent) }
     }
 }

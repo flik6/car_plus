@@ -18,6 +18,8 @@ import androidx.core.app.ServiceCompat
 import com.chery.carplus.R
 import com.chery.carplus.profile.VehicleProfile
 import com.chery.carplus.profile.VehicleProfileStore
+import com.chery.carplus.widget.CarWidgetManager
+import com.chery.carplus.widget.CarWidgetStateStore
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
@@ -83,10 +85,20 @@ object PassiveEntryRuntime {
     private var foregroundLastRssi: Int? = null
 
     @Volatile
+    private var foregroundLastBleVin: String = ""
+
+    @Volatile
     private var lastSleepReason: PassiveSleepReason = PassiveSleepReason.NONE
 
     @Volatile
     private var lastSleepAtElapsedMs: Long = 0L
+
+    private val lockSuppressionByVin = HashMap<String, Pair<PassiveLockSuppressionReason, Long>>()
+    private val lastAutoUnlockByVin = HashMap<String, Long>()
+
+    private const val MANUAL_LOCK_SUPPRESS_MS = 120_000L
+    private const val WALK_AWAY_LOCK_SUPPRESS_MS = 300_000L
+    const val AUTO_UNLOCK_COOLDOWN_MS = 20_000L
 
     @Volatile
     var onAutoActionExecuted: ((actionKey: String, vin: String) -> Unit)? = null
@@ -104,18 +116,168 @@ object PassiveEntryRuntime {
         }
     }
 
-    fun markCompanionDisappeared() {
+    fun recordLockSuppression(
+        context: Context,
+        vin: String,
+        reason: PassiveLockSuppressionReason
+    ) {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return
+        val nowElapsed = SystemClock.elapsedRealtime()
+        synchronized(stateLock) {
+            if (reason == PassiveLockSuppressionReason.NONE) {
+                lockSuppressionByVin.remove(normVin)
+            } else {
+                lockSuppressionByVin[normVin] = reason to nowElapsed
+            }
+        }
+        PassiveEntryStore.recordLockSuppression(context, normVin, reason)
+    }
+
+    fun clearLockSuppression(context: Context, vin: String) {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return
+        synchronized(stateLock) {
+            lockSuppressionByVin.remove(normVin)
+        }
+        PassiveEntryStore.clearLockSuppression(context, normVin)
+    }
+
+    fun activeLockSuppressionReason(
+        context: Context,
+        vin: String,
+        nowElapsed: Long = SystemClock.elapsedRealtime()
+    ): PassiveLockSuppressionReason {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return PassiveLockSuppressionReason.NONE
+        val memEntry = synchronized(stateLock) { lockSuppressionByVin[normVin] }
+        if (memEntry != null) {
+            val (reason, recordedElapsed) = memEntry
+            val maxAge = suppressionWindowMs(reason)
+            val elapsed = (nowElapsed - recordedElapsed).coerceAtLeast(0L)
+            if (maxAge > 0L && elapsed < maxAge) {
+                return reason
+            }
+            synchronized(stateLock) {
+                if (lockSuppressionByVin[normVin] == memEntry) {
+                    lockSuppressionByVin.remove(normVin)
+                }
+            }
+            PassiveEntryStore.clearLockSuppression(context, normVin)
+            return PassiveLockSuppressionReason.NONE
+        }
+        val persisted = PassiveEntryStore.getLockSuppression(context, normVin)
+        if (persisted.reason != PassiveLockSuppressionReason.NONE && persisted.recordedAtMs > 0L) {
+            val maxAge = suppressionWindowMs(persisted.reason)
+            val wallAge = System.currentTimeMillis() - persisted.recordedAtMs
+            if (maxAge > 0L && wallAge in 0L until maxAge) {
+                synchronized(stateLock) {
+                    lockSuppressionByVin[normVin] = persisted.reason to (nowElapsed - wallAge).coerceAtLeast(0L)
+                }
+                return persisted.reason
+            }
+            PassiveEntryStore.clearLockSuppression(context, normVin)
+        }
+        return PassiveLockSuppressionReason.NONE
+    }
+
+    private fun suppressionWindowMs(reason: PassiveLockSuppressionReason): Long = when (reason) {
+        PassiveLockSuppressionReason.MANUAL_LOCK -> MANUAL_LOCK_SUPPRESS_MS
+        PassiveLockSuppressionReason.WALK_AWAY_LOCK -> WALK_AWAY_LOCK_SUPPRESS_MS
+        PassiveLockSuppressionReason.NONE -> 0L
+    }
+
+    fun recordAutoUnlockDispatched(vin: String, nowElapsed: Long = SystemClock.elapsedRealtime()) {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return
+        synchronized(stateLock) {
+            lastAutoUnlockByVin[normVin] = nowElapsed
+        }
+    }
+
+    fun isAutoUnlockInCooldown(vin: String, nowElapsed: Long = SystemClock.elapsedRealtime()): Boolean {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isBlank()) return false
+        val lastAt = synchronized(stateLock) { lastAutoUnlockByVin[normVin] } ?: return false
+        return (nowElapsed - lastAt) in 0L until AUTO_UNLOCK_COOLDOWN_MS
+    }
+
+    fun reportForegroundAutoUnlock(
+        context: Context,
+        vin: String,
+        label: String,
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        val normVin = vin.trim().uppercase(Locale.US)
+        if (normVin.isNotBlank()) {
+            PassiveEntryStore.recordTrigger(context, normVin, label, nowMs)
+            PassiveEntryStore.updateVehicleLockHint(context, normVin, locked = false, updatedAtMs = nowMs)
+            syncWidgetLockState(context, normVin, locked = false, hintText = "蓝牙无感：$label")
+            recordAutoUnlockDispatched(normVin)
+        }
+        synchronized(stateLock) {
+            snapshot = snapshot.copy(
+                state = PassiveState.UNLOCKED_NEAR,
+                lastEventText = label,
+                lastEventAtMs = nowMs
+            )
+        }
+        appendLog("前台蓝牙已连接，执行$label")
+    }
+
+    fun syncWidgetLockState(context: Context, vin: String, locked: Boolean, hintText: String) {
+        val appContext = context.applicationContext
+        runCatching {
+            val snap = CarWidgetStateStore.load(appContext)
+            if (snap.vin.isNotBlank() && snap.vin.equals(vin, ignoreCase = true)) {
+                val nextPrimary = if (!snap.isCharging && !snap.engineRunning) {
+                    if (locked) "已锁止" else "已解锁"
+                } else {
+                    snap.primaryStatus
+                }
+                CarWidgetStateStore.save(
+                    appContext,
+                    snap.copy(
+                        doorLocked = locked,
+                        primaryStatus = nextPrimary,
+                        transientHint = hintText,
+                        updatedAtMs = System.currentTimeMillis()
+                    )
+                )
+                CarWidgetManager.updateAllWidgets(appContext)
+            }
+        }
+    }
+
+    fun markCompanionDisappeared(context: Context? = null) {
         synchronized(stateLock) {
             if (lastSleepReason == PassiveSleepReason.LOCKED_AWAY) {
                 lastSleepReason = PassiveSleepReason.NONE
                 lastSleepAtElapsedMs = 0L
             }
+            lockSuppressionByVin.clear()
+        }
+        if (context != null) {
+            val activeVin = PassiveEntryStore.getActiveEnabledVin(context)
+            if (activeVin.isNotBlank()) {
+                PassiveEntryStore.clearLockSuppression(context, activeVin)
+            }
         }
     }
 
-    fun shouldThrottleScanWake(rssi: Int, cfg: PassiveEntryConfig, nowElapsed: Long): String? {
+    fun shouldThrottleScanWake(
+        context: Context,
+        vin: String,
+        rssi: Int,
+        cfg: PassiveEntryConfig,
+        nowElapsed: Long
+    ): String? {
         if (rssi < cfg.effectiveLockRssi - 8) {
             return "信号过弱 (${rssi} dBm)"
+        }
+        val suppression = activeLockSuppressionReason(context, vin, nowElapsed)
+        if (suppression == PassiveLockSuppressionReason.MANUAL_LOCK) {
+            return "手动锁车保护期内，暂不唤醒"
         }
         val (sleepReason, sleepAt) = synchronized(stateLock) { lastSleepReason to lastSleepAtElapsedMs }
         val elapsedSinceSleep = (nowElapsed - sleepAt).coerceAtLeast(0L)
@@ -206,7 +368,9 @@ object PassiveEntryRuntime {
         context: Context,
         active: Boolean,
         handoffFromNearSession: Boolean = false,
-        handoffRssi: Int? = null
+        handoffRssi: Int? = null,
+        handoffVin: String = "",
+        handoffAlreadyUnlocked: Boolean = false
     ) {
         val appContext = context.applicationContext
         foregroundAppActive = active
@@ -230,14 +394,35 @@ object PassiveEntryRuntime {
                 dispatchSnapshot()
             }
         } else {
-            val wasNear = synchronized(stateLock) {
-                val near = handoffFromNearSession || foregroundWasNearConnected
+            val normHandoffVin = handoffVin.trim().uppercase(Locale.US)
+            val (trackedNear, trackedRssi, trackedVin) = synchronized(stateLock) {
+                val triple = Triple(foregroundWasNearConnected, foregroundLastRssi, foregroundLastBleVin)
                 foregroundWasNearConnected = false
-                near
+                triple
             }
-            val effectiveRssi = handoffRssi ?: foregroundLastRssi
+            val effectiveVin = normHandoffVin.ifBlank { trackedVin }
+            val vinMatchesActive = activeVin.isNotBlank() &&
+                (effectiveVin.isBlank() || effectiveVin.equals(activeVin, ignoreCase = true))
+            val wasNear = if (vinMatchesActive) {
+                handoffFromNearSession || trackedNear
+            } else {
+                false
+            }
+            val effectiveRssi = if (vinMatchesActive) {
+                handoffRssi ?: trackedRssi
+            } else {
+                null
+            }
             if (cfg?.enabled == true) {
-                if (wasNear && cfg.autoLockEnabled) {
+                if (vinMatchesActive && handoffAlreadyUnlocked) {
+                    PassiveEntryStore.updateVehicleLockHint(appContext, activeVin, locked = false)
+                }
+                val hint = PassiveEntryStore.getVehicleSafetyHint(appContext, activeVin)
+                val knownUnlocked = (vinMatchesActive && handoffAlreadyUnlocked) ||
+                    (hint.isFresh(maxAgeMs = 120_000L) && hint.locked == false)
+                val suppressed = activeLockSuppressionReason(appContext, activeVin) != PassiveLockSuppressionReason.NONE
+                val needsHandoff = wasNear && (cfg.autoLockEnabled || (cfg.autoUnlockEnabled && !knownUnlocked && !suppressed))
+                if (needsHandoff) {
                     val store = VehicleProfileStore(appContext)
                     val profile = store.listProfiles().firstOrNull { it.vin.equals(activeVin, ignoreCase = true) }
                         ?: store.getActiveProfile().takeIf { it.vin.equals(activeVin, ignoreCase = true) }
@@ -255,7 +440,8 @@ object PassiveEntryRuntime {
                             initialRssi = effectiveRssi,
                             wakeSource = "ForegroundHandoff",
                             assumeAlreadyNear = true,
-                            connectDelayMs = 550L
+                            connectDelayMs = 550L,
+                            assumeAlreadyUnlocked = knownUnlocked
                         )
                         return
                     }
@@ -271,8 +457,12 @@ object PassiveEntryRuntime {
         }
     }
 
-    fun reportForegroundBleRssi(rssi: Int?, sessionReady: Boolean) {
+    fun reportForegroundBleRssi(rssi: Int?, sessionReady: Boolean, vin: String = "") {
+        val normVin = vin.trim().uppercase(Locale.US)
         synchronized(stateLock) {
+            if (normVin.isNotBlank()) {
+                foregroundLastBleVin = normVin
+            }
             foregroundLastRssi = rssi
             if (sessionReady) {
                 foregroundWasNearConnected = true
@@ -280,10 +470,16 @@ object PassiveEntryRuntime {
                 foregroundWasNearConnected = false
             }
             if (foregroundAppActive) {
+                val nextState = if (!sessionReady && snapshot.state == PassiveState.UNLOCKED_NEAR) {
+                    PassiveState.PAUSED_FOREGROUND
+                } else {
+                    snapshot.state
+                }
                 snapshot = snapshot.copy(
                     currentRawRssi = rssi,
                     filteredRssi = rssi,
-                    sessionReady = sessionReady
+                    sessionReady = sessionReady,
+                    state = nextState
                 )
             }
         }
@@ -313,6 +509,7 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
     private var activeControllerMac: String = ""
     private var activeProfile: VehicleProfile? = null
     private var activeConfig: PassiveEntryConfig? = null
+    private var activeVin: String = ""
     private var targetMac: String = ""
 
     private val rssiWindow = ArrayDeque<Int>()
@@ -323,19 +520,61 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
     private var reconnectAttempts = 0
     private var unlockedThisVisit = false
     private var lockedThisVisit = false
+    private var connectUnlockEvaluatedThisSession = false
+    private var lastUnlockLabel = "连接自动解锁"
     private var lastActionElapsedMs = 0L
+    private var sessionReadyElapsedMs = 0L
     private var serviceStartedElapsedMs = 0L
     private var lastNearActivityElapsedMs = 0L
     private var disconnectedSinceElapsedMs = 0L
     private var directConnectRetriedWithScan = false
     private var pendingConnectRunnable: Runnable? = null
     private var pendingReconnectRunnable: Runnable? = null
+    private var pendingConnectUnlockRunnable: Runnable? = null
+
+    // Tracks in-flight passive commands until T-Box 0x04 confirmation arrives (P2-31).
+    private var inFlightPassiveActionKey: String? = null
+    private var inFlightPassiveActionLabel: String = ""
+    private var inFlightPassiveActionElapsedMs: Long = 0L
+    private val pendingPassiveActionBySerial = mutableMapOf<Int, Pair<String, String>>()
 
     // Live vehicle telemetry reported directly over BLE 0x10 / 0x04 responses.
     private var liveBleLocked: Boolean? = null
     private var liveBleDoorsOpen: Boolean? = null
     private var liveBleEngineRunning: Boolean? = null
     private var liveBleUpdatedElapsedMs = 0L
+
+    private fun resetVisitStateForVehicleSwitch(nowElapsed: Long) {
+        cancelPendingConnectUnlockCheck()
+        pendingConnectRunnable?.let(mainHandler::removeCallbacks)
+        pendingConnectRunnable = null
+        pendingReconnectRunnable?.let(mainHandler::removeCallbacks)
+        pendingReconnectRunnable = null
+        rssiWindow.clear()
+        consecutiveUnlockHits = 0
+        consecutiveLockHits = 0
+        hasBeenNear = false
+        hasEverEstablishedSession = false
+        reconnectAttempts = 0
+        unlockedThisVisit = false
+        lockedThisVisit = false
+        connectUnlockEvaluatedThisSession = false
+        lastUnlockLabel = "连接自动解锁"
+        lastActionElapsedMs = 0L
+        sessionReadyElapsedMs = 0L
+        serviceStartedElapsedMs = nowElapsed
+        lastNearActivityElapsedMs = nowElapsed
+        disconnectedSinceElapsedMs = 0L
+        directConnectRetriedWithScan = false
+        inFlightPassiveActionKey = null
+        inFlightPassiveActionLabel = ""
+        inFlightPassiveActionElapsedMs = 0L
+        pendingPassiveActionBySerial.clear()
+        liveBleLocked = null
+        liveBleDoorsOpen = null
+        liveBleEngineRunning = null
+        liveBleUpdatedElapsedMs = 0L
+    }
 
     private val rssiPollTask = object : Runnable {
         override fun run() {
@@ -387,6 +626,7 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
         }
         val wakeSource = intent?.getStringExtra(EXTRA_WAKE_SOURCE).orEmpty().ifBlank { "PendingIntent" }
         val assumeNear = intent?.getBooleanExtra(EXTRA_ASSUME_NEAR, false) == true
+        val assumeUnlocked = intent?.getBooleanExtra(EXTRA_ASSUME_UNLOCKED, false) == true
         val connectDelayMs = intent?.getLongExtra(EXTRA_CONNECT_DELAY_MS, 0L)?.coerceIn(0L, 5_000L) ?: 0L
         val initialRssi = if (intent?.hasExtra(EXTRA_INITIAL_RSSI) == true) {
             intent.getIntExtra(EXTRA_INITIAL_RSSI, -999).takeIf { it > -120 && it < 0 }
@@ -402,19 +642,31 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
         val store = VehicleProfileStore(this)
         val profile = store.listProfiles().firstOrNull { it.vin.equals(vin, ignoreCase = true) }
             ?: store.getActiveProfile().takeIf { it.vin.equals(vin, ignoreCase = true) }
-        val mac = PassiveEntryPrerequisiteChecker.normalizeMac(profile?.bleMac)
+        val wakeMac = PassiveEntryPrerequisiteChecker.normalizeMac(intent?.getStringExtra(EXTRA_BLE_MAC))
+        val mac = wakeMac ?: PassiveEntryPrerequisiteChecker.normalizeMac(profile?.bleMac)
         if (profile == null || mac == null || !PassiveEntryPrerequisiteChecker.hasCompleteKeyMaterial(profile)) {
             PassiveEntryRuntime.appendLog("后台唤醒取消：钥匙材料不完整")
             shutdownAndSleep("钥匙材料不完整", PassiveSleepReason.CONNECT_FAILED)
             return START_NOT_STICKY
         }
 
+        val switchingVehicle = (activeVin.isNotBlank() && !activeVin.equals(profile.vin, ignoreCase = true)) ||
+            (activeVin.isBlank() && targetMac.isNotBlank() && !targetMac.equals(mac, ignoreCase = true))
+        if (switchingVehicle) {
+            resetVisitStateForVehicleSwitch(SystemClock.elapsedRealtime())
+        }
+
         activeProfile = profile
         activeConfig = cfg
+        activeVin = profile.vin
         targetMac = mac
         if (assumeNear) {
             hasBeenNear = true
+        }
+        if (assumeUnlocked) {
             unlockedThisVisit = true
+            connectUnlockEvaluatedThisSession = true
+            hasBeenNear = true
         }
         if (initialRssi != null) {
             pushRssiSample(initialRssi)
@@ -503,12 +755,17 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
             val info = profile.infoBytes()
             val edf = profile.edfBytes()
             if (root.size != 16 || info.size != 147 || edf.size !in 68..74) return@runCatching null
+            val resolvedAccountType = if (profile.keyRole > 0) {
+                com.chery.carplus.cloud.InGeekCloudProvisioner.accountTypeForKeyRole(profile.keyRole)
+            } else {
+                profile.accountType.coerceIn(0, 1)
+            }
             CheryBleController.SessionMaterial(
                 rootKey16 = root,
                 infoBin147 = info,
                 edfBin = edf,
                 accountBinding = CheryBleController.AccountBinding(
-                    accountType = profile.accountType,
+                    accountType = resolvedAccountType,
                     userId = profile.userId,
                     deviceId = profile.deviceId
                 ),
@@ -526,12 +783,15 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
     }
 
     private fun handleSessionReady() {
+        val nowElapsed = SystemClock.elapsedRealtime()
         hasEverEstablishedSession = true
         reconnectAttempts = 0
         disconnectedSinceElapsedMs = 0L
+        sessionReadyElapsedMs = nowElapsed
+        connectUnlockEvaluatedThisSession = false
         pendingReconnectRunnable?.let(mainHandler::removeCallbacks)
         pendingReconnectRunnable = null
-        lastNearActivityElapsedMs = SystemClock.elapsedRealtime()
+        lastNearActivityElapsedMs = nowElapsed
         bleController?.stopAutoProximityWatch()
         val state = if (unlockedThisVisit) PassiveState.UNLOCKED_NEAR else PassiveState.NEAR_READY
         PassiveEntryRuntime.updateFromService {
@@ -540,10 +800,124 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
                 state = state
             )
         }
-        PassiveEntryRuntime.appendLog("后台蓝牙数字钥匙会话已就绪，开始实时测距")
-        updateNotification("蓝牙数字钥匙已就绪 · 实时监测靠近/离车距离")
+        PassiveEntryRuntime.appendLog("后台蓝牙数字钥匙会话已就绪，正在检查车辆锁止状态")
+        updateNotification("蓝牙数字钥匙已连接 · 正在监测车辆锁止与距离")
         bleController?.requestRemoteRssi()
+        scheduleConnectAutoUnlockCheck()
     }
+
+    private fun cancelPendingConnectUnlockCheck() {
+        pendingConnectUnlockRunnable?.let(mainHandler::removeCallbacks)
+        pendingConnectUnlockRunnable = null
+    }
+
+    private fun scheduleConnectAutoUnlockCheck() {
+        cancelPendingConnectUnlockCheck()
+        if (unlockedThisVisit || lockedThisVisit || connectUnlockEvaluatedThisSession) return
+        val hasSessionLiveLock = liveBleLocked != null &&
+            liveBleUpdatedElapsedMs >= (sessionReadyElapsedMs - 2_000L)
+        if (hasSessionLiveLock) {
+            evaluateConnectAutoUnlock(triggerSource = "蓝牙实时车况")
+            return
+        }
+        val task = Runnable {
+            pendingConnectUnlockRunnable = null
+            evaluateConnectAutoUnlock(triggerSource = "蓝牙连接完成")
+        }
+        pendingConnectUnlockRunnable = task
+        mainHandler.postDelayed(task, CONNECT_STATUS_SETTLE_MS)
+    }
+
+    private fun evaluateConnectAutoUnlock(triggerSource: String) {
+        if (unlockedThisVisit || lockedThisVisit || connectUnlockEvaluatedThisSession) return
+        val controller = bleController ?: return
+        if (!controller.isSessionReady()) return
+        val profile = activeProfile ?: return
+        val cfg = PassiveEntryStore.load(this, profile.vin)
+        activeConfig = cfg
+        if (!cfg.enabled) {
+            shutdownAndSleep("无感功能已关闭", PassiveSleepReason.DISABLED)
+            return
+        }
+        if (!cfg.autoUnlockEnabled) {
+            connectUnlockEvaluatedThisSession = true
+            return
+        }
+
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val suppression = PassiveEntryRuntime.activeLockSuppressionReason(this, profile.vin, nowElapsed)
+        if (suppression != PassiveLockSuppressionReason.NONE) {
+            connectUnlockEvaluatedThisSession = true
+            PassiveEntryRuntime.appendLog(
+                "蓝牙已连接（$triggerSource），处于${suppression.label}保护期，跳过连接自动解锁"
+            )
+            return
+        }
+
+        val liveFresh = liveBleUpdatedElapsedMs > 0L &&
+            (nowElapsed - liveBleUpdatedElapsedMs) in 0L..LIVE_BLE_HINT_TTL_MS
+        val hint = PassiveEntryStore.getVehicleSafetyHint(this, profile.vin)
+        val hintFreshForUnlock = hint.isFresh(maxAgeMs = UNLOCK_HINT_TTL_MS)
+
+        val engineRunning = when {
+            liveFresh && liveBleEngineRunning != null -> liveBleEngineRunning == true
+            hintFreshForUnlock && hint.engineStopped != null -> hint.engineStopped == false
+            else -> false
+        }
+        if (engineRunning) {
+            connectUnlockEvaluatedThisSession = true
+            PassiveEntryRuntime.appendLog("蓝牙已连接（$triggerSource），车况显示处于启动状态，跳过自动解锁")
+            return
+        }
+
+        val resolvedLocked: Boolean? = when {
+            liveFresh && liveBleLocked != null -> liveBleLocked
+            hintFreshForUnlock && hint.locked != null -> hint.locked
+            else -> null
+        }
+        if (resolvedLocked == false) {
+            connectUnlockEvaluatedThisSession = true
+            unlockedThisVisit = true
+            hasBeenNear = true
+            PassiveEntryRuntime.updateFromService { it.copy(state = PassiveState.UNLOCKED_NEAR) }
+            updateNotification("蓝牙数字钥匙已连接 · 车辆已处于解锁状态")
+            PassiveEntryRuntime.appendLog("蓝牙已连接（$triggerSource），车辆已处于解锁状态，跳过自动解锁")
+            return
+        }
+
+        val inCooldown = (nowElapsed - lastActionElapsedMs) < ACTION_COOLDOWN_MS ||
+            PassiveEntryRuntime.isAutoUnlockInCooldown(profile.vin, nowElapsed)
+        if (inCooldown) {
+            connectUnlockEvaluatedThisSession = true
+            PassiveEntryRuntime.appendLog("蓝牙已连接（$triggerSource），处于防抖冷却期内，跳过重复解锁")
+            return
+        }
+
+        if (isPassiveActionInFlight(nowElapsed)) {
+            return
+        }
+
+        lastUnlockLabel = "连接自动解锁"
+        val accepted = controller.sendVehicleAction("unlock")
+        if (accepted) {
+            connectUnlockEvaluatedThisSession = true
+            inFlightPassiveActionKey = "unlock"
+            inFlightPassiveActionLabel = lastUnlockLabel
+            inFlightPassiveActionElapsedMs = nowElapsed
+            hasBeenNear = true
+            lastNearActivityElapsedMs = nowElapsed
+            consecutiveUnlockHits = 0
+            updateNotification("正在执行连接自动解锁，等待车端确认...")
+            val stateDesc = if (resolvedLocked == true) "车辆未解锁" else "车况未回报已解锁"
+            PassiveEntryRuntime.appendLog("蓝牙已连接（$triggerSource，$stateDesc），已下发自动解锁指令，等待车端确认")
+        } else {
+            PassiveEntryRuntime.appendLog("连接自动解锁指令未能发送，保留靠近测距兜底")
+        }
+    }
+
+    private fun isPassiveActionInFlight(nowElapsed: Long): Boolean =
+        inFlightPassiveActionKey != null &&
+            (nowElapsed - inFlightPassiveActionElapsedMs) in 0L until IN_FLIGHT_ACTION_GUARD_MS
 
     override fun onVehicleResponse(parsedResponse: ParsedTBoxResponse) {
         mainHandler.post {
@@ -573,6 +947,13 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
                     )
                 }
             }
+            if (parsedResponse.doorLocked != null &&
+                pendingConnectUnlockRunnable != null &&
+                bleController?.isSessionReady() == true
+            ) {
+                cancelPendingConnectUnlockCheck()
+                evaluateConnectAutoUnlock(triggerSource = "蓝牙实时车况")
+            }
         }
     }
 
@@ -585,29 +966,120 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
 
     override fun onActionDispatched(actionKey: String, serial: Int) {
         mainHandler.post {
-            val profile = activeProfile ?: return@post
-            val label = when (actionKey) {
-                "unlock" -> "靠近自动解锁"
+            val label = if (inFlightPassiveActionKey == actionKey && inFlightPassiveActionLabel.isNotBlank()) {
+                inFlightPassiveActionLabel
+            } else {
+                when (actionKey) {
+                    "unlock" -> lastUnlockLabel
+                    "lock" -> "离车自动上锁"
+                    else -> "无感控车 ($actionKey)"
+                }
+            }
+            pendingPassiveActionBySerial[serial] = actionKey to label
+            PassiveEntryRuntime.appendLog("已写入加密指令：$label (serial=$serial)，等待车端 0x04 确认")
+        }
+    }
+
+    override fun onActionResult(
+        actionKey: String,
+        serial: Int,
+        success: Boolean,
+        parsedResponse: ParsedTBoxResponse?,
+        errorMessage: String?
+    ) {
+        mainHandler.post {
+            val tracked = pendingPassiveActionBySerial.remove(serial)
+            val effectiveAction = tracked?.first?.ifBlank { actionKey } ?: actionKey
+            val label = tracked?.second ?: when (effectiveAction) {
+                "unlock" -> lastUnlockLabel
                 "lock" -> "离车自动上锁"
-                else -> "无感控车 ($actionKey)"
+                else -> "无感控车 ($effectiveAction)"
             }
+            if (inFlightPassiveActionKey == effectiveAction) {
+                inFlightPassiveActionKey = null
+                inFlightPassiveActionLabel = ""
+                inFlightPassiveActionElapsedMs = 0L
+            }
+            val profile = activeProfile ?: return@post
+            val nowElapsed = SystemClock.elapsedRealtime()
             val nowMs = System.currentTimeMillis()
-            PassiveEntryStore.recordTrigger(this, profile.vin, label, nowMs)
-            PassiveEntryRuntime.updateFromService {
-                it.copy(
-                    lastEventText = label,
-                    lastEventAtMs = nowMs
-                )
+            if (!success) {
+                val reason = errorMessage ?: parsedResponse?.summaryText ?: "车端未确认执行"
+                PassiveEntryRuntime.appendLog("车端拒绝或未确认$label：$reason")
+                updateNotification("蓝牙数字钥匙已连接 · ${label}未完成")
+                return@post
             }
-            PassiveEntryRuntime.appendLog("已下发加密指令：$label")
-            updateNotification("已执行$label")
-            PassiveEntryRuntime.onAutoActionExecuted?.invoke(actionKey, profile.vin)
+            when (effectiveAction) {
+                "unlock" -> {
+                    lastActionElapsedMs = nowElapsed
+                    unlockedThisVisit = true
+                    lockedThisVisit = false
+                    hasBeenNear = true
+                    lastNearActivityElapsedMs = nowElapsed
+                    liveBleLocked = false
+                    liveBleUpdatedElapsedMs = nowElapsed
+                    PassiveEntryRuntime.clearLockSuppression(this, profile.vin)
+                    PassiveEntryRuntime.recordAutoUnlockDispatched(profile.vin, nowElapsed)
+                    PassiveEntryStore.updateVehicleLockHint(this, profile.vin, locked = false, updatedAtMs = nowMs)
+                    PassiveEntryRuntime.syncWidgetLockState(this, profile.vin, locked = false, hintText = "蓝牙无感：$label")
+                    PassiveEntryStore.recordTrigger(this, profile.vin, label, nowMs)
+                    PassiveEntryRuntime.updateFromService {
+                        it.copy(
+                            state = PassiveState.UNLOCKED_NEAR,
+                            lastEventText = label,
+                            lastEventAtMs = nowMs
+                        )
+                    }
+                    PassiveEntryRuntime.appendLog("车端已确认执行：$label")
+                    updateNotification("已执行$label")
+                    PassiveEntryRuntime.onAutoActionExecuted?.invoke(effectiveAction, profile.vin)
+                }
+                "lock" -> {
+                    lastActionElapsedMs = nowElapsed
+                    lockedThisVisit = true
+                    unlockedThisVisit = false
+                    liveBleLocked = true
+                    liveBleUpdatedElapsedMs = nowElapsed
+                    PassiveEntryRuntime.recordLockSuppression(
+                        this,
+                        profile.vin,
+                        PassiveLockSuppressionReason.WALK_AWAY_LOCK
+                    )
+                    PassiveEntryStore.updateVehicleLockHint(this, profile.vin, locked = true, updatedAtMs = nowMs)
+                    PassiveEntryRuntime.syncWidgetLockState(this, profile.vin, locked = true, hintText = "蓝牙无感：$label")
+                    PassiveEntryStore.recordTrigger(this, profile.vin, label, nowMs)
+                    PassiveEntryRuntime.updateFromService {
+                        it.copy(
+                            state = PassiveState.LOCKED_AWAY,
+                            lastEventText = label,
+                            lastEventAtMs = nowMs
+                        )
+                    }
+                    PassiveEntryRuntime.appendLog("车端已确认执行：$label")
+                    updateNotification("已执行$label")
+                    PassiveEntryRuntime.onAutoActionExecuted?.invoke(effectiveAction, profile.vin)
+                }
+                else -> {
+                    PassiveEntryStore.recordTrigger(this, profile.vin, label, nowMs)
+                    PassiveEntryRuntime.updateFromService {
+                        it.copy(lastEventText = label, lastEventAtMs = nowMs)
+                    }
+                    PassiveEntryRuntime.appendLog("车端已确认执行：$label")
+                    updateNotification("已执行$label")
+                    PassiveEntryRuntime.onAutoActionExecuted?.invoke(effectiveAction, profile.vin)
+                }
+            }
         }
     }
 
     override fun onConnectionStateChanged(connected: Boolean, stateName: String) {
         mainHandler.post {
             if (!connected) {
+                cancelPendingConnectUnlockCheck()
+                inFlightPassiveActionKey = null
+                inFlightPassiveActionLabel = ""
+                inFlightPassiveActionElapsedMs = 0L
+                pendingPassiveActionBySerial.clear()
                 if (hasEverEstablishedSession && disconnectedSinceElapsedMs == 0L) {
                     disconnectedSinceElapsedMs = SystemClock.elapsedRealtime()
                 }
@@ -696,19 +1168,39 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
         val controller = bleController ?: return
         if (!controller.isSessionReady()) return
 
-        val inCooldown = (nowElapsed - lastActionElapsedMs) < ACTION_COOLDOWN_MS
+        val inCooldown = (nowElapsed - lastActionElapsedMs) < ACTION_COOLDOWN_MS ||
+            PassiveEntryRuntime.isAutoUnlockInCooldown(profile.vin, nowElapsed)
 
         val liveFresh = liveBleUpdatedElapsedMs > 0L && (nowElapsed - liveBleUpdatedElapsedMs) in 0L..LIVE_BLE_HINT_TTL_MS
+        val suppression = PassiveEntryRuntime.activeLockSuppressionReason(this, profile.vin, nowElapsed)
 
-        // 1. Approach Auto-Unlock
-        if (cfg.autoUnlockEnabled && !unlockedThisVisit && filteredRssi >= unlockThreshold) {
+        // 1. Approach Auto-Unlock (fallback & post-walk-away return to door; blocked during manual lock suppression)
+        if (cfg.autoUnlockEnabled &&
+            !unlockedThisVisit &&
+            suppression != PassiveLockSuppressionReason.MANUAL_LOCK &&
+            filteredRssi >= unlockThreshold
+        ) {
+            if (inCooldown) {
+                consecutiveUnlockHits = 0
+                return
+            }
             consecutiveUnlockHits++
             consecutiveLockHits = 0
-            if (consecutiveUnlockHits >= UNLOCK_CONFIRM_SAMPLES && !inCooldown) {
+            if (consecutiveUnlockHits >= UNLOCK_CONFIRM_SAMPLES) {
                 val hint = PassiveEntryStore.getVehicleSafetyHint(this, profile.vin)
+                val engineRunning = when {
+                    liveFresh && liveBleEngineRunning != null -> liveBleEngineRunning == true
+                    hint.isFresh(maxAgeMs = UNLOCK_HINT_TTL_MS) && hint.engineStopped != null -> hint.engineStopped == false
+                    else -> false
+                }
+                if (engineRunning) {
+                    consecutiveUnlockHits = 0
+                    PassiveEntryRuntime.appendLog("已靠近（${filteredRssi} dBm），但车况显示处于启动状态，跳过自动解锁")
+                    return
+                }
                 val knownAlreadyUnlocked = when {
                     liveFresh && liveBleLocked != null -> liveBleLocked == false
-                    hint.isFresh(maxAgeMs = 60_000L) && hint.locked == false -> true
+                    hint.isFresh(maxAgeMs = UNLOCK_HINT_TTL_MS) && hint.locked == false -> true
                     else -> false
                 }
                 if (knownAlreadyUnlocked) {
@@ -719,14 +1211,18 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
                     PassiveEntryRuntime.appendLog("已靠近（${filteredRssi} dBm），车况已处于解锁状态，跳过重复解锁")
                 } else {
                     consecutiveUnlockHits = 0
+                    if (isPassiveActionInFlight(nowElapsed)) return
+                    cancelPendingConnectUnlockCheck()
+                    lastUnlockLabel = "靠近自动解锁"
                     val accepted = controller.sendVehicleAction("unlock")
                     if (accepted) {
-                        lastActionElapsedMs = nowElapsed
-                        unlockedThisVisit = true
-                        lockedThisVisit = false
+                        inFlightPassiveActionKey = "unlock"
+                        inFlightPassiveActionLabel = lastUnlockLabel
+                        inFlightPassiveActionElapsedMs = nowElapsed
+                        connectUnlockEvaluatedThisSession = true
                         hasBeenNear = true
-                        PassiveEntryRuntime.updateFromService { it.copy(state = PassiveState.UNLOCKED_NEAR) }
-                        PassiveEntryRuntime.appendLog("触发靠近自动解锁（滤波 ${filteredRssi} dBm >= ${unlockThreshold} dBm）")
+                        updateNotification("正在执行靠近自动解锁，等待车端确认...")
+                        PassiveEntryRuntime.appendLog("已下发靠近自动解锁（滤波 ${filteredRssi} dBm >= ${unlockThreshold} dBm），等待车端确认")
                     } else {
                         PassiveEntryRuntime.appendLog("靠近自动解锁指令未能发送，保留待触发状态")
                     }
@@ -738,9 +1234,14 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
         }
 
         // 2. Walk-Away Auto-Lock (requires prior near presence + live BLE & HTTP safety hint gate)
+        val lockInCooldown = (nowElapsed - lastActionElapsedMs) < ACTION_COOLDOWN_MS
         if (cfg.autoLockEnabled && hasBeenNear && !lockedThisVisit && filteredRssi <= lockThreshold) {
+            if (lockInCooldown || isPassiveActionInFlight(nowElapsed)) {
+                consecutiveLockHits = 0
+                return
+            }
             consecutiveLockHits++
-            if (consecutiveLockHits >= LOCK_CONFIRM_SAMPLES && !inCooldown) {
+            if (consecutiveLockHits >= LOCK_CONFIRM_SAMPLES) {
                 if (liveFresh && liveBleEngineRunning == true) {
                     consecutiveLockHits = 0
                     PassiveEntryRuntime.appendLog("离车阈值命中（${filteredRssi} dBm），但实时蓝牙车况显示未熄火，已拦截自动上锁")
@@ -767,11 +1268,11 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
                 consecutiveLockHits = 0
                 val accepted = controller.sendVehicleAction("lock")
                 if (accepted) {
-                    lastActionElapsedMs = nowElapsed
-                    lockedThisVisit = true
-                    unlockedThisVisit = false
-                    PassiveEntryRuntime.updateFromService { it.copy(state = PassiveState.LOCKED_AWAY) }
-                    PassiveEntryRuntime.appendLog("触发离车自动上锁（滤波 ${filteredRssi} dBm <= ${lockThreshold} dBm）")
+                    inFlightPassiveActionKey = "lock"
+                    inFlightPassiveActionLabel = "离车自动上锁"
+                    inFlightPassiveActionElapsedMs = nowElapsed
+                    updateNotification("正在执行离车自动上锁，等待车端确认...")
+                    PassiveEntryRuntime.appendLog("已下发离车自动上锁（滤波 ${filteredRssi} dBm <= ${lockThreshold} dBm），等待车端确认")
                 } else {
                     PassiveEntryRuntime.appendLog("离车自动上锁指令未能发送，保留待触发状态")
                 }
@@ -817,6 +1318,7 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
 
     private fun shutdownAndSleep(reason: String, sleepReason: PassiveSleepReason = PassiveSleepReason.NONE) {
         mainHandler.removeCallbacks(rssiPollTask)
+        cancelPendingConnectUnlockCheck()
         pendingConnectRunnable?.let(mainHandler::removeCallbacks)
         pendingConnectRunnable = null
         pendingReconnectRunnable?.let(mainHandler::removeCallbacks)
@@ -850,6 +1352,7 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(rssiPollTask)
+        cancelPendingConnectUnlockCheck()
         pendingConnectRunnable?.let(mainHandler::removeCallbacks)
         pendingConnectRunnable = null
         pendingReconnectRunnable?.let(mainHandler::removeCallbacks)
@@ -947,6 +1450,7 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
         private const val EXTRA_INITIAL_RSSI = "extra_initial_rssi"
         private const val EXTRA_WAKE_SOURCE = "extra_wake_source"
         private const val EXTRA_ASSUME_NEAR = "extra_assume_near"
+        private const val EXTRA_ASSUME_UNLOCKED = "extra_assume_unlocked"
         private const val EXTRA_CONNECT_DELAY_MS = "extra_connect_delay_ms"
 
         private const val RSSI_POLL_INTERVAL_MS = 1_200L
@@ -954,6 +1458,9 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
         private const val UNLOCK_CONFIRM_SAMPLES = 2
         private const val LOCK_CONFIRM_SAMPLES = 4
         private const val ACTION_COOLDOWN_MS = 20_000L
+        private const val IN_FLIGHT_ACTION_GUARD_MS = 8_000L
+        private const val CONNECT_STATUS_SETTLE_MS = 600L
+        private const val UNLOCK_HINT_TTL_MS = 120_000L
         private const val POST_LOCK_SLEEP_MS = 35_000L
         private const val CONNECT_GIVE_UP_MS = 45_000L
         private const val DISCONNECT_SLEEP_MS = 30_000L
@@ -969,7 +1476,8 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
             initialRssi: Int?,
             wakeSource: String,
             assumeAlreadyNear: Boolean = false,
-            connectDelayMs: Long = 0L
+            connectDelayMs: Long = 0L,
+            assumeAlreadyUnlocked: Boolean = false
         ) {
             val appContext = context.applicationContext
             // Pre-check permissions and Bluetooth state before starting a connectedDevice FGS
@@ -987,6 +1495,7 @@ class PassiveEntryService : Service(), CheryBleController.Listener {
                 putExtra(EXTRA_BLE_NAME, bleName)
                 putExtra(EXTRA_WAKE_SOURCE, wakeSource)
                 putExtra(EXTRA_ASSUME_NEAR, assumeAlreadyNear)
+                putExtra(EXTRA_ASSUME_UNLOCKED, assumeAlreadyUnlocked)
                 if (connectDelayMs > 0L) putExtra(EXTRA_CONNECT_DELAY_MS, connectDelayMs)
                 if (initialRssi != null) putExtra(EXTRA_INITIAL_RSSI, initialRssi)
             }

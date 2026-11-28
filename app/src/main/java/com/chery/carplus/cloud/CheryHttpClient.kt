@@ -9,7 +9,9 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.Locale
 import java.util.UUID
@@ -18,6 +20,7 @@ import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 
 data class CheryLoginResult(
@@ -573,15 +576,9 @@ class CheryHttpClient(
         clearAllPinSessions()
     }
 
-    fun isSessionExpired(resultCode: String, message: String = ""): Boolean {
-        val code = resultCode.trim()
-        if (code == RESULT_SUCCESS) return false
-        return code == RESULT_SESSION_EXPIRED ||
-            message.contains("登录失效") ||
-            message.contains("重新登录") ||
-            message.contains("会话过期") ||
-            message.contains("token失效", ignoreCase = true) ||
-            message.contains("未登录")
+    /** Matches zyhl g.java:28-35,65-72 — session expiry is strictly resultCode/code == "0406". */
+    fun isSessionExpired(resultCode: String, @Suppress("UNUSED_PARAMETER") message: String = ""): Boolean {
+        return resultCode.trim() == RESULT_SESSION_EXPIRED
     }
 
     /** Reports the single active protocol backend for legacy callers. */
@@ -795,7 +792,7 @@ class CheryHttpClient(
         mobileNo: String,
         smsCode: String,
         deviceId: String = "",
-        verifySmsFirst: Boolean = false,
+        verifySmsFirst: Boolean = true,
         password: String = ""
     ): CheryLoginResult {
         require(mobileNo.isNotBlank()) { "mobileNo is required" }
@@ -804,7 +801,7 @@ class CheryHttpClient(
             mobileNo = mobileNo.trim(),
             smsCode = smsCode.trim(),
             deviceId = resolveDeviceId(deviceId),
-            verifySmsFirst = true,
+            verifySmsFirst = verifySmsFirst,
             password = password
         )
     }
@@ -1307,7 +1304,7 @@ class CheryHttpClient(
             )
             var resultData = response.dataObjectOrNull()
             var dataResult = if (resultData != null) jsonText(resultData, "result") else ""
-            var dataAccepted = dataResult.isEmpty() || dataResult == "1"
+            var dataAccepted = dataResult == "1"
             var success = response.resultCode == RESULT_SUCCESS && dataAccepted
             var confirmedPinError = false
             var pinErrorOverrideMsg = ""
@@ -1333,7 +1330,7 @@ class CheryHttpClient(
                     )
                     resultData = response.dataObjectOrNull()
                     dataResult = if (resultData != null) jsonText(resultData, "result") else ""
-                    dataAccepted = dataResult.isEmpty() || dataResult == "1"
+                    dataAccepted = dataResult == "1"
                     success = response.resultCode == RESULT_SUCCESS && dataAccepted
                     confirmedPinError = false
                     if (success) markPinSessionWarm(authToken, normVin, pinHash)
@@ -1393,46 +1390,21 @@ class CheryHttpClient(
         }
     }
 
-    /** Returns the zyhl global identity token used by downstream SDK flows. */
+    /** Returns the zyhl SDK token captured from 101/105 data.token (falling back to globalId if absent). */
     fun exchangeSdkToken(
         accessToken: String,
         vin: String = "",
+        @Suppress("UNUSED_PARAMETER")
         verificationCode: String = ""
     ): SdkTokenInfo = SdkTokenInfo(
         vin = vin.trim().uppercase(Locale.US),
         userId = sessionUserId,
-        sdkToken = resolveGlobalId(accessToken),
+        sdkToken = sessionSdkToken.ifBlank { resolveGlobalId(accessToken) },
         sdkTokenExpire = "",
-        sdkRefreshToken = "",
+        sdkRefreshToken = sessionRefreshToken,
         sdkRefreshTokenExpire = "",
         rawJson = "{}"
     )
-
-    /**
-     * zyhl source-compatible SDK exchange: validates user identity through 112
-     * and returns the token captured from the 101/105 data.token field.
-     */
-    private fun exchangeSdkTokenZyhl(
-        accessToken: String,
-        vin: String,
-        verificationCode: String
-    ): SdkTokenInfo {
-        val authToken = resolveAuthToken(accessToken)
-        require(authToken.isNotBlank()) { "accessToken/globalId is required" }
-        val userInfo = fetchUserInfoZyhl(authToken)
-        if (verificationCode.isNotEmpty() && vin.isNotBlank()) {
-            runCatching { verifyVehiclePinZyhl(vin, verificationCode, authToken) }
-        }
-        return SdkTokenInfo(
-            vin = vin.trim().uppercase(Locale.US),
-            userId = userInfo.userId,
-            sdkToken = sessionSdkToken,
-            sdkTokenExpire = "",
-            sdkRefreshToken = sessionRefreshToken,
-            sdkRefreshTokenExpire = "",
-            rawJson = userInfo.rawJson
-        )
-    }
 
     /**
      * One-call account onboarding used by the new CarPlus flow:
@@ -1479,9 +1451,11 @@ class CheryHttpClient(
 
         val resolvedDeviceId = resolveDeviceId(deviceId)
             .ifBlank { profileStore.defaultDeviceId() }
+        val mobile = firstNonBlank(user.telephone, login.telephone, mobileNo)
+        // Prune stale profiles from any prior account before reading existing BLE keys/PIN.
+        profileStore.pruneProfilesNotMatchingAccount(userId, mobile)
         val existing = profileStore.listProfiles()
             .firstOrNull { it.vin.equals(primary.vin, ignoreCase = true) }
-        val mobile = firstNonBlank(user.telephone, login.telephone, mobileNo)
         val profile = VehicleProfile(
             vin = primary.vin.trim().uppercase(Locale.US),
             userId = userId,
@@ -1629,10 +1603,7 @@ class CheryHttpClient(
                 ""
             }
         }
-        val isBluetoothAuth = firstNonBlank(
-            item.optString("isBluetoothAuth"),
-            item.optString("autMethod")
-        )
+        val isBluetoothAuth = item.optString("isBluetoothAuth").trim()
         val isSelected = item.optString("selected") == "1" ||
             item.optBoolean("selected", false) ||
             item.optString("defaultCar") == "1" ||
@@ -1671,11 +1642,7 @@ class CheryHttpClient(
             odometer = item.optString("odometer"),
             batteryLevel = item.optString("batteryLevel"),
             remainedOil = item.optString("remainedOil"),
-            accountType = when (isBluetoothAuth.trim()) {
-                "0" -> 0 // owner account
-                "1" -> 1 // shared child account
-                else -> 0
-            },
+            accountType = if (isBluetoothAuth.trim() == "1") 1 else 0,
             isTracksOpen = parseFlagBoolean(firstNonBlank(jsonText(item, "is_tracks_open"), jsonText(item, "isTracksOpen"))),
             colorName = firstNonBlank(item.optString("colorName"), item.optString("color")),
             seriesCode = firstNonBlank(item.optString("seriesCode"), item.optString("series")),
@@ -1836,6 +1803,12 @@ class CheryHttpClient(
             "liftgate" to parseLiftgateState(liftgateState.ifBlank { liftgateOperateState })
         )
 
+        val rawLat = firstDouble(status, "lat")
+        val rawLon = firstDouble(status, "lon")
+        val hasValidCoords = isValidGpsCoordinate(rawLat, rawLon)
+        val validLatitude = if (hasValidCoords) rawLat else null
+        val validLongitude = if (hasValidCoords) rawLon else null
+
         return VehicleTelemetry(
             vin = vin,
             doorLockState = doorLock,
@@ -1858,8 +1831,8 @@ class CheryHttpClient(
                 ?.takeIf { it in 0.0..5_000.0 },
             odometerKm = firstDouble(status, "odometer")
                 ?.takeIf { it in 0.0..2_000_000.0 },
-            latitude = firstDouble(status, "lat"),
-            longitude = firstDouble(status, "lon"),
+            latitude = validLatitude,
+            longitude = validLongitude,
             rawJson = if (status.length() == 0) rawBody else status.toString(),
             conditionFields = conditionFields,
             doorLock = doorLock,
@@ -1901,8 +1874,8 @@ class CheryHttpClient(
                 status.optString("rightRearTyrekPa"),
                 status.optString("rRearTyrekPa")
             ),
-            lon = lon,
-            lat = lat,
+            lon = if (hasValidCoords) lon else "",
+            lat = if (hasValidCoords) lat else "",
             online = firstNonBlank(status.optString("online"), status.optString("isOnline")),
             time = firstNonBlank(
                 status.optString("time"),
@@ -1989,40 +1962,48 @@ class CheryHttpClient(
             "1104",
             JSONObject().put("0002", 0)
         )
-        RemoteCommand.AC_ON -> CommandSpec(
-            "1105",
-            JSONObject().apply {
-                put("0002", 1)
-                put("3001", parseIntParam(params, 24, "temperature", "airTemperature", "temp"))
-                put("3010", parseIntParam(params, 1, "airType"))
-                val duration = params["controlTime"]?.trim()?.toIntOrNull()
-                if (duration == 5 || duration == 10 || duration == 15) {
-                    put("300D", duration)
-                }
-                params["airPM"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
-                    put("300F", it)
-                }
-                params["frontDefrost"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
-                    put("3013", it)
-                }
-                params["rearDefrost"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
-                    put("3014", it)
-                }
-                params["driverHeating"]?.trim()?.toIntOrNull()?.let {
-                    put("3015", if (it > 0) 2 else 0)
-                }
-                params["passengerHeating"]?.trim()?.toIntOrNull()?.let {
-                    put("3016", if (it > 0) 2 else 0)
-                }
-                params["driverVent"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
-                    put("3029", it)
-                }
-                params["passengerVent"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
-                    put("302A", it)
-                }
-            },
-            isSetTemp = "1"
-        )
+        RemoteCommand.AC_ON -> {
+            val airType = params["airType"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 } ?: 1
+            val hasExplicitTemp = listOf("temperature", "airTemperature", "temp")
+                .any { !params[it].isNullOrBlank() }
+            val sendTemp = airType == 1 || hasExplicitTemp
+            CommandSpec(
+                "1105",
+                JSONObject().apply {
+                    put("0002", 1)
+                    if (sendTemp) {
+                        put("3001", encodeAcTemperatureTenths(params))
+                    }
+                    put("3010", airType)
+                    val duration = params["controlTime"]?.trim()?.toIntOrNull()
+                    if (duration == 5 || duration == 10 || duration == 15) {
+                        put("300D", duration)
+                    }
+                    params["airPM"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                        put("300F", it)
+                    }
+                    params["frontDefrost"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                        put("3013", it)
+                    }
+                    params["rearDefrost"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                        put("3014", it)
+                    }
+                    params["driverHeating"]?.trim()?.toIntOrNull()?.let {
+                        put("3015", if (it > 0) 2 else 0)
+                    }
+                    params["passengerHeating"]?.trim()?.toIntOrNull()?.let {
+                        put("3016", if (it > 0) 2 else 0)
+                    }
+                    params["driverVent"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                        put("3029", it)
+                    }
+                    params["passengerVent"]?.trim()?.toIntOrNull()?.takeIf { it == 0 || it == 1 }?.let {
+                        put("302A", it)
+                    }
+                },
+                isSetTemp = if (sendTemp) "1" else null
+            )
+        }
         RemoteCommand.AC_OFF -> CommandSpec(
             "1105",
             JSONObject().apply {
@@ -2083,13 +2064,25 @@ class CheryHttpClient(
         )
     }
 
-    private fun parseIntParam(
+    /**
+     * Encodes AC target temperature for zyhl 970 paras["3001"] in tenths of °C (e.g. 23.5°C -> 235),
+     * matching zyhl CarControlAirSubActivity.java:850-854 & b.java:748-750.
+     * Values >= 100.0 are treated as already-scaled tenths for backward compatibility.
+     */
+    private fun encodeAcTemperatureTenths(
         params: Map<String, String>,
-        defaultValue: Int,
-        vararg keys: String
-    ): Int = keys.firstNotNullOfOrNull { key ->
-        params[key]?.trim()?.toDoubleOrNull()?.let { Math.round(it).toInt() }
-    } ?: defaultValue
+        defaultCelsius: Double = 24.0
+    ): Int {
+        val raw = listOf("temperature", "airTemperature", "temp")
+            .firstNotNullOfOrNull { key -> params[key]?.trim()?.toDoubleOrNull() }
+            ?: defaultCelsius
+        val tenths = if (raw >= 100.0) {
+            Math.round(raw).toInt()
+        } else {
+            Math.round(raw * 10.0).toInt()
+        }
+        return tenths.coerceIn(AC_TEMP_MIN_TENTHS, AC_TEMP_MAX_TENTHS)
+    }
 
     fun executeZyhlService(
         serviceType: String,
@@ -2102,6 +2095,10 @@ class CheryHttpClient(
             val safePasswd = data.optString("safePasswd").trim()
             if (normVin.isNotBlank() && safePasswd.isNotBlank()) {
                 val pinHash = hashPasswordOrPin(safePasswd)
+                val hashedData = JSONObject(data.toString()).apply {
+                    put("vin", normVin)
+                    put("safePasswd", pinHash)
+                }
                 var preVerified = false
                 if (!isPinSessionWarm(authToken, normVin, pinHash)) {
                     val pinResp = postPinSessionVerification(normVin, pinHash, authToken)
@@ -2115,7 +2112,7 @@ class CheryHttpClient(
                     preVerified = true
                 }
 
-                val response = postEnvelope(serviceType, data, authToken)
+                val response = postEnvelope(serviceType, hashedData, authToken)
                 if (is970CommandAccepted(response.envelope)) {
                     markPinSessionWarm(authToken, normVin, pinHash)
                     return response.envelope
@@ -2134,7 +2131,7 @@ class CheryHttpClient(
                     }
                     if (pinResp?.resultCode == RESULT_SUCCESS) {
                         markPinSessionWarm(authToken, normVin, pinHash)
-                        val retryResp = postEnvelope(serviceType, data, authToken)
+                        val retryResp = postEnvelope(serviceType, hashedData, authToken)
                         if (is970CommandAccepted(retryResp.envelope)) {
                             markPinSessionWarm(authToken, normVin, pinHash)
                         }
@@ -2165,14 +2162,16 @@ class CheryHttpClient(
             data = JSONObject().put("vin", vin),
             accessToken = accessToken
         )
-        val summaryData = zyhlDataObject(summaryEnvelope)
+        val hasSummary = requireReadEnvelopeSuccess(summaryEnvelope, "140", allowEmptyData = true)
+        val summaryData = if (hasSummary) zyhlDataObject(summaryEnvelope) else JSONObject()
 
         val tripEnvelope = executeZyhlService(
             serviceType = "141",
             data = JSONObject().put("vin", vin),
             accessToken = accessToken
         )
-        val tripData = zyhlDataObject(tripEnvelope)
+        val hasTrip = requireReadEnvelopeSuccess(tripEnvelope, "141", allowEmptyData = true)
+        val tripData = if (hasTrip) zyhlDataObject(tripEnvelope) else JSONObject()
         var lastTrip = if (jsonText(tripData, "startTime").isNotBlank()) {
             parseTripRecord(tripData)
         } else {
@@ -2607,8 +2606,10 @@ class CheryHttpClient(
     fun resolveSharedUrlRedirect(urlString: String): String {
         val clean = urlString.trim()
         if (!clean.startsWith("http://", true) && !clean.startsWith("https://", true)) return clean
+        fun upgradeToHttps(raw: String): String =
+            if (raw.startsWith("http://", ignoreCase = true)) "https://${raw.substring(7)}" else raw
         return runCatching {
-            var current = clean
+            var current = upgradeToHttps(clean)
             repeat(3) {
                 val conn = (URL(current).openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
@@ -2621,11 +2622,12 @@ class CheryHttpClient(
                     val code = conn.responseCode
                     val loc = conn.getHeaderField("Location").orEmpty().trim()
                     if (code in 300..399 && loc.isNotBlank()) {
-                        current = if (loc.startsWith("http://", true) || loc.startsWith("https://", true)) {
+                        val resolved = if (loc.startsWith("http://", true) || loc.startsWith("https://", true)) {
                             loc
                         } else {
                             URL(URL(current), loc).toString()
                         }
+                        current = upgradeToHttps(resolved)
                     } else {
                         return@runCatching current
                     }
@@ -2772,6 +2774,7 @@ class CheryHttpClient(
             },
             accessToken = accessToken
         )
+        if (!requireReadEnvelopeSuccess(envelope, "963", allowEmptyData = true)) return emptyList()
         val data = zyhlDataObject(envelope)
         return objectList(data.optJSONArray("list")).map { item ->
             ZyhlMessageItem(
@@ -2800,6 +2803,7 @@ class CheryHttpClient(
             },
             accessToken = accessToken
         )
+        requireReadEnvelopeSuccess(envelope, "216", allowEmptyData = false)
         val data = zyhlDataObject(envelope)
         val content = jsonText(data, "content")
         return ZyhlMessageItem(
@@ -2831,6 +2835,7 @@ class CheryHttpClient(
             },
             accessToken = accessToken
         )
+        if (!requireReadEnvelopeSuccess(envelope, "980", allowEmptyData = true)) return emptyList()
         val data = zyhlDataObject(envelope)
         return objectList(data.optJSONArray("list")).map { item ->
             val description = jsonText(item, "remindDesc")
@@ -2853,6 +2858,7 @@ class CheryHttpClient(
             data = JSONObject().put("vin", vin),
             accessToken = accessToken
         )
+        requireReadEnvelopeSuccess(envelope, "950", allowEmptyData = false)
         val data = zyhlDataObject(envelope)
         return AntiTheftStatus(
             theftRemindEnabled = jsonBoolean(data, "theftRemind"),
@@ -2868,6 +2874,7 @@ class CheryHttpClient(
             data = JSONObject().put("vin", vin),
             accessToken = accessToken
         )
+        if (!requireReadEnvelopeSuccess(envelope, "940", allowEmptyData = true)) return emptyList()
         val data = zyhlDataObject(envelope)
         return objectList(data.optJSONArray("fenceList")).map { item ->
             val fence = objectList(item.optJSONArray("fence")).firstOrNull()
@@ -2920,9 +2927,13 @@ class CheryHttpClient(
         return zyhlEnvelopeSucceeded(envelope)
     }
 
+    /**
+     * Operates on an electronic geofence via zyhl 941:
+     * type "0" = disable, "1" = enable, "2" = delete (default).
+     */
     fun deleteOrToggleGeofence(
         keyId: String,
-        type: String = "1",
+        type: String = "2",
         accessToken: String = ""
     ): Boolean {
         val envelope = executeZyhlService(
@@ -2936,12 +2947,19 @@ class CheryHttpClient(
         return zyhlEnvelopeSucceeded(envelope)
     }
 
+    fun deleteGeofence(keyId: String, accessToken: String = ""): Boolean =
+        deleteOrToggleGeofence(keyId = keyId, type = "2", accessToken = accessToken)
+
+    fun setGeofenceEnabled(keyId: String, enabled: Boolean, accessToken: String = ""): Boolean =
+        deleteOrToggleGeofence(keyId = keyId, type = if (enabled) "1" else "0", accessToken = accessToken)
+
     fun fetchVehicleDiagnosis(vin: String, accessToken: String = ""): JSONObject {
         val envelope = executeZyhlService(
             serviceType = "961",
             data = JSONObject().put("vin", vin),
             accessToken = accessToken
         )
+        requireReadEnvelopeSuccess(envelope, "961", allowEmptyData = false)
         return zyhlDataObject(envelope)
     }
 
@@ -2978,7 +2996,7 @@ class CheryHttpClient(
             accessToken = accessToken
         )
         val resultCode = jsonText(envelope, "resultCode")
-        val resultMessage = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
+        val resultMessage = envelopeResultMessage(envelope)
         val data = zyhlDataObject(envelope)
         val currentVersion = jsonText(data, "whlVsn")
         val releaseNote = jsonText(data, "rlsNt")
@@ -3043,7 +3061,7 @@ class CheryHttpClient(
             accessToken = accessToken
         )
         val resultCode = jsonText(envelope, "resultCode")
-        val resultMessage = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
+        val resultMessage = envelopeResultMessage(envelope)
         if (resultCode.isNotBlank() && resultCode != RESULT_SUCCESS) {
             error(resultMessage.ifBlank { "获取升级进度失败 ($resultCode)" })
         }
@@ -3098,7 +3116,7 @@ class CheryHttpClient(
             accessToken = accessToken
         )
         val code = jsonText(envelope, "resultCode")
-        val msg = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
+        val msg = envelopeResultMessage(envelope)
         val accepted = is970CommandAccepted(envelope)
         val pinErr = !accepted && isPinRejection(code, msg)
         return VehicleUpgradeActionResult(
@@ -3126,7 +3144,7 @@ class CheryHttpClient(
             accessToken = accessToken
         )
         val code = jsonText(envelope, "resultCode")
-        val msg = firstNonBlank(jsonText(envelope, "resultMessage"), jsonText(envelope, "message"))
+        val msg = envelopeResultMessage(envelope)
         return VehicleUpgradeActionResult(
             success = zyhlEnvelopeSucceeded(envelope),
             resultCode = code,
@@ -3146,20 +3164,86 @@ class CheryHttpClient(
         accessToken = accessToken
     ).success
 
+    /**
+     * Schedules or cancels an OTA vehicle upgrade via official zyhl `970` instruction `1116`
+     * (`paras["302F"] = upgradeTaskId`, `paras["3030"] = [{"0001": startTime}]` when scheduling;
+     * omit `"3030"` when cancelling). Matches zyhl `carcontrol/core/manager/b.java:661-679`.
+     */
+    fun scheduleVehicleUpgradeAction(
+        vin: String,
+        upgradeTaskId: String,
+        startTime: String,
+        vehiclePin: String = "",
+        accessToken: String = ""
+    ): VehicleUpgradeActionResult {
+        val normVin = vin.trim().uppercase(Locale.US)
+        val normTaskId = upgradeTaskId.trim()
+        if (normVin.isBlank() || normTaskId.isBlank()) {
+            return VehicleUpgradeActionResult(false, message = "升级任务参数缺失")
+        }
+        val pinHash = if (vehiclePin.trim().isNotBlank()) hashPasswordOrPin(vehiclePin.trim()) else ""
+        val paras = JSONObject().apply {
+            put("302F", normTaskId)
+            val cleanStart = startTime.trim()
+            if (cleanStart.isNotEmpty()) {
+                put("3030", JSONArray().put(JSONObject().put("0001", cleanStart)))
+            }
+        }
+        val commandData = JSONObject().apply {
+            put("vin", normVin)
+            put("instruction", "1116")
+            put("paras", paras)
+            put("passwordType", PASSWORD_TYPE_VEHICLE)
+            if (pinHash.isNotBlank()) put("safePasswd", pinHash)
+        }
+        val envelope = executeZyhlService(
+            serviceType = SERVICE_REMOTE_COMMAND,
+            data = commandData,
+            accessToken = accessToken
+        )
+        val code = jsonText(envelope, "resultCode")
+        val msg = envelopeResultMessage(envelope)
+        val accepted = is970CommandAccepted(envelope)
+        val pinErr = !accepted && isPinRejection(code, msg)
+        return VehicleUpgradeActionResult(
+            success = accepted,
+            resultCode = code,
+            message = msg,
+            isPinError = pinErr
+        )
+    }
+
+    fun cancelVehicleUpgradeSchedule(
+        vin: String,
+        upgradeTaskId: String,
+        vehiclePin: String = "",
+        accessToken: String = ""
+    ): VehicleUpgradeActionResult = scheduleVehicleUpgradeAction(
+        vin = vin,
+        upgradeTaskId = upgradeTaskId,
+        startTime = "",
+        vehiclePin = vehiclePin,
+        accessToken = accessToken
+    )
+
     fun scheduleVehicleUpgrade(
         vin: String,
         startTime: String,
-        accessToken: String = ""
+        accessToken: String = "",
+        upgradeTaskId: String = "",
+        vehiclePin: String = ""
     ): Boolean {
-        val envelope = executeZyhlService(
-            serviceType = "145",
-            data = JSONObject().apply {
-                put("vin", vin)
-                put("time", startTime)
-            },
+        val resolvedTaskId = upgradeTaskId.trim().ifBlank {
+            runCatching { checkVehicleUpgrade(vin, accessToken).upgradeTaskId }.getOrDefault("")
+        }
+        if (resolvedTaskId.isBlank()) return false
+        return scheduleVehicleUpgradeAction(
+            vin = vin,
+            upgradeTaskId = resolvedTaskId,
+            startTime = startTime,
+            vehiclePin = vehiclePin,
             accessToken = accessToken
-        )
-        return zyhlEnvelopeSucceeded(envelope)
+        ).success
     }
 
     fun changeLoginPassword(
@@ -3298,7 +3382,59 @@ class CheryHttpClient(
         return success
     }
 
-    /** Updates one cloud user profile field via zyhl 113 (0=nickname, 1=sex, 2=email, 3=region). */
+    data class RegionCity(
+        val cityCode: String,
+        val cityName: String
+    )
+
+    data class RegionProvince(
+        val provinceCode: String,
+        val provinceName: String,
+        val cities: List<RegionCity> = emptyList()
+    )
+
+    data class RegionDirectory(
+        val hotCities: List<RegionCity> = emptyList(),
+        val provinces: List<RegionProvince> = emptyList()
+    )
+
+    /**
+     * Fetches Chery's province/city directory via zyhl service 138 (`DataResp138` / `DataResp138a` / `DataResp138b`),
+     * matching `ModifyRegionActivity.java:132-167,214`. Submit chosen `cityCode` (or `provinceCode` when `cities` is empty)
+     * via `updateUserProfileField(updateType = "3", content = code, accessToken = token)`.
+     */
+    fun fetchRegionCities(accessToken: String = ""): RegionDirectory {
+        val envelope = executeZyhlService(
+            serviceType = SERVICE_REGION_CITIES,
+            data = JSONObject(),
+            accessToken = accessToken
+        )
+        requireReadEnvelopeSuccess(envelope, SERVICE_REGION_CITIES, allowEmptyData = false)
+        val data = zyhlDataObject(envelope)
+        val hotCities = objectList(data.optJSONArray("hotCityList")).mapNotNull { item ->
+            val code = jsonText(item, "cityCode")
+            val name = jsonText(item, "cityName")
+            if (code.isNotBlank() && name.isNotBlank()) RegionCity(code, name) else null
+        }
+        val provinces = objectList(data.optJSONArray("list")).mapNotNull { item ->
+            val provinceCode = jsonText(item, "provinceCode")
+            val provinceName = jsonText(item, "provinceName")
+            if (provinceCode.isBlank() && provinceName.isBlank()) return@mapNotNull null
+            val cities = objectList(item.optJSONArray("cityList")).mapNotNull { city ->
+                val cCode = jsonText(city, "cityCode")
+                val cName = jsonText(city, "cityName")
+                if (cCode.isNotBlank() && cName.isNotBlank()) RegionCity(cCode, cName) else null
+            }
+            RegionProvince(
+                provinceCode = provinceCode,
+                provinceName = provinceName,
+                cities = cities
+            )
+        }
+        return RegionDirectory(hotCities = hotCities, provinces = provinces)
+    }
+
+    /** Updates one cloud user profile field via zyhl 113 (0=nickname, 1=sex, 2=email, 3=region code). */
     fun updateUserProfileField(
         updateType: String,
         content: String,
@@ -3333,13 +3469,13 @@ class CheryHttpClient(
         return is970CommandAccepted(env)
     }
 
-    /** Validates zyhl 970 responses: outer resultCode == "0200" AND data.result == "1" (when present). */
+    /** Validates zyhl 970 responses strictly: outer resultCode == "0200" AND data.result == "1" (zyhl b.java:144,154). */
     fun is970CommandAccepted(envelope: JSONObject): Boolean {
         val code = jsonText(envelope, "resultCode").ifBlank { jsonText(envelope, "code") }
         if (code != RESULT_SUCCESS) return false
         val data = zyhlDataObject(envelope)
         val innerResult = jsonText(data, "result")
-        return innerResult.isEmpty() || innerResult == "1"
+        return innerResult == "1"
     }
 
     /** Toggles cabin auto air-ventilation via zyhl 975 (DataReq975). */
@@ -3369,6 +3505,9 @@ class CheryHttpClient(
             data = JSONObject().put("vin", vin.trim().uppercase(Locale.US)),
             accessToken = accessToken
         )
+        if (!requireReadEnvelopeSuccess(env, "967", allowEmptyData = true)) {
+            return VehicleTrafficInfo(rawJson = "{}")
+        }
         val data = zyhlDataObject(env)
         return VehicleTrafficInfo(
             usedTraffic = jsonText(data, "usedTraffic"),
@@ -3390,6 +3529,9 @@ class CheryHttpClient(
             data = JSONObject().put("vin", vin.trim().uppercase(Locale.US)),
             accessToken = accessToken
         )
+        if (!requireReadEnvelopeSuccess(env, "974", allowEmptyData = true)) {
+            return ChargingScheduleSummary(masterEnabled = false, items = emptyList(), rawJson = "{}")
+        }
         val data = zyhlDataObject(env)
         val items = objectList(data.optJSONArray("chargeAppintlist")).map { item ->
             val days = objectList(item.optJSONArray("dateList")).mapNotNull { d ->
@@ -3464,6 +3606,9 @@ class CheryHttpClient(
             data = JSONObject().put("vin", vin.trim().uppercase(Locale.US)),
             accessToken = accessToken
         )
+        if (!requireReadEnvelopeSuccess(env, "143", allowEmptyData = true)) {
+            return TravelScheduleSummary(masterEnabled = false, items = emptyList(), rawJson = "{}")
+        }
         val data = zyhlDataObject(env)
         val items = objectList(data.optJSONArray("travellist")).map { item ->
             TravelScheduleItem(
@@ -4079,14 +4224,49 @@ class CheryHttpClient(
         )
     }
 
+    private fun envelopeResultMessage(envelope: JSONObject): String = firstNonBlank(
+        jsonText(envelope, "resultMsg"),
+        jsonText(envelope, "resultMessage"),
+        jsonText(envelope, "message"),
+        jsonText(envelope, "error")
+    )
+
+    private fun isValidGpsCoordinate(lat: Double?, lon: Double?): Boolean {
+        if (lat == null || lon == null) return false
+        if (!lat.isFinite() || !lon.isFinite()) return false
+        if (lat == 0.0 && lon == 0.0) return false
+        return lat in -90.0..90.0 && lon in -180.0..180.0
+    }
+
+    /**
+     * Validates a zyhl read-API envelope: returns true on "0200", false on "0204" when
+     * [allowEmptyData] is true, and throws with server resultMsg on any error code.
+     */
+    private fun requireReadEnvelopeSuccess(
+        envelope: JSONObject,
+        serviceType: String,
+        allowEmptyData: Boolean
+    ): Boolean {
+        val code = jsonText(envelope, "resultCode")
+        if (code == RESULT_SUCCESS) return true
+        if (allowEmptyData && code == RESULT_EMPTY_DATA) return false
+        if (code == RESULT_SESSION_EXPIRED && !isUnauthenticatedService(serviceType)) {
+            throw CherySessionExpiredException(code, envelopeResultMessage(envelope).ifBlank { "登录已失效，请重新登录" })
+        }
+        val msg = envelopeResultMessage(envelope)
+        error(
+            msg.ifBlank {
+                "智云互联 $serviceType 请求失败" + if (code.isBlank()) "" else "[$code]"
+            }
+        )
+    }
+
     private fun zyhlEnvelopeSucceeded(envelope: JSONObject): Boolean {
         val resultCode = envelope.optString("resultCode").trim()
-        if (resultCode == RESULT_SUCCESS || resultCode == "200" || resultCode == "0") return true
-        if (resultCode.isNotEmpty()) return false
+        if (resultCode.isNotEmpty()) return resultCode == RESULT_SUCCESS
         val success = envelope.opt("success")
         if (success is Boolean && success) return true
         if (success is String && success.equals("true", ignoreCase = true)) return true
-        if (envelope.optInt("status", -1) == 200) return true
         val code = envelope.opt("code")
         return (code is Number && code.toInt() == 0) ||
             (code is String && code.trim() == "0")
@@ -4133,6 +4313,16 @@ class CheryHttpClient(
             try {
                 val http = postJson(url, body)
                 if (http.statusCode !in 200..299) {
+                    if (!isUnauthenticatedService(serviceType)) {
+                        val errJson = runCatching { JSONObject(http.body) }.getOrNull()
+                        val errCode = errJson?.let {
+                            firstNonBlank(it.optString("resultCode"), it.optString("code"))
+                        }.orEmpty()
+                        if (errCode == RESULT_SESSION_EXPIRED) {
+                            val errMsg = errJson?.let { envelopeResultMessage(it) }.orEmpty()
+                            triggerSessionExpired(errCode, errMsg, globalId)
+                        }
+                    }
                     throw IOException(
                         "HTTP ${http.statusCode} from ${URL(url).host}: ${http.body.take(300)}"
                     )
@@ -4184,8 +4374,8 @@ class CheryHttpClient(
             parsedUrl.host.equals(DEFAULT_PRIMARY_HOST, ignoreCase = true) &&
             parsedUrl.port == DEFAULT_PRIMARY_PORT
         ) {
-            connection.sslSocketFactory = permissiveSslSocketFactory
-            connection.hostnameVerifier = permissiveHostnameVerifier
+            connection.sslSocketFactory = pkicaPinnedSslSocketFactory
+            connection.hostnameVerifier = pkicaHostnameVerifier
         }
 
         try {
@@ -4256,16 +4446,28 @@ class CheryHttpClient(
     ) {
         if (isUnauthenticatedService(serviceType)) return
         if (!isSessionExpired(response.resultCode, response.message)) return
+        triggerSessionExpired(
+            resultCode = response.resultCode.ifBlank { RESULT_SESSION_EXPIRED },
+            serverMessage = response.message,
+            requestGlobalId = requestGlobalId
+        )
+    }
+
+    private fun triggerSessionExpired(
+        resultCode: String,
+        serverMessage: String,
+        requestGlobalId: String
+    ): Nothing {
         val currentGlobalId = sessionGlobalId.trim()
         val reqGlobalId = requestGlobalId.trim()
         if (currentGlobalId.isNotBlank() && reqGlobalId.isNotBlank() && reqGlobalId != currentGlobalId) {
             // Stale in-flight request from an old session: do not nuke the newly established session.
-            throw CherySessionExpiredException(response.resultCode.ifBlank { RESULT_SESSION_EXPIRED }, "旧会话已失效")
+            throw CherySessionExpiredException(resultCode.ifBlank { RESULT_SESSION_EXPIRED }, "旧会话已失效")
         }
         clearSession()
-        val msg = response.message.ifBlank { "登录已失效，请重新登录" }
+        val msg = serverMessage.ifBlank { "登录已失效，请重新登录" }
         runCatching { onSessionExpired?.invoke(msg) }
-        throw CherySessionExpiredException(response.resultCode.ifBlank { RESULT_SESSION_EXPIRED }, msg)
+        throw CherySessionExpiredException(resultCode.ifBlank { RESULT_SESSION_EXPIRED }, msg)
     }
 
     private fun isUnauthenticatedService(serviceType: String): Boolean =
@@ -4352,8 +4554,8 @@ class CheryHttpClient(
         return null
     }
 
-    private fun isSuccessCode(code: String): Boolean =
-        code == RESULT_SUCCESS || code == RESULT_EMPTY_DATA
+    /** zyhl g.java:65 — strictly "0200" is success; "0204" (empty data) is handled explicitly by list/read endpoints. */
+    private fun isSuccessCode(code: String): Boolean = code == RESULT_SUCCESS
 
     private fun isDeviceBindingMessage(message: String): Boolean {
         val normalized = message.lowercase(Locale.US)
@@ -4363,18 +4565,89 @@ class CheryHttpClient(
             normalized.contains("bind")
     }
 
-    private val permissiveSslSocketFactory: SSLSocketFactory by lazy {
-        val trustAll = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    private fun isPinnedPkicaCertificate(cert: X509Certificate): Boolean {
+        val subjectDn = cert.subjectX500Principal?.name.orEmpty()
+        if (!subjectDn.contains("CN=$DEFAULT_PRIMARY_HOST", ignoreCase = true) ||
+            !subjectDn.contains("O=CHERY", ignoreCase = true)
+        ) {
+            return false
+        }
+        val certSha256 = MessageDigest.getInstance("SHA-256")
+            .digest(cert.encoded)
+            .joinToString("") { "%02X".format(Locale.US, it.toInt() and 0xFF) }
+        if (certSha256.equals(PKICA_CERT_SHA256, ignoreCase = true)) return true
+
+        val spkiSha256 = Base64.encodeToString(
+            MessageDigest.getInstance("SHA-256").digest(cert.publicKey.encoded),
+            Base64.NO_WRAP
+        )
+        return spkiSha256 == PKICA_SPKI_SHA256
+    }
+
+    /**
+     * Scoped TLS trust manager for Chery's private-CA gateway (`pkica.mychery.com:648`).
+     * Validates against the system trust store first, then falls back strictly to Chery's
+     * pinned `pkica.mychery.com` certificate/SPKI with validity & Subject DN checks.
+     * All other HTTPS hosts use the default Android system trust store untouched.
+     */
+    private val pkicaPinnedSslSocketFactory: SSLSocketFactory by lazy {
+        val defaultTmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+            init(null as KeyStore?)
+        }
+        val systemTm = defaultTmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
+        val pinnedTm = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                systemTm?.checkClientTrusted(chain, authType)
+                    ?: throw CertificateException("No system TrustManager available")
+            }
+
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                if (chain.isNullOrEmpty()) {
+                    throw CertificateException("Empty server certificate chain for $DEFAULT_PRIMARY_HOST")
+                }
+                val systemErr = runCatching {
+                    systemTm?.checkServerTrusted(chain, authType)
+                        ?: throw CertificateException("No system TrustManager available")
+                }.exceptionOrNull()
+                if (systemErr == null) return
+
+                val leaf = chain[0]
+                leaf.checkValidity()
+                if (!isPinnedPkicaCertificate(leaf)) {
+                    throw CertificateException(
+                        "Pinned certificate check failed for $DEFAULT_PRIMARY_HOST: ${leaf.subjectX500Principal?.name}",
+                        systemErr
+                    )
+                }
+            }
+
+            override fun getAcceptedIssuers(): Array<X509Certificate> =
+                systemTm?.acceptedIssuers ?: emptyArray()
         }
         val context = SSLContext.getInstance("TLS")
-        context.init(null, arrayOf<TrustManager>(trustAll), null)
+        context.init(null, arrayOf<TrustManager>(pinnedTm), null)
         context.socketFactory
     }
 
-    private val permissiveHostnameVerifier = HostnameVerifier { _, _ -> true }
+    /**
+     * Standard hostname verification for `pkica.mychery.com:648`, allowing the private
+     * Chery cert (which carries `CN=pkica.mychery.com` without a SAN extension) ONLY
+     * when the peer leaf certificate matches the exact pinned `pkica.mychery.com` cert/SPKI.
+     */
+    private val pkicaHostnameVerifier = HostnameVerifier { hostname, session ->
+        if (!hostname.equals(DEFAULT_PRIMARY_HOST, ignoreCase = true)) {
+            return@HostnameVerifier false
+        }
+        if (HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)) {
+            return@HostnameVerifier true
+        }
+        val leaf = runCatching { session.peerCertificates.firstOrNull() as? X509Certificate }.getOrNull()
+            ?: return@HostnameVerifier false
+        runCatching {
+            leaf.checkValidity()
+            isPinnedPkicaCertificate(leaf)
+        }.getOrDefault(false)
+    }
 
     private data class CommandSpec(
         val instruction: String,
@@ -4482,6 +4755,7 @@ class CheryHttpClient(
         const val SERVICE_CONFIRM_BIND_SMS = "108"
         const val SERVICE_USER_INFO = "112"
         const val SERVICE_VERIFY_PIN = "125"
+        const val SERVICE_REGION_CITIES = "138"
         const val SERVICE_UPDATE_LICENSE_PLATE = "933"
         const val SERVICE_VEHICLE_INFO = "1001"
         const val SERVICE_VEHICLE_LIST = "900"
@@ -4507,6 +4781,19 @@ class CheryHttpClient(
         const val DEFAULT_PRIMARY_BASE_URL = "https://pkica.mychery.com:648"
         const val DEFAULT_SECONDARY_BASE_URL = "https://cloudrivechery.mychery.com"
         const val DEFAULT_USER_AGENT = "Android Device"
+
+        private const val AC_TEMP_MIN_TENTHS = 140
+        private const val AC_TEMP_MAX_TENTHS = 340
+
+        // Verified Chery private-PKI certificate for pkica.mychery.com:648 (valid 2025-08-25..2045-08-25).
+        private const val PKICA_CERT_SHA256 =
+            "15BA38205A9A98EBD52EBDA9EA0F54094F7DF0F4EECBB8F1ED6525A77DD07A61"
+        private const val PKICA_SPKI_SHA256 =
+            "7hrijqG1hr0G1toNYrwyLaY5J4W0fMrZPMe1Qmw2bE8="
+
+        /** Formats Celsius temperature (preserving 0.5°C precision) for `AC_ON` params["temperature"]. */
+        fun formatAcTemperatureParam(celsius: Double): String =
+            String.format(Locale.US, "%.1f", celsius)
 
     }
 }

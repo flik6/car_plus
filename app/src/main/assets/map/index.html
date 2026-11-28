@@ -192,7 +192,79 @@
         }
       }
 
-      // Web Mercator projection
+      // Web Mercator projection + bidirectional GCJ-02 <-> WGS-84 transform for OSM tile fallback
+      var tileCrs = 'gcj02';
+      var hostPaused = false;
+      var routePlaybackFinished = false;
+
+      function isInChinaBounds(lat, lon) {
+        return lon >= 72.004 && lon <= 137.8347 && lat >= 0.8293 && lat <= 55.8271;
+      }
+      function gcjDeltaLat(x, y) {
+        var ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+        ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+        ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+        ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320.0 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+        return ret;
+      }
+      function gcjDeltaLon(x, y) {
+        var ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+        ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+        ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+        ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+        return ret;
+      }
+      function wgs84ToGcj02(lat, lon) {
+        if (!isInChinaBounds(lat, lon)) return { lat: lat, lon: lon };
+        var a = 6378245.0;
+        var ee = 0.00669342162296594323;
+        var dLat = gcjDeltaLat(lon - 105.0, lat - 35.0);
+        var dLon = gcjDeltaLon(lon - 105.0, lat - 35.0);
+        var radLat = lat / 180.0 * Math.PI;
+        var magic = Math.sin(radLat);
+        magic = 1.0 - ee * magic * magic;
+        var sqrtMagic = Math.sqrt(magic);
+        dLat = (dLat * 180.0) / ((a * (1.0 - ee)) / (magic * sqrtMagic) * Math.PI);
+        dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
+        return { lat: lat + dLat, lon: lon + dLon };
+      }
+      function gcj02ToWgs84(gcjLat, gcjLon) {
+        if (!isInChinaBounds(gcjLat, gcjLon)) return { lat: gcjLat, lon: gcjLon };
+        // Iterative fixed-point inversion (~<0.5m accuracy)
+        var wLat = gcjLat;
+        var wLon = gcjLon;
+        for (var i = 0; i < 3; i++) {
+          var est = wgs84ToGcj02(wLat, wLon);
+          wLat += gcjLat - est.lat;
+          wLon += gcjLon - est.lon;
+        }
+        return { lat: wLat, lon: wLon };
+      }
+      function toTileCoords(gcjLat, gcjLon) {
+        return tileCrs === 'wgs84' ? gcj02ToWgs84(gcjLat, gcjLon) : { lat: gcjLat, lon: gcjLon };
+      }
+      function fromTileCoords(tLat, tLon) {
+        return tileCrs === 'wgs84' ? wgs84ToGcj02(tLat, tLon) : { lat: tLat, lon: tLon };
+      }
+
+      function switchTileCrsToWgs84() {
+        if (tileCrs === 'wgs84') return;
+        tileCrs = 'wgs84';
+        for (var k in tileCache) {
+          if (Object.prototype.hasOwnProperty.call(tileCache, k)) {
+            var e = tileCache[k];
+            if (e && e.img && !e.isOsm) {
+              e.img.onload = null;
+              e.img.onerror = null;
+              e.img.src = '';
+              delete tileCache[k];
+            }
+          }
+        }
+        tileCacheOrder = Object.keys(tileCache);
+        requestDraw();
+      }
+
       function lonToWorldX(lon, z) {
         return (lon + 180) / 360 * Math.pow(2, z) * TILE_SIZE;
       }
@@ -229,28 +301,38 @@
         var max = Math.pow(2, z);
         if (y < 0 || y >= max) return null;
         var wx = ((x % max) + max) % max;
-        var key = z + '/' + wx + '/' + y;
+        var key = tileCrs + ':' + z + '/' + wx + '/' + y;
         if (tileCache[key]) {
           touchTileKey(key);
           return tileCache[key];
         }
 
-        var entry = { img: new Image(), loaded: false, failed: false };
-        // Standard Amap road tile with readable Chinese street names and landmarks
+        var entry = { img: new Image(), loaded: false, failed: false, isOsm: tileCrs === 'wgs84' };
         var sub = (wx + y) % 4 + 1;
         entry.img.onload = function () {
           entry.loaded = true;
           requestDraw();
         };
         entry.img.onerror = function () {
-          if (!entry.retried) {
-            entry.retried = true;
-            entry.img.src = 'https://tile.openstreetmap.org/' + z + '/' + wx + '/' + y + '.png';
+          if (!entry.isOsm) {
+            entry.img.onload = null;
+            entry.img.onerror = null;
+            entry.img.src = '';
+            if (tileCache[key] === entry) {
+              delete tileCache[key];
+              var cacheIdx = tileCacheOrder.indexOf(key);
+              if (cacheIdx !== -1) tileCacheOrder.splice(cacheIdx, 1);
+            }
+            switchTileCrsToWgs84();
           } else {
             entry.failed = true;
           }
         };
-        entry.img.src = 'https://webrd0' + sub + '.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=' + wx + '&y=' + y + '&z=' + z;
+        if (tileCrs === 'wgs84') {
+          entry.img.src = 'https://tile.openstreetmap.org/' + z + '/' + wx + '/' + y + '.png';
+        } else {
+          entry.img.src = 'https://webrd0' + sub + '.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=' + wx + '&y=' + y + '&z=' + z;
+        }
         tileCache[key] = entry;
         touchTileKey(key);
         return entry;
@@ -304,33 +386,40 @@
 
       function startRouteLoop() {
         stopRouteLoop();
+        routePlaybackFinished = false;
         routeAnimStartMs = performance.now();
         function tick() {
-          if (document.hidden || routePoints.length < 2) {
+          if (document.hidden || hostPaused || routePoints.length < 2) {
             routeAnimRafId = null;
             return;
           }
+          var elapsedMs = performance.now() - routeAnimStartMs;
           drawOverlay();
+          if (elapsedMs >= ROUTE_PLAYBACK_MS + 1500) {
+            routePlaybackFinished = true;
+            routeAnimRafId = null;
+            return;
+          }
           routeAnimRafId = requestAnimationFrame(tick);
         }
         routeAnimRafId = requestAnimationFrame(tick);
       }
 
       document.addEventListener('visibilitychange', function () {
-        if (document.hidden) {
+        if (document.hidden || hostPaused) {
           stopRouteLoop();
-        } else if (routePoints.length >= 2 && routeAnimRafId === null) {
+        } else if (routePoints.length >= 2 && !routePlaybackFinished && routeAnimRafId === null) {
           startRouteLoop();
         }
       });
 
       var drawQueued = false;
       function requestDraw() {
-        if (drawQueued) return;
+        if (hostPaused || drawQueued) return;
         drawQueued = true;
         requestAnimationFrame(function () {
           drawQueued = false;
-          draw();
+          if (!hostPaused) draw();
         });
       }
 
@@ -355,8 +444,9 @@
         var z = view.zoom;
         var tileZ = Math.max(3, Math.min(18, Math.round(z)));
         var scale = Math.pow(2, z - tileZ);
-        var centerWX = lonToWorldX(view.lon, tileZ);
-        var centerWY = latToWorldY(view.lat, tileZ);
+        var centerTile = toTileCoords(view.lat, view.lon);
+        var centerWX = lonToWorldX(centerTile.lon, tileZ);
+        var centerWY = latToWorldY(centerTile.lat, tileZ);
         return {
           w: w,
           h: h,
@@ -405,8 +495,9 @@
         overlayCtx.clearRect(0, 0, w, h);
 
         function project(lat, lon) {
-          var wx = lonToWorldX(lon, tileZ);
-          var wy = latToWorldY(lat, tileZ);
+          var tc = toTileCoords(lat, lon);
+          var wx = lonToWorldX(tc.lon, tileZ);
+          var wy = latToWorldY(tc.lat, tileZ);
           return {
             x: halfW + (wx - centerWX) * scale,
             y: halfH + (wy - centerWY) * scale
@@ -723,11 +814,15 @@
           var dx = cx - drag.lx, dy = cy - drag.ly;
           drag.moved += Math.abs(dx) + Math.abs(dy);
           drag.lx = cx; drag.ly = cy;
-          var wx = lonToWorldX(view.lon, view.zoom) - dx;
-          var wy = latToWorldY(view.lat, view.zoom) - dy;
+          var curTile = toTileCoords(view.lat, view.lon);
+          var wx = lonToWorldX(curTile.lon, view.zoom) - dx;
+          var wy = latToWorldY(curTile.lat, view.zoom) - dy;
           if (drag.moved > 6) userHasPanned = true;
-          view.lon = worldXToLon(wx, view.zoom);
-          view.lat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
+          var nextTileLon = worldXToLon(wx, view.zoom);
+          var nextTileLat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
+          var nextGcj = fromTileCoords(nextTileLat, nextTileLon);
+          view.lon = nextGcj.lon;
+          view.lat = Math.max(-85, Math.min(85, nextGcj.lat));
           if (geofencePicker.active) {
             notifyGeofenceChanged();
           }
@@ -753,17 +848,28 @@
         }
       }, { passive: true });
 
-      overlayCanvas.addEventListener('touchend', function () {
-        if (drag.active && !drag.pinching && drag.moved < 10 && !geofencePicker.active) {
+      overlayCanvas.addEventListener('touchend', function (e) {
+        if (drag.pinching) {
+          drag.active = false;
+          if (!e.touches || e.touches.length === 0) {
+            drag.pinching = false;
+          }
+          return;
+        }
+        if (drag.active && drag.moved < 10 && !geofencePicker.active) {
           var rect = overlayCanvas.getBoundingClientRect();
           var tx = drag.sx - rect.left;
           var ty = drag.sy - rect.top;
           var w = window.innerWidth || 340;
           var h = window.innerHeight || 240;
-          var wx = lonToWorldX(view.lon, view.zoom) + (tx - w / 2);
-          var wy = latToWorldY(view.lat, view.zoom) + (ty - h / 2);
-          var tapLon = worldXToLon(wx, view.zoom);
-          var tapLat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
+          var curTile = toTileCoords(view.lat, view.lon);
+          var wx = lonToWorldX(curTile.lon, view.zoom) + (tx - w / 2);
+          var wy = latToWorldY(curTile.lat, view.zoom) + (ty - h / 2);
+          var tapTileLon = worldXToLon(wx, view.zoom);
+          var tapTileLat = Math.max(-85, Math.min(85, worldYToLat(wy, view.zoom)));
+          var tapGcj = fromTileCoords(tapTileLat, tapTileLon);
+          var tapLon = tapGcj.lon;
+          var tapLat = Math.max(-85, Math.min(85, tapGcj.lat));
           pickedPoi = { lat: tapLat, lon: tapLon, label: '已选目的地' };
           badge.textContent = '已选目的地';
           requestDraw();
@@ -776,6 +882,11 @@
           }
         }
         drag.active = false; drag.pinching = false;
+      }, { passive: true });
+
+      overlayCanvas.addEventListener('touchcancel', function () {
+        drag.active = false;
+        drag.pinching = false;
       }, { passive: true });
 
       document.getElementById('btnZoomIn').addEventListener('click', function () {
@@ -934,6 +1045,18 @@
           pickedPoi = null;
           badge.textContent = liveLocationLabel || '当前车辆位置';
           requestDraw();
+        },
+        setPaused: function (paused) {
+          hostPaused = !!paused;
+          if (hostPaused) {
+            stopRouteLoop();
+          } else {
+            if (routePoints.length >= 2 && !routePlaybackFinished && !document.hidden) {
+              startRouteLoop();
+            } else {
+              requestDraw();
+            }
+          }
         }
       };
 

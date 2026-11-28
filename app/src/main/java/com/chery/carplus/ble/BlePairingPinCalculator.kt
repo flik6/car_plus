@@ -89,59 +89,95 @@ object BlePairingPinCalculator {
         extractAdvRandomBytes(scanRecord)?.toHex()
 
     /**
-     * Extracts the rolling four-byte random value from manufacturer-specific
-     * data (0xFF) first, then service data, then the raw advertisement bytes.
+     * Extracts the rolling four-byte random value from the 5-byte ADV_IND
+     * manufacturer-specific block (`06 FF <r0> <r1> <r2> <r3> <flag>`),
+     * matching InGeek `O000000o.java` and `mac_ble_bridge.swift`.
+     *
+     * Raw advertisement bytes are scanned FIRST because Android active scans
+     * merge ADV_IND + SCAN_RSP and strip the first 2 bytes of every `0xFF`
+     * block into `ScanRecord.manufacturerSpecificData`'s `companyId` key,
+     * leaving only 3 bytes in `value` for the real 5-byte ADV_IND while
+     * exposing the 26-byte `0x0759` SCAN_RSP (which does NOT hold the PIN
+     * random) under `companyId == 0x0759`.
      */
     fun extractAdvRandomBytes(scanRecord: ScanRecord?): ByteArray? {
         if (scanRecord == null) return null
 
+        // Pass 1: parse raw AD structures first for exact `06 FF <rand4> <flag>` (len == 6, 5-byte payload).
+        val raw = scanRecord.bytes
+        if (raw != null) {
+            extractRandomFromRawBytes(raw, exactIngeekLengthOnly = true)?.let { return it }
+        }
+
+        // Pass 2: manufacturerSpecificData fallback (reconstructs LE 2-byte companyId when Android
+        // split the 5-byte ADV_IND into 2B key + 3B value). Never pull random bytes from 0x0759 SCAN_RSP.
         val manufacturer = scanRecord.manufacturerSpecificData
         if (manufacturer != null) {
-            // Pass 1: prioritize Chery company ID (0x0759) when multiple manufacturer blocks are present.
-            for (index in 0 until manufacturer.size()) {
-                val companyId = manufacturer.keyAt(index)
-                if (companyId != 0x0759) continue
-                val value = manufacturer.valueAt(index) ?: continue
-                selectRandomFromManufacturer(value, companyId)?.let { return it }
-            }
             for (index in 0 until manufacturer.size()) {
                 val companyId = manufacturer.keyAt(index)
                 val value = manufacturer.valueAt(index) ?: continue
-                selectRandomFromManufacturer(value, companyId)?.let { return it }
+                if (value.size == 3) {
+                    return byteArrayOf(
+                        (companyId and 0xFF).toByte(),
+                        ((companyId ushr 8) and 0xFF).toByte(),
+                        value[0],
+                        value[1]
+                    )
+                }
             }
+            for (index in 0 until manufacturer.size()) {
+                val companyId = manufacturer.keyAt(index)
+                if (companyId == COMPANY_ID_CHERY) continue
+                val value = manufacturer.valueAt(index) ?: continue
+                if (value.size == 5) return value.copyOfRange(0, 4)
+            }
+        }
+
+        // Pass 3: non-standard / service-data fallbacks (still skipping 0x0759 SCAN_RSP).
+        if (raw != null) {
+            extractRandomFromRawBytes(raw, exactIngeekLengthOnly = false)?.let { return it }
         }
 
         scanRecord.serviceData?.values?.forEach { value ->
             selectRandomFromAdvertisingValue(value)?.let { return it }
         }
 
-        val raw = scanRecord.bytes ?: return null
+        return null
+    }
+
+    private fun extractRandomFromRawBytes(raw: ByteArray, exactIngeekLengthOnly: Boolean): ByteArray? {
         var offset = 0
         while (offset < raw.size) {
             val declaredLength = raw[offset].toInt() and 0xFF
             if (declaredLength == 0) break
             val next = offset + 1 + declaredLength
             if (next > raw.size) break
-            val type = raw[offset + 1].toInt() and 0xFF
-            val value = raw.copyOfRange(offset + 2, next)
-            when (type) {
-                0xFF -> {
-                    val companyId = if (value.size >= 2) {
-                        (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
-                    } else {
-                        -1
+            if (declaredLength >= 2) {
+                val type = raw[offset + 1].toInt() and 0xFF
+                val value = raw.copyOfRange(offset + 2, next)
+                if (exactIngeekLengthOnly) {
+                    // Verified InGeek ADV_IND layout: AD length = 6 (1B type 0xFF + 4B random + 1B flag).
+                    if (type == 0xFF && declaredLength == 6 && value.size == 5) {
+                        return value.copyOfRange(0, 4)
                     }
-                    selectRandomFromManufacturer(
-                        if (value.size >= 2) value.copyOfRange(2, value.size) else value,
-                        companyId
-                    )?.let { return it }
-                    selectRandomFromAdvertisingValue(value)?.let { return it }
-                }
-                0x16 -> if (value.size >= 6) {
-                    selectRandomFromAdvertisingValue(value.copyOfRange(2, value.size))?.let { return it }
-                }
-                0x20 -> if (value.size >= 8) {
-                    selectRandomFromAdvertisingValue(value.copyOfRange(4, value.size))?.let { return it }
+                } else {
+                    when (type) {
+                        0xFF -> {
+                            val isCheryScanRsp = value.size >= 2 &&
+                                (value[0].toInt() and 0xFF) == COMPANY_ID_CHERY_LE_0 &&
+                                (value[1].toInt() and 0xFF) == COMPANY_ID_CHERY_LE_1 &&
+                                value.size != 5
+                            if (!isCheryScanRsp) {
+                                selectRandomFromAdvertisingValue(value)?.let { return it }
+                            }
+                        }
+                        0x16 -> if (value.size >= 6) {
+                            selectRandomFromAdvertisingValue(value.copyOfRange(2, value.size))?.let { return it }
+                        }
+                        0x20 -> if (value.size >= 8) {
+                            selectRandomFromAdvertisingValue(value.copyOfRange(4, value.size))?.let { return it }
+                        }
+                    }
                 }
             }
             offset = next
@@ -149,27 +185,13 @@ object BlePairingPinCalculator {
         return null
     }
 
-    private fun selectRandomFromManufacturer(value: ByteArray, companyId: Int): ByteArray? {
-        if (value.size == 5) return value.copyOfRange(0, 4)
-        if (value.size >= 6 && value[0].toInt().and(0xFF) == COMPANY_ID_CHERY_LE_0 &&
-            value[1].toInt().and(0xFF) == COMPANY_ID_CHERY_LE_1
-        ) {
-            return value.copyOfRange(2, 6)
-        }
-        if (companyId == 0x0759 && value.size >= 4) return value.copyOfRange(0, 4)
-        return selectRandomFromAdvertisingValue(value)
-    }
-
     private fun selectRandomFromAdvertisingValue(value: ByteArray): ByteArray? {
         if (value.size < 4) return null
         if (value.size == 5) return value.copyOfRange(0, 4)
-        if (value.size >= 6 && value[0].toInt().and(0xFF) == COMPANY_ID_CHERY_LE_0 &&
-            value[1].toInt().and(0xFF) == COMPANY_ID_CHERY_LE_1
-        ) {
-            return value.copyOfRange(2, 6)
-        }
         return value.copyOfRange(0, 4)
     }
+
+    private const val COMPANY_ID_CHERY = 0x0759
 
     private fun keyForSuffix(suffix: String): ByteArray {
         val normalized = normalizeMac12(suffix)

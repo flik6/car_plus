@@ -18,8 +18,10 @@ import java.security.KeyPairGenerator
 import java.security.PrivateKey
 import java.security.spec.MGF1ParameterSpec
 import android.util.Base64
+import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.Random
+import java.util.TimeZone
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
@@ -176,20 +178,45 @@ class InGeekCloudProvisioner(
         )
     }
 
+    /** Queries shared keys (`operation = "30"`, `ShareKeyQueryRequest`) or owned keys (`"99"` / `"97"`). */
     fun queryOwnedAndSharedKeys(
         userId: String,
         mobileNo: String,
         vin: String,
         operation: String = "30",
-        baseUrl: String = DEFAULT_BASE_URL
+        baseUrl: String = DEFAULT_BASE_URL,
+        deviceId: String = ""
     ): JSONObject = postBusinessOperation(
         userId = userId,
         mobileNo = mobileNo,
         operation = operation,
-        parameters = JSONObject().put("vin", vin),
+        parameters = JSONObject().put("vin", vin.trim().uppercase(Locale.US)),
+        publicData = null,
+        deviceId = deviceId,
         baseUrl = baseUrl
     )
 
+    /** Queries owned digital keys for a VIN (`operation = "99"`, `KeyOwnedRequest`). */
+    fun queryOwnedKeys(
+        userId: String,
+        mobileNo: String,
+        vin: String,
+        baseUrl: String = DEFAULT_BASE_URL,
+        deviceId: String = ""
+    ): JSONObject = queryOwnedAndSharedKeys(
+        userId = userId,
+        mobileNo = mobileNo,
+        vin = vin,
+        operation = "99",
+        baseUrl = baseUrl,
+        deviceId = deviceId
+    )
+
+    /**
+     * Shares a digital key (`operation = "10"`, matching `KeyShareRequest.java` & `KpreHelper.java`).
+     * `startTime`/`endTime` accept epoch-ms strings or standard timestamp strings and are serialized
+     * as numeric `long` epoch milliseconds; `publicData` is emitted at the outer JSON top level.
+     */
     fun shareDigitalKey(
         userId: String,
         mobileNo: String,
@@ -197,53 +224,75 @@ class InGeekCloudProvisioner(
         borrowerMobile: String,
         startTime: String,
         endTime: String,
-        baseUrl: String = DEFAULT_BASE_URL
+        baseUrl: String = DEFAULT_BASE_URL,
+        style: Int = 1,
+        kpreHex: String = DEFAULT_SHARE_KPRE,
+        deviceId: String = "",
+        parkingLat: String? = null,
+        parkingLng: String? = null,
+        ext: String? = null
     ): JSONObject {
+        val normalizedVin = vin.trim().uppercase(Locale.US)
+        val normalizedReceiver = borrowerMobile.trim()
+        val startMs = parseShareTimestampMs(startTime, "startTime")
+        val endMs = parseShareTimestampMs(endTime, "endTime")
+        val normalizedKpre = normalizeShareKpre(kpreHex)
+
         val publicData = JSONObject().apply {
-            put("vin", vin)
-            put("recMobileNo", borrowerMobile)
-            put("startDate", startTime)
-            put("endDate", endTime)
+            put("vin", normalizedVin)
+            put("recMobileNo", normalizedReceiver)
+            put("endDate", endMs)
         }
         val parameters = JSONObject().apply {
-            put("vin", vin)
-            put("recMobileNo", borrowerMobile)
-            put("startDate", startTime)
-            put("endDate", endTime)
-            put("style", "1")
-            put("kpre", "1")
-            put("publicData", publicData)
+            put("vin", normalizedVin)
+            put("recMobileNo", normalizedReceiver)
+            put("startDate", startMs)
+            put("endDate", endMs)
+            put("style", style)
+            put("kpre", normalizedKpre)
+            if (!parkingLat.isNullOrBlank()) put("parkingLat", parkingLat)
+            if (!parkingLng.isNullOrBlank()) put("parkingLng", parkingLng)
+            if (!ext.isNullOrBlank()) put("ext", ext)
         }
         return postBusinessOperation(
             userId = userId,
             mobileNo = mobileNo,
             operation = "10",
             parameters = parameters,
+            publicData = publicData,
+            deviceId = deviceId,
             baseUrl = baseUrl
         )
     }
 
+    /**
+     * Revokes a shared digital key (`operation = "11"`, matching `KeyRevokeRequest.java`).
+     * Encrypted `parameters` contains only `keyId`; outer `publicData` carries `vin` and `keyId`.
+     */
     fun revokeSharedDigitalKey(
         userId: String,
         mobileNo: String,
         vin: String,
         keyId: String,
-        baseUrl: String = DEFAULT_BASE_URL
+        baseUrl: String = DEFAULT_BASE_URL,
+        deviceId: String = ""
     ): JSONObject {
+        val normalizedVin = vin.trim().uppercase(Locale.US)
+        val trimmedKeyId = keyId.trim()
         val publicData = JSONObject().apply {
-            put("vin", vin)
-            put("keyId", keyId)
+            put("vin", normalizedVin)
+            put("keyId", trimmedKeyId)
         }
         val parameters = JSONObject().apply {
-            put("keyId", keyId)
-            put("vin", vin)
-            put("publicData", publicData)
+            put("keyId", trimmedKeyId)
         }
         return postBusinessOperation(
             userId = userId,
             mobileNo = mobileNo,
             operation = "11",
             parameters = parameters,
+            publicData = publicData,
+            deviceId = deviceId,
             baseUrl = baseUrl
         )
     }
@@ -258,6 +307,48 @@ class InGeekCloudProvisioner(
     fun teeUuidBase64(keyPair: KeyPair): String =
         Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP)
 
+    /** Downloads a shared/child digital key (`operation = "20"`, matching `KeyLoadRequest.java`). */
+    fun requestKeyLoad(
+        authToken: String,
+        keyId: String,
+        authCode: String,
+        deviceId: String,
+        teeUuidBase64: String,
+        taUuid: String = this.taUuid,
+        userId: String = ""
+    ): InGeekKeyReloadResponse {
+        val resolvedDeviceId = resolveDeviceId(deviceId)
+        val parameters = JSONObject().apply {
+            put("keyId", keyId.trim())
+            put("system", Build.VERSION.RELEASE.ifBlank { "0" })
+            put("model", Build.MODEL.ifBlank { "Android" })
+            put("brand", Build.BRAND.ifBlank { "Android" })
+            if (resolvedDeviceId.isNotBlank()) put("deviceId", resolvedDeviceId)
+            put("taUUID", taUuid)
+            put("teeUUID", teeUuidBase64)
+        }
+        val outer = JSONObject().apply {
+            put("operation", "20")
+            put("parameters", aesCbcEncrypt(parameters.toString()))
+            put(
+                "publicData",
+                JSONObject().apply {
+                    put("keyId", keyId.trim())
+                    put("authCode", authCode.trim())
+                }
+            )
+        }
+        val response = postJson(
+            requestUrl(baseUrl),
+            outer.toString(),
+            buildHeaders(userId, resolvedDeviceId, appId, authorization = authToken)
+        )
+        check(response.statusCode in 200..299) {
+            "KeyLoadRequest HTTP ${response.statusCode}: ${response.body.take(500)}"
+        }
+        return parseKeyDownloadResponse("KeyLoadRequest", response)
+    }
+
     /** Step 3: KeyReLoadRequest ("31"), then AES-CBC decrypt data.resData. */
     fun requestKeyReload(
         authToken: String,
@@ -268,12 +359,13 @@ class InGeekCloudProvisioner(
         operation: String = "31",
         userId: String = ""
     ): InGeekKeyReloadResponse {
+        val resolvedDeviceId = resolveDeviceId(deviceId)
         val parameters = JSONObject().apply {
             put("vin", vin.trim().uppercase(Locale.US))
             put("system", Build.VERSION.RELEASE.ifBlank { "0" })
             put("model", Build.MODEL.ifBlank { "Android" })
             put("brand", "Android")
-            if (deviceId.isNotBlank()) put("deviceId", deviceId)
+            if (resolvedDeviceId.isNotBlank()) put("deviceId", resolvedDeviceId)
             put("taUUID", taUuid)
             put("teeUUID", teeUuidBase64)
         }
@@ -284,17 +376,50 @@ class InGeekCloudProvisioner(
         val response = postJson(
             requestUrl(baseUrl),
             outer.toString(),
-            buildHeaders(userId, deviceId, appId, authorization = authToken)
+            buildHeaders(userId, resolvedDeviceId, appId, authorization = authToken)
         )
         check(response.statusCode in 200..299) {
             "KeyReLoadRequest HTTP ${response.statusCode}: ${response.body.take(500)}"
         }
+        return parseKeyDownloadResponse("KeyReLoadRequest", response)
+    }
 
+    private fun parseKeyDownloadResponse(
+        requestName: String,
+        response: HttpResult
+    ): InGeekKeyReloadResponse {
         val outerObject = JSONObject(response.body)
+        val resCode = firstNonBlank(
+            outerObject.optString("resCode"),
+            outerObject.optString("code")
+        )
+        val resMsg = firstNonBlank(
+            outerObject.optString("resMsg"),
+            outerObject.optString("msg"),
+            outerObject.optString("message")
+        )
         val data = outerObject.optJSONObject("data")
-            ?: throw IllegalStateException("KeyReLoad response has no data object")
+        if (data == null) {
+            val detail = listOfNotNull(
+                resCode.takeIf { it.isNotBlank() }?.let { "resCode=$it" },
+                resMsg.takeIf { it.isNotBlank() }
+            ).joinToString(" ")
+            throw IllegalStateException(
+                if (detail.isNotBlank()) "$requestName failed ($detail)"
+                else "$requestName response has no data object"
+            )
+        }
         val resData = data.optString("resData")
-        check(resData.isNotBlank()) { "KeyReLoad response has no data.resData" }
+        if (resData.isBlank()) {
+            val detail = listOfNotNull(
+                resCode.takeIf { it.isNotBlank() }?.let { "resCode=$it" },
+                resMsg.takeIf { it.isNotBlank() }
+            ).joinToString(" ")
+            throw IllegalStateException(
+                if (detail.isNotBlank()) "$requestName returned empty resData ($detail)"
+                else "$requestName response has no data.resData"
+            )
+        }
 
         val clearJson = aesCbcDecrypt(resData)
         val payload = JSONObject(clearJson)
@@ -304,7 +429,7 @@ class InGeekCloudProvisioner(
         require(vckInfo.size == VckInfoParser.INFO_SIZE) {
             "vckInfo must be ${VckInfoParser.INFO_SIZE} bytes, got ${vckInfo.size}"
         }
-        require(df.size in 68..80) { "df must be an ECDSA DER signature, got ${df.size} bytes" }
+        require(df.size in 68..74) { "df must be a 68..74-byte ECDSA DER signature, got ${df.size} bytes" }
         require(encKey.size >= 390) { "encKey must be at least 390 bytes, got ${encKey.size}" }
 
         return InGeekKeyReloadResponse(
@@ -407,7 +532,7 @@ class InGeekCloudProvisioner(
         bleName: String = "",
         bleMac: String = "",
         deviceId: String = "",
-        accountType: Int = 0,
+        accountType: Int = -1,
         profileStore: VehicleProfileStore? = null,
         logger: ((String) -> Unit)? = null
     ): ProvisionResult {
@@ -476,6 +601,17 @@ class InGeekCloudProvisioner(
                     "vckInfo mobile ${parsed.mobileNo} does not match requested mobile $mobileNo"
                 }
             }
+            val validityError = validateVckInfoValidity(parsed.validFrom, parsed.validTo)
+            if (validityError != null) {
+                throw IllegalStateException(validityError)
+            }
+
+            // Per zyhl §9.3.2: keyRole == 0x01 is owner (accountType=0); non-owner/shared key is child (accountType=1).
+            val resolvedAccountType = if (accountType == 0 || accountType == 1) {
+                accountType
+            } else {
+                accountTypeForKeyRole(parsed.keyRole)
+            }
 
             val profile = VehicleProfile(
                 vin = normalizedVin,
@@ -484,7 +620,7 @@ class InGeekCloudProvisioner(
                 bleName = bleName.trim(),
                 bleMac = bleMac.trim().uppercase(Locale.US),
                 deviceId = resolvedDeviceId,
-                accountType = accountType,
+                accountType = resolvedAccountType,
                 rootKeyHex = kRootHex,
                 infoHex = infoHex,
                 edfHex = edfHex,
@@ -497,7 +633,7 @@ class InGeekCloudProvisioner(
             )
 
             val saved = if (profileStore != null) {
-                profileStore.updateKeyMaterial(
+                val updated = profileStore.updateKeyMaterial(
                     vin = normalizedVin,
                     rootKeyHex = kRootHex,
                     infoHex = infoHex,
@@ -510,11 +646,19 @@ class InGeekCloudProvisioner(
                     deviceId = resolvedDeviceId,
                     bleName = bleName.trim(),
                     bleMac = bleMac.trim().uppercase(Locale.US)
-                ) ?: profile
+                )
+                if (updated != null && updated.accountType != resolvedAccountType) {
+                    profileStore.saveProfile(
+                        profile = updated.copy(accountType = resolvedAccountType),
+                        activate = false
+                    )
+                } else {
+                    updated ?: profile
+                }
             } else {
                 profile
             }
-            logger?.invoke("Provisioning completed; VIN=$normalizedVin keyId=$keyId")
+            logger?.invoke("Provisioning completed; VIN=$normalizedVin keyId=$keyId role=${parsed.keyRole} accountType=$resolvedAccountType")
             ProvisionResult(
                 success = true,
                 authToken = authToken,
@@ -554,7 +698,7 @@ class InGeekCloudProvisioner(
         bleName: String = "",
         bleMac: String = "",
         deviceId: String = "",
-        accountType: Int = 0,
+        accountType: Int = -1,
         profileStore: VehicleProfileStore? = null,
         logger: ((String) -> Unit)? = null
     ): ProvisionResult = withContext(Dispatchers.IO) {
@@ -576,22 +720,69 @@ class InGeekCloudProvisioner(
         mobileNo: String,
         operation: String,
         parameters: JSONObject,
+        publicData: JSONObject? = null,
+        deviceId: String = "",
         baseUrl: String
     ): JSONObject {
-        val authToken = requestToken(userId, mobileNo, baseUrl).authorization
+        val resolvedDeviceId = resolveDeviceId(deviceId)
+        val authToken = requestToken(
+            userId = userId,
+            mobileNo = mobileNo,
+            baseUrl = baseUrl,
+            deviceId = resolvedDeviceId
+        ).authorization
         val outer = JSONObject().apply {
             put("operation", operation)
             put("parameters", aesCbcEncrypt(parameters.toString()))
+            if (publicData != null) {
+                put("publicData", publicData)
+            }
         }
         val response = postJson(
             requestUrl(baseUrl),
             outer.toString(),
-            buildHeaders(userId, "", appId, authorization = authToken)
+            buildHeaders(userId, resolvedDeviceId, appId, authorization = authToken)
         )
         check(response.statusCode in 200..299) {
             "DkBusinessRequest[$operation] HTTP ${response.statusCode}: ${response.body.take(500)}"
         }
         return JSONObject(response.body)
+    }
+
+    private fun parseShareTimestampMs(raw: String, fieldName: String): Long {
+        val trimmed = raw.trim()
+        trimmed.toLongOrNull()?.let { numeric ->
+            return if (numeric in 1_000_000_000L..9_999_999_999L) numeric * 1000L else numeric
+        }
+        val patterns = listOf(
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyyMMdd'T'HHmmss'Z'",
+            "yyyy-MM-dd HH:mm",
+            "yyyyMMddHHmmss"
+        )
+        for (pattern in patterns) {
+            val parsed = runCatching {
+                SimpleDateFormat(pattern, Locale.US).apply {
+                    isLenient = false
+                    if (pattern.endsWith("'Z'")) timeZone = TimeZone.getTimeZone("UTC")
+                }.parse(trimmed)?.time
+            }.getOrNull()
+            if (parsed != null) return parsed
+        }
+        throw IllegalArgumentException("Invalid $fieldName timestamp: $raw")
+    }
+
+    private fun normalizeShareKpre(raw: String): String {
+        val compact = raw.trim().replace(Regex("[\\s:_-]+"), "").uppercase(Locale.US)
+        if (compact.isEmpty() || !compact.all { it in '0'..'9' || it in 'A'..'F' }) {
+            return DEFAULT_SHARE_KPRE
+        }
+        return when {
+            compact.length == 12 -> compact
+            compact.length > 12 -> compact.substring(0, 12)
+            else -> compact.padStart(12, '0')
+        }
     }
 
     private fun resolveDeviceId(requested: String): String {
@@ -781,10 +972,56 @@ class InGeekCloudProvisioner(
         const val DEFAULT_APP_ID = "d66a3de6db80b2bc"
         const val DEFAULT_APK_SIGN = "B00822E28414EC998BFE2E185A6FA95C31854422"
         const val DEFAULT_TA_UUID = "4986299e-7a50-11e9-b210-d663bd873d93"
+        const val DEFAULT_SHARE_KPRE = "FFFFFFFFFFFF"
+        private const val VALIDITY_CLOCK_SKEW_MS = 5 * 60_000L
 
         private val INGEEK_HEADER_PREFIX = byteArrayOf(
             0x49, 0x4E, 0x47, 0x45, 0x45, 0x4B
         )
+
+        /** Per zyhl §9.3.2: keyRole == 0x01 is owner (accountType = 0), otherwise shared/child (1). */
+        fun accountTypeForKeyRole(keyRole: Int): Int = when {
+            keyRole == 1 -> 0
+            keyRole > 1 -> 1
+            else -> 0
+        }
+
+        /**
+         * Validates `vckInfo` UTC `validFrom`/`validTo` bounds (e.g. `20260401T000000Z`).
+         * Returns null when valid (or when fields are empty/unparseable), or a human-readable error message.
+         */
+        fun validateVckInfoValidity(
+            validFrom: String,
+            validTo: String,
+            nowMs: Long = System.currentTimeMillis()
+        ): String? {
+            val fromTrim = validFrom.trim { it <= ' ' || it == '\u0000' }
+            val toTrim = validTo.trim { it <= ' ' || it == '\u0000' }
+            val fromMs = parseVckUtcTimestampMs(fromTrim)
+            val toMs = parseVckUtcTimestampMs(toTrim)
+            if (toMs != null && nowMs > toMs) {
+                return "数字钥匙已过期（validTo=$toTrim），请重新同步钥匙"
+            }
+            if (fromMs != null && nowMs + VALIDITY_CLOCK_SKEW_MS < fromMs) {
+                return "数字钥匙尚未生效（validFrom=$fromTrim）"
+            }
+            return null
+        }
+
+        private fun parseVckUtcTimestampMs(raw: String): Long? {
+            if (raw.isBlank()) return null
+            val patterns = listOf("yyyyMMdd'T'HHmmss'Z'", "yyyyMMddHHmmss")
+            for (pattern in patterns) {
+                val parsed = runCatching {
+                    SimpleDateFormat(pattern, Locale.US).apply {
+                        isLenient = false
+                        timeZone = TimeZone.getTimeZone("UTC")
+                    }.parse(raw)?.time
+                }.getOrNull()
+                if (parsed != null) return parsed
+            }
+            return null
+        }
     }
 }
 

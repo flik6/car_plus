@@ -2,6 +2,7 @@ package com.chery.carplus.ui
 
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.app.Dialog
 import android.content.Context
 import android.content.SharedPreferences
@@ -20,6 +21,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.util.Patterns
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -39,10 +41,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.LifecycleCoroutineScope
 import com.chery.carplus.R
 import com.chery.carplus.cloud.AppUpdater
+import com.chery.carplus.cloud.CheryHttpClient
 import com.chery.carplus.cloud.CheryUserInfo
 import com.chery.carplus.cloud.InstallApkResult
 import com.chery.carplus.cloud.UpdateCheckResult
 import com.chery.carplus.profile.VehicleProfile
+import com.chery.carplus.profile.VehicleProfileStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -79,7 +83,8 @@ class SettingsScreen(
     private val fetchCloudUserInfo: (suspend () -> CheryUserInfo?)? = null,
     private val updateCloudProfileField: (suspend (updateType: String, content: String) -> Boolean)? = null,
     private val onOpenDebugDiagnostics: (() -> Unit)? = null,
-    private val onEntranceStyleChanged: ((String) -> Unit)? = null
+    private val onEntranceStyleChanged: ((String) -> Unit)? = null,
+    private val fetchRegionCities: (suspend () -> CheryHttpClient.RegionDirectory)? = null
 ) {
 
     private enum class SubPage {
@@ -122,6 +127,8 @@ class SettingsScreen(
     private var profileSyncJob: Job? = null
     private var avatarSaveJob: Job? = null
     private var progressWidthAnimator: ValueAnimator? = null
+    private var profileSaveColorAnim: ValueAnimator? = null
+    private var cachedRegionDirectory: CheryHttpClient.RegionDirectory? = null
 
     // Live UI hooks on MAIN page
     private var mainVehicleTrailingTv: TextView? = null
@@ -130,6 +137,7 @@ class SettingsScreen(
     private var mainAboutValueText: TextView? = null
     private var activeConfirmDialog: Dialog? = null
     private var entranceStyleSheetDialog: Dialog? = null
+    private var regionSheetDialog: Dialog? = null
     private var activeDropdown: PopupWindow? = null
 
     // Live UI hooks on ABOUT page & Update Bottom Sheet
@@ -249,47 +257,52 @@ class SettingsScreen(
         val switchedAccount = currentUserId.isNotBlank() && lastSyncedUserId.isNotBlank() && lastSyncedUserId != currentUserId
         if (switchedAccount) {
             runCatching { avatarFile().delete() }
+            runCatching { pendingAvatarFile().delete() }
             runCatching { cloudAvatarFile().delete() }
-            editor.remove(KEY_AVATAR_URL)
+            editor.remove(KEY_NICKNAME)
+                .remove(KEY_USERNAME)
+                .remove(KEY_MOBILE)
+                .remove(KEY_EMAIL)
+                .remove(KEY_REGION)
+                .remove(KEY_GENDER)
+                .remove(KEY_AVATAR_URL)
             changed = true
         }
         if (currentUserId.isNotBlank()) {
             editor.putString(KEY_SYNCED_USER_ID, currentUserId)
         }
 
-        if (cloudNickname.isNotBlank() && cloudNickname != accountPrefs.getString(KEY_NICKNAME, "")) {
+        if (cloudNickname.isNotBlank() && (switchedAccount || cloudNickname != accountPrefs.getString(KEY_NICKNAME, ""))) {
             editor.putString(KEY_NICKNAME, cloudNickname)
             changed = true
         }
-        if (cloudAccount.isNotBlank() && cloudAccount != accountPrefs.getString(KEY_USERNAME, "")) {
+        if (cloudAccount.isNotBlank() && (switchedAccount || cloudAccount != accountPrefs.getString(KEY_USERNAME, ""))) {
             editor.putString(KEY_USERNAME, cloudAccount)
             changed = true
         }
-        if (cloudMobile.isNotBlank() && cloudMobile != accountPrefs.getString(KEY_MOBILE, "")) {
+        if (cloudMobile.isNotBlank() && (switchedAccount || cloudMobile != accountPrefs.getString(KEY_MOBILE, ""))) {
             editor.putString(KEY_MOBILE, cloudMobile)
             changed = true
         }
-        if (cloudEmail.isNotBlank() && cloudEmail != accountPrefs.getString(KEY_EMAIL, "")) {
+        if (cloudEmail.isNotBlank() && (switchedAccount || cloudEmail != accountPrefs.getString(KEY_EMAIL, ""))) {
             editor.putString(KEY_EMAIL, cloudEmail)
             changed = true
         }
-        if (cloudCity.isNotBlank() && cloudCity != accountPrefs.getString(KEY_REGION, "")) {
+        if (cloudCity.isNotBlank() && (switchedAccount || cloudCity != accountPrefs.getString(KEY_REGION, ""))) {
             editor.putString(KEY_REGION, cloudCity)
             changed = true
         }
-        if (cloudGender.isNotBlank() && cloudGender != accountPrefs.getString(KEY_GENDER, "")) {
+        if (cloudGender.isNotBlank() && (switchedAccount || cloudGender != accountPrefs.getString(KEY_GENDER, ""))) {
             editor.putString(KEY_GENDER, cloudGender)
             changed = true
         }
 
         if (resolvedAvatarUrl.isNotBlank()) {
-            val prevUrl = accountPrefs.getString(KEY_AVATAR_URL, "").orEmpty()
+            val prevUrl = if (switchedAccount) "" else accountPrefs.getString(KEY_AVATAR_URL, "").orEmpty()
             val cFile = cloudAvatarFile()
             if (resolvedAvatarUrl != prevUrl || !cFile.exists() || cFile.length() == 0L) {
                 if (downloadCloudAvatar(resolvedAvatarUrl, cFile)) {
                     editor.putString(KEY_AVATAR_URL, resolvedAvatarUrl)
-                    // Prefer newly synced official cloud avatar over any stale local test file
-                    runCatching { avatarFile().delete() }
                     changed = true
                 }
             }
@@ -301,8 +314,11 @@ class SettingsScreen(
     private fun resolveCloudAvatarUrl(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed.isBlank() || trimmed.equals("null", ignoreCase = true)) return ""
-        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
+        if (trimmed.startsWith("https://", ignoreCase = true)) {
             return trimmed
+        }
+        if (trimmed.startsWith("http://", ignoreCase = true)) {
+            return "https://" + trimmed.substring(7)
         }
         val cleanPath = trimmed.removePrefix("/")
         return "https://cloudrivechery.mychery.com/$cleanPath"
@@ -712,8 +728,12 @@ class SettingsScreen(
             }
         }
         entranceStyleSheetDialog = dialog
-        dialog.show()
-        MotionSpec.animateSheetEnter(sheet)
+        if (MotionSpec.isHostActivityAlive(activity)) {
+            runCatching {
+                dialog.show()
+                MotionSpec.animateSheetEnter(sheet)
+            }
+        }
     }
 
     // =========================================================================
@@ -732,11 +752,19 @@ class SettingsScreen(
         runCatching { pendingAvatarFile().delete() }
         var savedSnapshot = loadAccountProfile()
         var selectedGender = savedSnapshot.gender.ifBlank { "保密" }
+        var selectedRegionName = savedSnapshot.region
+        var selectedRegionCode = ""
         var avatarDirty = false
         var isSavingProfile = false
         var saveEnabled = false
-        var saveColorAnim: ValueAnimator? = null
         var renderedSaveColor = Color.parseColor("#5A5E68")
+        root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                profileSaveColorAnim?.cancel()
+                profileSaveColorAnim = null
+            }
+        })
 
         val saveActionBtn = text("保存", 15.5f, renderedSaveColor, Typeface.NORMAL).apply {
             gravity = Gravity.CENTER
@@ -787,7 +815,6 @@ class SettingsScreen(
             savedSnapshot.email,
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
         )
-        val regionInput = buildBorderlessInput("例如：上海", savedSnapshot.region, InputType.TYPE_CLASS_TEXT)
 
         fun currentDraft(): AccountProfileData = AccountProfileData(
             nickname = nicknameInput.text.toString().trim(),
@@ -795,7 +822,7 @@ class SettingsScreen(
             mobile = savedSnapshot.mobile,
             email = emailInput.text.toString().trim(),
             gender = selectedGender,
-            region = regionInput.text.toString().trim()
+            region = selectedRegionName.trim()
         )
 
         fun updateSaveState() {
@@ -806,10 +833,10 @@ class SettingsScreen(
             saveActionBtn.typeface = Typeface.create("sans-serif", if (dirty) Typeface.BOLD else Typeface.NORMAL)
 
             val targetColor = if (dirty) ThemeTokens.ACCENT_LIGHT else Color.parseColor("#5A5E68")
-            saveColorAnim?.cancel()
+            profileSaveColorAnim?.cancel()
             val startColor = renderedSaveColor
             if (startColor != targetColor) {
-                saveColorAnim = ValueAnimator.ofObject(ArgbEvaluator(), startColor, targetColor).apply {
+                profileSaveColorAnim = ValueAnimator.ofObject(ArgbEvaluator(), startColor, targetColor).apply {
                     duration = 160L
                     interpolator = MotionSpec.EASE_OUT_EXPO
                     addUpdateListener { anim ->
@@ -829,7 +856,7 @@ class SettingsScreen(
                 updateSaveState()
             }
         }
-        listOf(nicknameInput, emailInput, regionInput).forEach {
+        listOf(nicknameInput, emailInput).forEach {
             it.addTextChangedListener(dirtyWatcher)
         }
 
@@ -922,9 +949,19 @@ class SettingsScreen(
             }
 
             val updater = updateCloudProfileField
-            val cloudUpdates = mutableListOf<Pair<String, String>>()
+            if (updated.nickname != prev.nickname && updated.nickname.isBlank()) {
+                toast("昵称不能为空")
+                return@setOnClickListener
+            }
+            if (updated.email != prev.email) {
+                if (updated.email.isBlank() || !Patterns.EMAIL_ADDRESS.matcher(updated.email).matches()) {
+                    toast("请输入正确的邮箱地址")
+                    return@setOnClickListener
+                }
+            }
+            val cloudUpdates = mutableListOf<Triple<String, String, String>>()
             if (updated.nickname != prev.nickname && updated.nickname.isNotBlank()) {
-                cloudUpdates += "0" to updated.nickname
+                cloudUpdates += Triple("0", updated.nickname, "昵称")
             }
             if (updated.gender != prev.gender) {
                 val sexCode = when (updated.gender) {
@@ -932,14 +969,15 @@ class SettingsScreen(
                     "女" -> "2"
                     else -> "0"
                 }
-                cloudUpdates += "1" to sexCode
+                cloudUpdates += Triple("1", sexCode, "性别")
             }
             if (updated.email != prev.email) {
-                cloudUpdates += "2" to updated.email
+                cloudUpdates += Triple("2", updated.email, "邮箱")
             }
-            if (updated.region != prev.region) {
-                cloudUpdates += "3" to updated.region
+            if (updated.region != prev.region && selectedRegionCode.isNotBlank()) {
+                cloudUpdates += Triple("3", selectedRegionCode, "地区")
             }
+            val hadLocalAvatarChange = avatarDirty
             if (updater == null || cloudUpdates.isEmpty()) {
                 commitPendingAvatarIfAny()
                 saveAccountProfile(updated)
@@ -947,7 +985,7 @@ class SettingsScreen(
                 avatarDirty = false
                 refreshAvatarSlot(updated.nickname.ifBlank { updated.username }, preferPending = false)
                 updateSaveState()
-                toast("个人资料已保存")
+                toast(if (hadLocalAvatarChange && updated == prev) "头像已保存在本机" else "个人资料已保存")
                 return@setOnClickListener
             }
 
@@ -955,24 +993,53 @@ class SettingsScreen(
             saveActionBtn.text = "保存中"
             updateSaveState()
             scope.launch {
-                val allOk = withContext(Dispatchers.IO) {
-                    cloudUpdates.all { (type, value) ->
-                        runCatching { updater(type, value) }.getOrDefault(false)
+                val outcomes = withContext(Dispatchers.IO) {
+                    cloudUpdates.map { (type, value, label) ->
+                        Triple(type, label, runCatching { updater(type, value) }.getOrDefault(false))
                     }
                 }
                 isSavingProfile = false
                 saveActionBtn.text = "保存"
-                if (allOk) {
+
+                val succeededTypes = outcomes.filter { it.third }.map { it.first }.toSet()
+                val failedLabels = outcomes.filter { !it.third }.map { it.second }
+
+                // Reconcile every field that actually succeeded on cloud so local & cloud never diverge
+                var reconciled = savedSnapshot
+                if ("0" in succeededTypes) reconciled = reconciled.copy(nickname = updated.nickname)
+                if ("1" in succeededTypes) reconciled = reconciled.copy(gender = updated.gender)
+                if ("2" in succeededTypes) reconciled = reconciled.copy(email = updated.email)
+                if ("3" in succeededTypes) {
+                    reconciled = reconciled.copy(region = updated.region)
+                    selectedRegionCode = ""
+                }
+                if (hadLocalAvatarChange) {
                     commitPendingAvatarIfAny()
-                    saveAccountProfile(updated)
-                    savedSnapshot = updated
                     avatarDirty = false
-                    refreshAvatarSlot(updated.nickname.ifBlank { updated.username }, preferPending = false)
-                    updateSaveState()
-                    toast("个人资料已同步至云端")
-                } else {
-                    updateSaveState()
-                    toast("云端同步失败，请稍后重试")
+                }
+                if (reconciled != savedSnapshot) {
+                    saveAccountProfile(reconciled)
+                    savedSnapshot = reconciled
+                }
+                refreshAvatarSlot(reconciled.nickname.ifBlank { reconciled.username }, preferPending = false)
+                updateSaveState()
+
+                when {
+                    failedLabels.isEmpty() -> {
+                        toast(
+                            if (hadLocalAvatarChange) "个人资料已同步至云端（头像仅保存在本机）"
+                            else "个人资料已同步至云端"
+                        )
+                    }
+                    succeededTypes.isNotEmpty() -> {
+                        toast("部分资料同步失败（${failedLabels.joinToString("、")}），其余修改已保存")
+                    }
+                    else -> {
+                        toast(
+                            if (hadLocalAvatarChange) "头像已保存在本机，其余资料云端同步失败"
+                            else "云端同步失败，请稍后重试"
+                        )
+                    }
                 }
             }
         }
@@ -1034,12 +1101,387 @@ class SettingsScreen(
         body.addView(genderRow, lp())
 
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
-        body.addView(buildFormInputRow("地区", regionInput), lp())
+
+        // Region row using official 138 province/city directory selector (submits cityCode / provinceCode)
+        val regionRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            setPadding(dp(20), dp(6), dp(20), dp(6))
+        }
+        regionRow.addView(
+            text("地区", 14.5f, ThemeTokens.TEXT_SUB),
+            LinearLayout.LayoutParams(dp(72), WRAP_CONTENT)
+        )
+        val regionAnchor = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(8), dp(2), dp(8))
+            isClickable = true
+            isFocusable = true
+        }
+        val regionValueTv = text(
+            selectedRegionName.ifBlank { "请选择地区" },
+            15.5f,
+            if (selectedRegionName.isBlank()) HINT_COLOR else ThemeTokens.TEXT_PRIMARY
+        )
+        regionAnchor.addView(regionValueTv, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        regionAnchor.addView(
+            AppIconView(activity, AppIconType.CHEVRON_DOWN, ThemeTokens.TEXT_SUB),
+            LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginStart = dp(8) }
+        )
+        MotionSpec.attachPressPhysics(regionAnchor, pressedScale = 0.98f)
+        regionAnchor.setOnClickListener {
+            showRegionPickerSheet(currentRegionName = selectedRegionName) { pickedName, pickedCode ->
+                selectedRegionName = pickedName
+                selectedRegionCode = pickedCode
+                regionValueTv.text = pickedName
+                regionValueTv.setTextColor(ThemeTokens.TEXT_PRIMARY)
+                updateSaveState()
+            }
+        }
+        regionRow.addView(regionAnchor, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        body.addView(regionRow, lp())
         body.addView(AppComponents.createHairline(activity, startInsetDp = 20))
 
         scroll.addView(body, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         return root
+    }
+
+    private fun showRegionPickerSheet(
+        currentRegionName: String,
+        onSelected: (displayName: String, regionCode: String) -> Unit
+    ) {
+        if (!MotionSpec.isHostActivityAlive(activity)) return
+        regionSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
+        regionSheetDialog = null
+
+        var sheetRef: View? = null
+        val dialog = object : Dialog(activity, R.style.Theme_CarPlus_BottomSheetDialog) {
+            override fun dismiss() {
+                val target = sheetRef
+                if (!isShowing || target == null || MotionSpec.isBypassingSheetDismiss(this)) {
+                    runCatching { super.dismiss() }
+                } else {
+                    MotionSpec.dismissSheetAnimated(target, this)
+                }
+            }
+        }
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val maxHeight = (activity.resources.displayMetrics.heightPixels * 0.72f).roundToInt()
+        val sheet = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                setColor(ThemeTokens.BG_SURFACE)
+                val r = dpF(22f)
+                cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+            }
+            setPadding(dp(20), dp(10), dp(20), dp(22))
+        }
+        sheetRef = sheet
+
+        sheet.addView(
+            View(activity).apply {
+                background = rounded(Color.parseColor("#484A52"), 2f)
+            },
+            LinearLayout.LayoutParams(dp(38), dp(4)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = dp(12)
+            }
+        )
+
+        val headerRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val titleTv = text("选择地区", 17f, ThemeTokens.TEXT_PRIMARY, Typeface.BOLD)
+        headerRow.addView(titleTv, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        val closeBtn = text("取消", 14.5f, ThemeTokens.TEXT_SUB).apply {
+            setPadding(dp(10), dp(6), dp(4), dp(6))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { dialog.dismiss() }
+        }
+        headerRow.addView(closeBtn)
+        sheet.addView(headerRow, lp(bottom = dp(10)))
+
+        val searchInput = EditText(activity).apply {
+            hint = "搜索省份或城市"
+            setHintTextColor(HINT_COLOR)
+            setTextColor(ThemeTokens.TEXT_PRIMARY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+            setSingleLine(true)
+            background = rounded(Color.parseColor("#171920"), 12f, Color.parseColor("#2A2E38"), 0.8f)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        sheet.addView(searchInput, lp(bottom = dp(10)))
+
+        val listCol = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val listScroll = ScrollView(activity).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(listCol, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        }
+        sheet.addView(listScroll, LinearLayout.LayoutParams(MATCH_PARENT, (maxHeight - dp(150)).coerceAtLeast(dp(220))))
+
+        var selectedProvince: CheryHttpClient.RegionProvince? = null
+        var activeDirectory: CheryHttpClient.RegionDirectory? = cachedRegionDirectory
+
+        fun buildRegionRow(label: String, subtitle: String = "", selected: Boolean = false, onClick: () -> Unit): LinearLayout {
+            return LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(48)
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                if (selected) {
+                    background = rounded(Color.argb(36, 94, 158, 255), 10f)
+                }
+                isClickable = true
+                isFocusable = true
+                MotionSpec.attachPressPhysics(this, pressedScale = 0.985f)
+                addView(
+                    text(label, 15f, if (selected) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_PRIMARY, if (selected) Typeface.BOLD else Typeface.NORMAL),
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+                )
+                if (subtitle.isNotBlank()) {
+                    addView(text(subtitle, 12.5f, ThemeTokens.TEXT_SUB))
+                }
+                setOnClickListener { onClick() }
+            }
+        }
+
+        fun pickRegion(name: String, code: String) {
+            onSelected(name, code)
+            dialog.dismiss()
+        }
+
+        lateinit var loadDirectory: () -> Unit
+
+        fun renderEmptyOrError(message: String, isError: Boolean) {
+            listCol.removeAllViews()
+            listCol.addView(
+                text(message, 13.5f, if (isError) ThemeTokens.DANGER else ThemeTokens.TEXT_SUB).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(24), 0, dp(12))
+                },
+                lp()
+            )
+            listCol.addView(
+                AppComponents.createActionButton(activity, "重新加载", ButtonStyle.SECONDARY) {
+                    loadDirectory()
+                },
+                lp(height = dp(44))
+            )
+        }
+
+        fun renderDirectory() {
+            listCol.removeAllViews()
+            val dir = activeDirectory
+            if (dir == null) {
+                listCol.addView(
+                    text("正在加载省市目录...", 14f, ThemeTokens.TEXT_SUB).apply {
+                        gravity = Gravity.CENTER
+                        setPadding(0, dp(36), 0, dp(36))
+                    },
+                    lp()
+                )
+                return
+            }
+            if (dir.hotCities.isEmpty() && dir.provinces.isEmpty()) {
+                renderEmptyOrError("暂未获取到省市目录，请重试", isError = false)
+                return
+            }
+
+            val query = searchInput.text.toString().trim()
+            if (query.isNotBlank()) {
+                val matches = mutableListOf<Pair<String, String>>()
+                val seenCodes = HashSet<String>()
+                dir.provinces.forEach { prov ->
+                    if (prov.cities.isEmpty()) {
+                        if (prov.provinceName.contains(query, ignoreCase = true) && seenCodes.add(prov.provinceCode)) {
+                            matches += prov.provinceName to prov.provinceCode
+                        }
+                    } else {
+                        prov.cities.forEach { city ->
+                            if ((city.cityName.contains(query, ignoreCase = true) || prov.provinceName.contains(query, ignoreCase = true)) &&
+                                seenCodes.add(city.cityCode)
+                            ) {
+                                matches += city.cityName to city.cityCode
+                            }
+                        }
+                    }
+                }
+                if (matches.isEmpty()) {
+                    listCol.addView(
+                        text("未找到匹配的地区", 14f, ThemeTokens.TEXT_SUB).apply {
+                            gravity = Gravity.CENTER
+                            setPadding(0, dp(32), 0, dp(32))
+                        },
+                        lp()
+                    )
+                } else {
+                    matches.take(60).forEachIndexed { idx, (name, code) ->
+                        listCol.addView(buildRegionRow(name, selected = name == currentRegionName) { pickRegion(name, code) }, lp())
+                        if (idx < matches.lastIndex) listCol.addView(AppComponents.createHairline(activity, startInsetDp = 12))
+                    }
+                }
+                return
+            }
+
+            val prov = selectedProvince
+            if (prov != null) {
+                titleTv.text = prov.provinceName
+                listCol.addView(
+                    buildRegionRow("← 返回全部省份", subtitle = "", selected = false) {
+                        selectedProvince = null
+                        titleTv.text = "选择地区"
+                        renderDirectory()
+                    },
+                    lp(bottom = dp(6))
+                )
+                listCol.addView(AppComponents.createHairline(activity, startInsetDp = 12))
+                prov.cities.forEachIndexed { idx, city ->
+                    listCol.addView(
+                        buildRegionRow(city.cityName, selected = city.cityName == currentRegionName) {
+                            pickRegion(city.cityName, city.cityCode)
+                        },
+                        lp()
+                    )
+                    if (idx < prov.cities.lastIndex) listCol.addView(AppComponents.createHairline(activity, startInsetDp = 12))
+                }
+                return
+            }
+
+            titleTv.text = "选择地区"
+            if (dir.hotCities.isNotEmpty()) {
+                listCol.addView(text("热门城市", 12.5f, ThemeTokens.TEXT_SUB, Typeface.BOLD), lp(top = dp(4), bottom = dp(8)))
+                val chunked = dir.hotCities.chunked(3)
+                chunked.forEach { rowCities ->
+                    val chipRow = LinearLayout(activity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                    }
+                    rowCities.forEachIndexed { idx, city ->
+                        val selected = city.cityName == currentRegionName
+                        val chip = text(
+                            city.cityName,
+                            13.5f,
+                            if (selected) ThemeTokens.ACCENT_LIGHT else ThemeTokens.TEXT_PRIMARY,
+                            if (selected) Typeface.BOLD else Typeface.NORMAL
+                        ).apply {
+                            gravity = Gravity.CENTER
+                            maxLines = 1
+                            ellipsize = TextUtils.TruncateAt.END
+                            background = rounded(
+                                if (selected) Color.argb(40, 94, 158, 255) else Color.parseColor("#1A1D24"),
+                                10f,
+                                if (selected) ThemeTokens.ACCENT_LIGHT else Color.parseColor("#2A2E38"),
+                                0.8f
+                            )
+                            setPadding(dp(8), dp(9), dp(8), dp(9))
+                            isClickable = true
+                            isFocusable = true
+                            MotionSpec.attachPressPhysics(this, pressedScale = 0.96f)
+                            setOnClickListener { pickRegion(city.cityName, city.cityCode) }
+                        }
+                        chipRow.addView(
+                            chip,
+                            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                                if (idx < 2) marginEnd = dp(8)
+                            }
+                        )
+                    }
+                    repeat(3 - rowCities.size) {
+                        chipRow.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
+                    }
+                    listCol.addView(chipRow, lp(bottom = dp(8)))
+                }
+            }
+
+            if (dir.provinces.isNotEmpty()) {
+                listCol.addView(text("全部省市", 12.5f, ThemeTokens.TEXT_SUB, Typeface.BOLD), lp(top = dp(8), bottom = dp(4)))
+                dir.provinces.forEachIndexed { idx, p ->
+                    val sub = if (p.cities.isEmpty()) "" else "${p.cities.size} 个城市 ›"
+                    listCol.addView(
+                        buildRegionRow(p.provinceName, subtitle = sub, selected = p.provinceName == currentRegionName) {
+                            if (p.cities.isEmpty()) {
+                                pickRegion(p.provinceName, p.provinceCode)
+                            } else {
+                                selectedProvince = p
+                                listScroll.scrollTo(0, 0)
+                                renderDirectory()
+                            }
+                        },
+                        lp()
+                    )
+                    if (idx < dir.provinces.lastIndex) listCol.addView(AppComponents.createHairline(activity, startInsetDp = 12))
+                }
+            }
+        }
+
+        loadDirectory = {
+            activeDirectory = null
+            renderDirectory()
+            scope.launch {
+                val res = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val customFetcher = fetchRegionCities
+                        if (customFetcher != null) {
+                            customFetcher()
+                        } else {
+                            val token = profileProvider().accessToken
+                            val client = CheryHttpClient(
+                                defaultDeviceId = VehicleProfileStore(activity).defaultDeviceId()
+                            )
+                            client.fetchRegionCities(token)
+                        }
+                    }
+                }
+                if (!dialog.isShowing) return@launch
+                res.onSuccess { dir ->
+                    if (dir.hotCities.isNotEmpty() || dir.provinces.isNotEmpty()) {
+                        cachedRegionDirectory = dir
+                        activeDirectory = dir
+                        renderDirectory()
+                    } else {
+                        activeDirectory = dir
+                        renderEmptyOrError("暂未获取到省市目录，请重试", isError = false)
+                    }
+                }.onFailure { err ->
+                    renderEmptyOrError("地区列表加载失败：${err.message.orEmpty().take(60)}", isError = true)
+                }
+            }
+        }
+
+        searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                renderDirectory()
+            }
+        })
+
+        AppSystemInsets.installBottomSheetContent(dialog, sheet, dimAmount = 0.58f)
+        MotionSpec.attachSheetSwipeToDismiss(sheet, listScroll, dialog)
+        dialog.setOnDismissListener {
+            if (regionSheetDialog === dialog) {
+                regionSheetDialog = null
+            }
+        }
+        regionSheetDialog = dialog
+        runCatching {
+            dialog.show()
+            MotionSpec.animateSheetEnter(sheet)
+        }
+        if (activeDirectory != null) {
+            renderDirectory()
+        } else {
+            loadDirectory()
+        }
     }
 
     // =========================================================================
@@ -1436,8 +1878,12 @@ class SettingsScreen(
         if (isDownloadingUpdate || downloadedApkFile?.let { it.exists() && it.length() > 0L } == true) {
             updateProgressBar(lastDownloadedBytes, lastTotalBytes)
         }
-        dialog.show()
-        MotionSpec.animateSheetEnter(sheet)
+        if (MotionSpec.isHostActivityAlive(activity)) {
+            runCatching {
+                dialog.show()
+                MotionSpec.animateSheetEnter(sheet)
+            }
+        }
     }
 
     private fun handleDownloadOrInstallClick() {
@@ -1475,10 +1921,12 @@ class SettingsScreen(
                         context = activity,
                         url = result.downloadUrl,
                         versionTag = versionTag,
+                        expectedSha256 = result.expectedSha256,
                         isCancelled = { !isDownloadingUpdate }
                     ) { downloaded, total ->
                         val effectiveTotal = if (total > 0L) total else result.assetSizeBytes
                         activity.runOnUiThread {
+                            if (!MotionSpec.isHostActivityAlive(activity)) return@runOnUiThread
                             lastDownloadedBytes = downloaded
                             lastTotalBytes = effectiveTotal
                             updateProgressBar(downloaded, effectiveTotal)
@@ -1730,6 +2178,7 @@ class SettingsScreen(
 
     private fun cloudAvatarFile(): File = File(activity.filesDir, CLOUD_AVATAR_FILENAME)
 
+    @SuppressLint("ExifInterface")
     private fun readExifRotationDegrees(uri: Uri): Float {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return 0f
         return runCatching {
@@ -1847,7 +2296,7 @@ class SettingsScreen(
     // =========================================================================
 
     private fun showLogoutConfirmDialog() {
-        activeConfirmDialog?.dismiss()
+        activeConfirmDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         activeConfirmDialog = AppComponents.showConfirmDialog(
             context = activity,
             title = "退出登录",
@@ -1945,10 +2394,14 @@ class SettingsScreen(
     }
 
     internal fun dismissTransientOverlays() {
-        activeConfirmDialog?.dismiss()
+        profileSaveColorAnim?.cancel()
+        profileSaveColorAnim = null
+        activeConfirmDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         activeConfirmDialog = null
         entranceStyleSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         entranceStyleSheetDialog = null
+        regionSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
+        regionSheetDialog = null
         updateSheetDialog?.let { MotionSpec.dismissSheetImmediately(it) }
         updateSheetDialog = null
         activeDropdown?.dismiss()

@@ -94,6 +94,7 @@ object MotionSpec {
     private val EASE_SPRING_RELEASE: Interpolator = PathInterpolator(0.22f, 1.12f, 0.36f, 1f)
 
     private val activeTintAnimators = WeakHashMap<AppIconView, ValueAnimator>()
+    private val activeShakeAnimators = WeakHashMap<View, ValueAnimator>()
     private val dismissingDialogs = WeakHashMap<Dialog, Boolean>()
     private val bypassDismissDialogs = WeakHashMap<Dialog, Boolean>()
 
@@ -515,6 +516,15 @@ object MotionSpec {
         return cur as? Activity
     }
 
+    /**
+     * Returns true if [context] is backed by an [Activity] that is neither finishing nor destroyed,
+     * preventing [android.view.WindowManager.BadTokenException] on asynchronous dialog/popup presentation.
+     */
+    fun isHostActivityAlive(context: Context?): Boolean {
+        val host = findHostActivity(context) ?: return false
+        return !host.isFinishing && !host.isDestroyed
+    }
+
     fun dismissSheetAnimated(
         sheetView: View,
         dialog: Dialog,
@@ -786,21 +796,49 @@ object MotionSpec {
 
     /**
      * Clean 360ms horizontal damped sine shake for invalid PIN or validation rejection.
+     * Tracks per-view animators so rapid triggers don't overlap and cleans up on detach.
      */
     fun shakeError(view: View) {
+        activeShakeAnimators.remove(view)?.cancel()
+        view.translationX = 0f
         val amplitude = dp(view.context, 10f)
-        ValueAnimator.ofFloat(0f, 1f).apply {
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 360L
             addUpdateListener { anim ->
                 val t = anim.animatedValue as Float
                 val damped = (1f - t) * sin(t * 4.0 * PI).toFloat()
                 view.translationX = amplitude * damped
-                if (t >= 1f) {
-                    view.translationX = 0f
+            }
+        }
+        val detachListener = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                if (activeShakeAnimators[view] === animator) {
+                    activeShakeAnimators.remove(view)
+                }
+                animator.cancel()
+            }
+        }
+        animator.addListener(object : AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: Animator) {
+                view.translationX = 0f
+                view.removeOnAttachStateChangeListener(detachListener)
+                if (activeShakeAnimators[view] === animator) {
+                    activeShakeAnimators.remove(view)
                 }
             }
-            start()
-        }
+
+            override fun onAnimationCancel(animation: Animator) {
+                view.translationX = 0f
+                view.removeOnAttachStateChangeListener(detachListener)
+                if (activeShakeAnimators[view] === animator) {
+                    activeShakeAnimators.remove(view)
+                }
+            }
+        })
+        view.addOnAttachStateChangeListener(detachListener)
+        activeShakeAnimators[view] = animator
+        animator.start()
     }
 
     private fun findModalScrim(modalView: View): View? {
@@ -938,6 +976,7 @@ object MotionSpec {
 
     /**
      * Smoothly interpolates [AppIconView.tintColor] using [ArgbEvaluator].
+     * Cleans up animator entries on completion, cancellation, or window detach.
      */
     fun animateIconTint(
         iconView: AppIconView,
@@ -955,6 +994,31 @@ object MotionSpec {
                 iconView.tintColor = anim.animatedValue as Int
             }
         }
+        val detachListener = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                if (activeTintAnimators[iconView] === animator) {
+                    activeTintAnimators.remove(iconView)
+                }
+                animator.cancel()
+            }
+        }
+        animator.addListener(object : AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: Animator) {
+                iconView.removeOnAttachStateChangeListener(detachListener)
+                if (activeTintAnimators[iconView] === animator) {
+                    activeTintAnimators.remove(iconView)
+                }
+            }
+
+            override fun onAnimationCancel(animation: Animator) {
+                iconView.removeOnAttachStateChangeListener(detachListener)
+                if (activeTintAnimators[iconView] === animator) {
+                    activeTintAnimators.remove(iconView)
+                }
+            }
+        })
+        iconView.addOnAttachStateChangeListener(detachListener)
         activeTintAnimators[iconView] = animator
         animator.start()
     }

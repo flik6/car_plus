@@ -10,6 +10,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -25,12 +26,17 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.os.SystemClock
+import com.chery.carplus.cloud.InGeekCloudProvisioner
+import com.chery.carplus.profile.VckInfoParser
 import com.chery.carplus.profile.VehicleProfile
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Android BLE transport and handshake state machine for the authorized Chery
@@ -161,6 +167,14 @@ class CheryBleController(
 
         fun onActionDispatched(actionKey: String, serial: Int) = Unit
 
+        fun onActionResult(
+            actionKey: String,
+            serial: Int,
+            success: Boolean,
+            parsedResponse: ParsedTBoxResponse?,
+            errorMessage: String? = null
+        ) = Unit
+
         fun onPairingPinAvailable(pin: String, address: String) = Unit
 
         fun onManualPairingRequired(pin: String, deviceName: String, address: String) = Unit
@@ -247,6 +261,8 @@ class CheryBleController(
     private var serviceDiscoveryStarted = false
 
     private var mtuPayloadChunkSize = 14
+    private var mtuNegotiated = false
+    private var mtuRetryAttempted = false
     private var serialCounter = 4
     private var currentStage = Stage.IDLE
 
@@ -283,9 +299,9 @@ class CheryBleController(
     private val pendingActionBySerial = mutableMapOf<Int, String>()
     private val actionTimeoutRunnables = mutableMapOf<Int, Runnable>()
 
-    private val extendedAssembler = BleFrameAssembler(BleWholeProtocol.FrameFormat.INGEEK_EXTENDED)
     private val ingeekReassemblies = linkedMapOf<Pair<Int, Int>, IngeekReassemblyState>()
 
+    private var mtuFallbackRunnable: Runnable? = null
     private var connectTimeout: Runnable? = null
     private var handshakeTimeout: Runnable? = null
     private var accountTimeout: Runnable? = null
@@ -611,86 +627,75 @@ class CheryBleController(
         startScanInternal(config.scanTimeoutMs)
     }
 
-    fun sendVehicleAction(actionKey: String): Boolean {
-        var accepted = false
-        runOnMain {
-            if (!isSessionReady()) {
-                if (autoProximityEnabled || currentGatt != null || scanning) {
-                    pendingAction = PendingAction(actionKey)
-                    accepted = true
-                    listener?.onChannelModeChanged(
-                        false,
-                        currentRssi,
-                        "蓝牙数字钥匙正在连接，指令已排队"
-                    )
-                } else {
-                    listener?.onError("蓝牙数字钥匙会话尚未建立", null)
-                }
-                return@runOnMain
+    fun sendVehicleAction(actionKey: String): Boolean = runOnMainSync {
+        if (!isSessionReady()) {
+            if (autoProximityEnabled || currentGatt != null || scanning) {
+                pendingAction = PendingAction(actionKey)
+                listener?.onChannelModeChanged(
+                    false,
+                    currentRssi,
+                    "蓝牙数字钥匙正在连接，指令已排队"
+                )
+                return@runOnMainSync true
+            } else {
+                listener?.onError("蓝牙数字钥匙会话尚未建立", null)
+                return@runOnMainSync false
             }
-            val command = try {
-                TBoxTlvBuilder.buildAction(actionKey, temperatureCelsius = 24.0, durationMin = 10)
-            } catch (error: Throwable) {
-                listener?.onError("车控动作参数不合法：$actionKey", error)
-                return@runOnMain
-            }
-            accepted = transmitEncryptedTlv(command.actionKey, command.tlv, command.actionKey)
         }
-        return accepted
+        val command = try {
+            TBoxTlvBuilder.buildAction(actionKey, temperatureCelsius = 24.0, durationMin = 10)
+        } catch (error: Throwable) {
+            listener?.onError("车控动作参数不合法：$actionKey", error)
+            return@runOnMainSync false
+        }
+        transmitEncryptedTlv(command.actionKey, command.tlv, command.actionKey)
     }
 
     fun sendVehicleAction(
         actionKey: String,
         temperatureCelsius: Double,
         durationMin: Int = 10
-    ): Boolean {
-        var accepted = false
-        runOnMain {
-            if (!isSessionReady()) {
-                if (autoProximityEnabled || currentGatt != null || scanning) {
-                    pendingAction = PendingAction(actionKey, temperatureCelsius, durationMin)
-                    accepted = true
-                    listener?.onChannelModeChanged(
-                        false,
-                        currentRssi,
-                        "蓝牙数字钥匙正在连接，指令已排队"
-                    )
-                } else {
-                    listener?.onError("蓝牙数字钥匙会话尚未建立", null)
-                }
-                return@runOnMain
+    ): Boolean = runOnMainSync {
+        if (!isSessionReady()) {
+            if (autoProximityEnabled || currentGatt != null || scanning) {
+                pendingAction = PendingAction(actionKey, temperatureCelsius, durationMin)
+                listener?.onChannelModeChanged(
+                    false,
+                    currentRssi,
+                    "蓝牙数字钥匙正在连接，指令已排队"
+                )
+                return@runOnMainSync true
+            } else {
+                listener?.onError("蓝牙数字钥匙会话尚未建立", null)
+                return@runOnMainSync false
             }
-            val command = try {
-                TBoxTlvBuilder.buildAction(actionKey, temperatureCelsius, durationMin)
-            } catch (error: Throwable) {
-                listener?.onError("车控动作参数不合法：$actionKey", error)
-                return@runOnMain
-            }
-            accepted = transmitEncryptedTlv(command.actionKey, command.tlv, command.actionKey)
         }
-        return accepted
+        val command = try {
+            TBoxTlvBuilder.buildAction(actionKey, temperatureCelsius, durationMin)
+        } catch (error: Throwable) {
+            listener?.onError("车控动作参数不合法：$actionKey", error)
+            return@runOnMainSync false
+        }
+        transmitEncryptedTlv(command.actionKey, command.tlv, command.actionKey)
     }
 
-    fun sendCustomTlv(hexString: String): Boolean {
-        var accepted = false
-        runOnMain {
-            if (!authenticated) {
-                listener?.onError("会话尚未建立，无法发送自定义 TLV", null)
-                return@runOnMain
-            }
-            val tlv = try {
-                TBoxTlvBuilder.customTlv(hexString)
-            } catch (error: Throwable) {
-                listener?.onError("自定义 TLV 格式不合法", error)
-                return@runOnMain
-            }
-            accepted = transmitEncryptedTlv("custom_tlv", tlv, "自定义 TLV")
+    fun sendCustomTlv(hexString: String): Boolean = runOnMainSync {
+        if (!authenticated) {
+            listener?.onError("会话尚未建立，无法发送自定义 TLV", null)
+            return@runOnMainSync false
         }
-        return accepted
+        val tlv = try {
+            TBoxTlvBuilder.customTlv(hexString)
+        } catch (error: Throwable) {
+            listener?.onError("自定义 TLV 格式不合法", error)
+            return@runOnMainSync false
+        }
+        transmitEncryptedTlv("custom_tlv", tlv, "自定义 TLV")
     }
 
     fun disconnect() = runOnMain {
         val abortedPairingAddr = if (waitingForBond) lastPairingAddress ?: currentGatt?.device?.address else null
+        failPendingActions("蓝牙连接已断开")
         cancelTimers()
         currentGatt?.disconnect()
         currentGatt?.close()
@@ -715,6 +720,7 @@ class CheryBleController(
      */
     fun resetTargetAndDisconnect() = runOnMain {
         val abortedPairingAddr = if (waitingForBond) lastPairingAddress ?: currentGatt?.device?.address else null
+        failPendingActions("蓝牙连接已重置")
         autoProximityEnabled = false
         proximityProfileProvider = null
         proximityEnableRequester = null
@@ -758,6 +764,7 @@ class CheryBleController(
             proximityTick = null
             stopScanInternal()
             unregisterPairingReceiver()
+            failPendingActions("蓝牙控制器已关闭")
             cancelTimers()
             cancelPendingRandomConnect()
             writeQueue.clear()
@@ -771,6 +778,33 @@ class CheryBleController(
 
     private fun runOnMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else mainHandler.post(block)
+    }
+
+    private fun runOnMainSync(block: () -> Boolean): Boolean {
+        if (Looper.myLooper() == Looper.getMainLooper()) return block()
+        val result = AtomicBoolean(false)
+        val claimed = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        val posted = mainHandler.post {
+            if (claimed.compareAndSet(false, true)) {
+                try {
+                    result.set(runCatching(block).getOrDefault(false))
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+        if (!posted) return false
+        val completed = runCatching { latch.await(2_000L, TimeUnit.MILLISECONDS) }.getOrDefault(false)
+        if (completed) {
+            return result.get()
+        }
+        if (claimed.compareAndSet(false, true)) {
+            return false
+        }
+        // Main thread already claimed execution right at the timeout boundary; await its outcome.
+        runCatching { latch.await(2_000L, TimeUnit.MILLISECONDS) }
+        return result.get()
     }
 
     private fun scheduleProximityTick(delayMs: Long) {
@@ -874,12 +908,17 @@ class CheryBleController(
         val info = profile.infoBytes()
         val edf = profile.edfBytes()
         if (root.size != 16 || info.size != 147 || edf.size !in 68..74) return@runCatching null
+        val resolvedAccountType = if (profile.keyRole > 0) {
+            InGeekCloudProvisioner.accountTypeForKeyRole(profile.keyRole)
+        } else {
+            profile.accountType.coerceIn(0, 1)
+        }
         SessionMaterial(
             rootKey16 = root,
             infoBin147 = info,
             edfBin = edf,
             accountBinding = AccountBinding(
-                accountType = profile.accountType,
+                accountType = resolvedAccountType,
                 userId = profile.userId,
                 deviceId = profile.deviceId
             ),
@@ -1328,7 +1367,7 @@ class CheryBleController(
         inFlightCompletion = null
         writeQueue.clear()
         writeInFlight = false
-        extendedAssembler.reset()
+        pendingActionBySerial.clear()
         ingeekReassemblies.clear()
         txFrameHashes.clear()
         servicesReady = false
@@ -1346,6 +1385,8 @@ class CheryBleController(
         connectingAddress = null
         serviceDiscoveryStarted = false
         mtuPayloadChunkSize = 14
+        mtuNegotiated = false
+        mtuRetryAttempted = false
         writeCharacteristic = null
         notifyCharacteristic = null
         statusCharacteristic = null
@@ -1359,6 +1400,9 @@ class CheryBleController(
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             mainHandler.post {
                 if (gatt !== currentGatt) return@post
+                mtuFallbackRunnable?.let(mainHandler::removeCallbacks)
+                mtuFallbackRunnable = null
+                mtuNegotiated = (status == BluetoothGatt.GATT_SUCCESS)
                 mtuPayloadChunkSize = if (status == BluetoothGatt.GATT_SUCCESS) {
                     minOf(config.maxPayloadChunkSize, (mtu - 9).coerceAtLeast(14))
                 } else {
@@ -1371,7 +1415,11 @@ class CheryBleController(
                     "",
                     "MTU=${mtu}, status=$status, payloadChunk=$mtuPayloadChunkSize"
                 )
-                startServiceDiscovery(gatt)
+                if (!serviceDiscoveryStarted) {
+                    startServiceDiscovery(gatt)
+                } else if (servicesReady && notificationsReady && ffe1Ready && !authStarted) {
+                    maybeBeginHandshake()
+                }
             }
         }
 
@@ -1467,14 +1515,22 @@ class CheryBleController(
                         "附近蓝牙数字钥匙正在握手..."
                     )
                 }
+                mtuFallbackRunnable?.let(mainHandler::removeCallbacks)
+                mtuFallbackRunnable = null
                 val mtuRequested = runCatching { gatt.requestMtu(config.requestMtu) }.getOrDefault(false)
                 if (!mtuRequested) {
                     mtuPayloadChunkSize = 14
                     startServiceDiscovery(gatt)
                 } else {
-                    // Some stacks do not deliver onMtuChanged reliably; a delayed
-                    // fallback keeps discovery moving without overlapping MTU I/O.
-                    mainHandler.postDelayed({ startServiceDiscovery(gatt) }, 1_200)
+                    // Some stacks do not deliver onMtuChanged reliably; track & cancel on MTU/disconnect.
+                    val fallback = Runnable {
+                        mtuFallbackRunnable = null
+                        if (gatt === currentGatt) {
+                            startServiceDiscovery(gatt)
+                        }
+                    }
+                    mtuFallbackRunnable = fallback
+                    mainHandler.postDelayed(fallback, 1_800)
                 }
             }
 
@@ -1483,6 +1539,12 @@ class CheryBleController(
                 val wasUnauthStaleBond = !authenticated &&
                     ffe1ReportedUnbonded &&
                     runCatching { gatt.device.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)
+                val disconnectReason = if (status != BluetoothGatt.GATT_SUCCESS) {
+                    "GATT 连接断开，status=$status"
+                } else {
+                    "蓝牙连接已断开"
+                }
+                failPendingActions(disconnectReason)
                 if (gatt === currentGatt) {
                     currentGatt = null
                     runCatching { gatt.close() }
@@ -1547,8 +1609,7 @@ class CheryBleController(
             notificationsReady = true
             readStatusCharacteristic(gatt)
         } else {
-            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            if (!gatt.writeDescriptor(cccd)) {
+            if (!writeDescriptorCompat(gatt, cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
                 fail("写入 FFF2 CCCD 失败")
                 return
             }
@@ -1793,9 +1854,7 @@ class CheryBleController(
                     val notifiable = notifyCharacteristic
                     val cccd = notifiable?.getDescriptor(config.cccdUuid)
                     if (cccd != null) {
-                        @Suppress("DEPRECATION")
-                        cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        if (runCatching { activeGatt.writeDescriptor(cccd) }.getOrDefault(false)) {
+                        if (writeDescriptorCompat(activeGatt, cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
                             return
                         }
                         fail("写入 FFF2 CCCD 失败")
@@ -1830,6 +1889,7 @@ class CheryBleController(
             BluetoothAdapter.STATE_OFF -> {
                 appendDebugLog("系统蓝牙已关闭，立即清理扫描与 GATT 链路")
                 val abortedPairingAddr = if (waitingForBond) lastPairingAddress ?: currentGatt?.device?.address else null
+                failPendingActions("系统蓝牙已关闭")
                 stopScanInternal()
                 cancelTimers()
                 val gatt = currentGatt
@@ -1864,6 +1924,49 @@ class CheryBleController(
         val material = sessionMaterial ?: return
         val activeSession = session ?: return
         if (!servicesReady || !notificationsReady || !ffe1Ready) return
+
+        // Validate vckInfo validFrom/validTo before burning a handshake cycle (P2-36).
+        val parsedInfo = runCatching { VckInfoParser.parse(material.infoBin147) }.getOrNull()
+        if (parsedInfo != null) {
+            val validityError = InGeekCloudProvisioner.validateVckInfoValidity(
+                parsedInfo.validFrom,
+                parsedInfo.validTo
+            )
+            if (validityError != null) {
+                fail(validityError)
+                return
+            }
+        }
+
+        val payload = activeSession.build0x02AuthPayload()
+        // InGeek extended packFlag supports at most 15 chunks (0xF2..0xFF); prevent wrap at MTU=23 fallback (P1-13).
+        if (payload.size > mtuPayloadChunkSize * BleWholeProtocol.INGEEK_MAX_MULTI_PACKETS) {
+            val activeGatt = currentGatt
+            if (activeGatt != null && !mtuRetryAttempted) {
+                mtuRetryAttempted = true
+                appendDebugLog("当前 MTU 分片(${mtuPayloadChunkSize}B)不足以发送 ${payload.size}B 认证帧，重试请求 MTU=${config.requestMtu}")
+                val retried = runCatching { activeGatt.requestMtu(config.requestMtu) }.getOrDefault(false)
+                if (retried) {
+                    startHandshakeTimeout()
+                    return
+                }
+            }
+            fail("BLE MTU 协商不足（分片 ${mtuPayloadChunkSize}B，需发送 ${payload.size}B），请重试连接")
+            return
+        }
+
+        val frames = try {
+            BleWholeProtocol.packIngeekExtended(
+                BleWholeProtocol.MSG_AUTH_REQUEST,
+                serialNum = 1,
+                payload = payload,
+                maxPayloadChunkSize = mtuPayloadChunkSize
+            )
+        } catch (error: Throwable) {
+            fail("0x02 认证帧分包失败", error)
+            return
+        }
+
         authStarted = true
         auth02Done = false
         session03Done = false
@@ -1872,13 +1975,6 @@ class CheryBleController(
         emitStage()
         startHandshakeTimeout()
 
-        val payload = activeSession.build0x02AuthPayload()
-        val frames = BleWholeProtocol.packIngeekExtended(
-            BleWholeProtocol.MSG_AUTH_REQUEST,
-            serialNum = 1,
-            payload = payload,
-            maxPayloadChunkSize = mtuPayloadChunkSize
-        )
         transmitFrames(
             frames = frames,
             msgId = BleWholeProtocol.MSG_AUTH_REQUEST,
@@ -1911,7 +2007,7 @@ class CheryBleController(
         val completeFrames = try {
             reassembleIngeekPacket(raw)
         } catch (error: Throwable) {
-            extendedAssembler.reset()
+            ingeekReassemblies.clear()
             fail("FFF2 响应重组失败", error)
             return
         }
@@ -1935,7 +2031,9 @@ class CheryBleController(
                 )
             )
         }
-        if ((packet.packFlag and BleWholeProtocol.INGEEK_START_MASK) == BleWholeProtocol.INGEEK_START_MASK) {
+        if (packet.packFlag > BleWholeProtocol.INGEEK_START_MASK &&
+            (packet.packFlag and BleWholeProtocol.INGEEK_START_MASK) == BleWholeProtocol.INGEEK_START_MASK
+        ) {
             ingeekReassemblies[key] = IngeekReassemblyState(
                 expected = packet.lengthField,
                 body = packet.fragment.toMutableList()
@@ -1966,13 +2064,24 @@ class CheryBleController(
             BleWholeProtocol.MSG_BASE_RESPONSE,
             BleWholeProtocol.MSG_VEHICLE_CONTROL_RESPONSE -> handleBaseResponseFrame(frame)
             BleWholeProtocol.MSG_VEHICLE_INFO -> {
-                val parsed = TBoxTlvBuilder.parseResponse(frame.messageId, frame.payload)
+                val activeSession = session
+                val payloadToParse = if (authenticated &&
+                    activeSession != null &&
+                    frame.payload.size >= 32 &&
+                    (frame.payload.size - 16) % 16 == 0
+                ) {
+                    val (plain, cmacValid) = activeSession.decryptIncomingPayload(frame.payload)
+                    if (cmacValid && plain.isNotEmpty()) plain else frame.payload
+                } else {
+                    frame.payload
+                }
+                val parsed = TBoxTlvBuilder.parseResponse(frame.messageId, payloadToParse)
                 listener?.onVehicleResponse(parsed)
                 logPacket(
                     "INFO",
                     "0x10",
                     frame.serialNum,
-                    frame.payload.toHex(),
+                    payloadToParse.toHex(),
                     parsed.summaryText
                 )
             }
@@ -2019,7 +2128,7 @@ class CheryBleController(
     private fun handleAuthChallenge(base: BleBaseResponse) {
         if (auth02Done) return
         if (base.errCode != 0) {
-            fail("0x02 身份认证被拒绝，err=0x%02X".format(base.errCode))
+            fail("0x02 身份认证被拒绝（%s）".format(describeClientAnswerCode(base.errCode)))
             return
         }
         if (base.data.size < 32) {
@@ -2037,15 +2146,20 @@ class CheryBleController(
             fail("0x02 挑战解密或 0x03 组装失败", error)
             return
         }
+        val frames = try {
+            BleWholeProtocol.packIngeekExtended(
+                BleWholeProtocol.MSG_SESSION_REQUEST,
+                serialNum = 2,
+                payload = encryptedSessionRequest,
+                maxPayloadChunkSize = mtuPayloadChunkSize
+            )
+        } catch (error: Throwable) {
+            fail("0x03 会话帧分包失败", error)
+            return
+        }
         auth02Done = true
         currentStage = Stage.SESSION_REQUEST_SENT
         emitStage()
-        val frames = BleWholeProtocol.packIngeekExtended(
-            BleWholeProtocol.MSG_SESSION_REQUEST,
-            serialNum = 2,
-            payload = encryptedSessionRequest,
-            maxPayloadChunkSize = mtuPayloadChunkSize
-        )
         transmitFrames(
             frames,
             BleWholeProtocol.MSG_SESSION_REQUEST,
@@ -2061,7 +2175,7 @@ class CheryBleController(
     private fun handleSessionResponse(base: BleBaseResponse) {
         if (session03Done) return
         if (base.errCode != 0) {
-            fail("0x03 会话建立被拒绝，err=0x%02X".format(base.errCode))
+            fail("0x03 会话建立被拒绝（%s）".format(describeClientAnswerCode(base.errCode)))
             return
         }
         val activeSession = session ?: run {
@@ -2103,12 +2217,17 @@ class CheryBleController(
             return
         }
         serialCounter = 4
-        val frames = BleWholeProtocol.packIngeekExtended(
-            BleWholeProtocol.MSG_VEHICLE_CONTROL,
-            serialNum = 3,
-            payload = encrypted,
-            maxPayloadChunkSize = mtuPayloadChunkSize
-        )
+        val frames = try {
+            BleWholeProtocol.packIngeekExtended(
+                BleWholeProtocol.MSG_VEHICLE_CONTROL,
+                serialNum = 3,
+                payload = encrypted,
+                maxPayloadChunkSize = mtuPayloadChunkSize
+            )
+        } catch (error: Throwable) {
+            fail("0x80 账号绑定帧分包失败", error)
+            return
+        }
         currentStage = Stage.ACCOUNT_SETTING_SENT
         emitStage()
         accountTimeout?.let(mainHandler::removeCallbacks)
@@ -2135,15 +2254,39 @@ class CheryBleController(
             fail("车辆应答到达时会话未建立")
             return
         }
+        val serial = base?.answerSerial ?: frame.serialNum
+        val errCode = base?.errCode ?: 0
         val encryptedData = base?.data ?: frame.payload
+
+        // Check link-layer errCode BEFORE empty payload so command errors on serial >= 4
+        // do NOT tear down the authenticated GATT session (P1-11).
+        // Per official BleBaseResponse & zyhl蓝牙协议分析.md:130,406,763, T-Box returns
+        // res=1 with errCode=0 on success; gate strictly on errCode == 0.
         if (encryptedData.isEmpty()) {
-            if (base != null && base.answerSerial == 3 && base.errCode == 0) {
-                completeAccountBinding(emptyTBoxResponse(frame.messageId))
+            if (serial == 3) {
+                if (base != null && errCode == 0) {
+                    completeAccountBinding(emptyTBoxResponse(frame.messageId))
+                } else {
+                    fail("0x80 账号绑定被拒绝（%s）".format(describeClientAnswerCode(errCode)))
+                }
+                return
+            }
+            cancelActionTimeout(serial)
+            val actionKey = pendingActionBySerial.remove(serial).orEmpty()
+            if (errCode != 0) {
+                val errMsg = "车控应答错误 serial=$serial（%s）".format(describeClientAnswerCode(errCode))
+                listener?.onActionResult(actionKey, serial, success = false, parsedResponse = null, errorMessage = errMsg)
+                listener?.onError(errMsg, null)
+            } else if (base != null) {
+                listener?.onActionResult(actionKey, serial, success = true, parsedResponse = null, errorMessage = null)
             } else {
-                fail("车控应答载荷为空")
+                val errMsg = "车控应答载荷为空 (serial=$serial)"
+                listener?.onActionResult(actionKey, serial, success = false, parsedResponse = null, errorMessage = errMsg)
+                listener?.onError(errMsg, null)
             }
             return
         }
+
         val (plain, cmacValid) = activeSession.decryptIncomingPayload(encryptedData)
         if (!cmacValid) {
             fail("0x%02X 车控应答 AES-CMAC 校验失败".format(frame.messageId))
@@ -2156,32 +2299,38 @@ class CheryBleController(
         logPacket(
             "RX",
             "0x%02X".format(frame.messageId),
-            base?.answerSerial ?: frame.serialNum,
+            serial,
             plain.toHex(),
             "解密成功，CMAC 校验通过"
         )
         val parsed = TBoxTlvBuilder.parseResponse(frame.messageId, plain)
         listener?.onVehicleResponse(parsed)
 
-        val serial = base?.answerSerial ?: frame.serialNum
         if (serial == 3) {
-            val resultRejected = parsed.resultCode != null && parsed.resultCode != 1
-            if ((base?.errCode ?: 0) != 0 || resultRejected) {
+            val resultRejected = (parsed.resultCode != null && parsed.resultCode != 1) ||
+                (parsed.errorCode != null && parsed.errorCode != 0)
+            if (errCode != 0 || resultRejected) {
                 fail("0x80 账号绑定失败：${parsed.summaryText}")
             } else {
                 completeAccountBinding(parsed)
             }
             return
         }
+
         cancelActionTimeout(serial)
-        if ((base?.errCode ?: 0) != 0) {
-            listener?.onError(
-                "车控应答错误 serial=$serial err=0x%02X：%s"
-                    .format(base?.errCode ?: 0, parsed.summaryText),
-                null
-            )
+        val actionKey = pendingActionBySerial.remove(serial).orEmpty()
+        val tboxRejected = errCode != 0 ||
+            !parsed.success ||
+            (parsed.resultCode != null && parsed.resultCode != 1) ||
+            (parsed.errorCode != null && parsed.errorCode != 0)
+        if (tboxRejected) {
+            val linkDetail = if (errCode != 0) "${describeClientAnswerCode(errCode)}；" else ""
+            val errMsg = "车控执行失败 serial=$serial：${linkDetail}${parsed.summaryText}"
+            listener?.onActionResult(actionKey, serial, success = false, parsedResponse = parsed, errorMessage = errMsg)
+            listener?.onError(errMsg, null)
+        } else {
+            listener?.onActionResult(actionKey, serial, success = true, parsedResponse = parsed, errorMessage = null)
         }
-        pendingActionBySerial.remove(serial)
     }
 
     private fun emptyTBoxResponse(messageId: Int) = ParsedTBoxResponse(
@@ -2232,12 +2381,17 @@ class CheryBleController(
             return false
         }
         val serial = nextSerial()
-        val frames = BleWholeProtocol.packIngeekExtended(
-            BleWholeProtocol.MSG_VEHICLE_CONTROL,
-            serialNum = serial,
-            payload = encrypted,
-            maxPayloadChunkSize = mtuPayloadChunkSize
-        )
+        val frames = try {
+            BleWholeProtocol.packIngeekExtended(
+                BleWholeProtocol.MSG_VEHICLE_CONTROL,
+                serialNum = serial,
+                payload = encrypted,
+                maxPayloadChunkSize = mtuPayloadChunkSize
+            )
+        } catch (error: Throwable) {
+            listener?.onError("车控帧分包失败（MTU 分片不足）", error)
+            return false
+        }
         pendingActionBySerial[serial] = actionKey
         scheduleActionTimeout(serial, actionKey)
         currentStage = Stage.ACTION_SENT
@@ -2252,6 +2406,38 @@ class CheryBleController(
             listener?.onActionDispatched(actionKey, serial)
         }
     }
+
+    private fun writeDescriptorCompat(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        value: ByteArray
+    ): Boolean = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(descriptor, value) == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            descriptor.value = value
+            @Suppress("DEPRECATION")
+            gatt.writeDescriptor(descriptor)
+        }
+    }.getOrDefault(false)
+
+    private fun writeCharacteristicCompat(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        data: ByteArray,
+        writeType: Int
+    ): Boolean = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(characteristic, data, writeType) == BluetoothStatusCodes.SUCCESS
+        } else {
+            characteristic.writeType = writeType
+            @Suppress("DEPRECATION")
+            characteristic.value = data
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(characteristic)
+        }
+    }.getOrDefault(false)
 
     private fun transmitFrames(
         frames: List<ByteArray>,
@@ -2296,11 +2482,12 @@ class CheryBleController(
         if (writeInFlight) return
         val activeGatt = currentGatt ?: return
         val operation = writeQueue.pollFirst() ?: return
-        val char = operation.characteristic
-        char.writeType = operation.writeType
-        @Suppress("DEPRECATION")
-        char.value = operation.data
-        val started = runCatching { activeGatt.writeCharacteristic(char) }.getOrDefault(false)
+        val started = writeCharacteristicCompat(
+            activeGatt,
+            operation.characteristic,
+            operation.data,
+            operation.writeType
+        )
         if (!started) {
             writeQueue.clear()
             inFlightCompletion = null
@@ -2365,7 +2552,9 @@ class CheryBleController(
         cancelActionTimeout(serial)
         val runnable = Runnable {
             if (pendingActionBySerial.remove(serial) != null) {
-                listener?.onError("车控动作 $actionKey (serial=$serial) 等待应答超时", null)
+                val errMsg = "车控动作 $actionKey (serial=$serial) 等待应答超时"
+                listener?.onActionResult(actionKey, serial, success = false, parsedResponse = null, errorMessage = errMsg)
+                listener?.onError(errMsg, null)
             }
             actionTimeoutRunnables.remove(serial)
         }
@@ -2385,16 +2574,49 @@ class CheryBleController(
     }
 
     private fun cancelTimers() {
+        mtuFallbackRunnable?.let(mainHandler::removeCallbacks)
         connectTimeout?.let(mainHandler::removeCallbacks)
         handshakeTimeout?.let(mainHandler::removeCallbacks)
         accountTimeout?.let(mainHandler::removeCallbacks)
         bondTimeout?.let(mainHandler::removeCallbacks)
+        mtuFallbackRunnable = null
         connectTimeout = null
         handshakeTimeout = null
         accountTimeout = null
         bondTimeout = null
         actionTimeoutRunnables.values.toList().forEach(mainHandler::removeCallbacks)
         actionTimeoutRunnables.clear()
+    }
+
+    private fun describeClientAnswerCode(errCode: Int): String {
+        val code = errCode and 0xFF
+        val desc = when (code) {
+            0 -> "成功"
+            1 -> "CRC 校验失败"
+            2 -> "输入无效参数"
+            3 -> "SE 返回非 9000"
+            11 -> "有效期校验失败"
+            16, 97 -> "数字钥匙已过期"
+            17 -> "车控指令检查失败"
+            26 -> "TBOX 休眠/应急模式"
+            32 -> "帧序列错误"
+            33 -> "流水号错误"
+            34 -> "包长度不符"
+            36 -> "组包校验长度错误"
+            37 -> "消息 ID 不支持或分包丢包"
+            57, 83 -> "车端验签失败"
+            59 -> "车端 AES 解密失败"
+            61, 63 -> "车端 CMAC 校验失败"
+            62 -> "会话挑战数据不合法"
+            67 -> "钥匙期限无效"
+            68, 70 -> "车端 RTC 校时失败"
+            69 -> "VCKInfo 格式错误"
+            72 -> "车控权限不足"
+            96 -> "数字钥匙未生效"
+            110 -> "车辆未激活"
+            else -> "车端错误"
+        }
+        return "$desc(err=0x%02X)".format(code)
     }
 
     private fun emitStage() {
@@ -2418,8 +2640,23 @@ class CheryBleController(
         listener?.onPacketLog(direction, msgIdHex, serial, rawHex, decryptedSummary)
     }
 
+    private fun failPendingActions(reason: String) {
+        if (pendingActionBySerial.isEmpty()) return
+        val pending = pendingActionBySerial.entries.map { it.key to it.value }
+        pendingActionBySerial.clear()
+        for ((serial, actionKey) in pending) {
+            cancelActionTimeout(serial)
+            listener?.onActionResult(
+                actionKey = actionKey,
+                serial = serial,
+                success = false,
+                parsedResponse = null,
+                errorMessage = reason
+            )
+        }
+    }
+
     private fun fail(message: String, throwable: Throwable? = null) {
-        cancelTimers()
         val activeGattDevice = currentGatt?.device
         val abortedPairingAddr = if (waitingForBond) lastPairingAddress ?: activeGattDevice?.address else null
         val staleBondHint = if (ffe1ReportedUnbonded &&
@@ -2430,6 +2667,8 @@ class CheryBleController(
         } else {
             message
         }
+        failPendingActions(staleBondHint)
+        cancelTimers()
         appendDebugLog("ERR: $staleBondHint${throwable?.message?.let { " ($it)" }.orEmpty()}")
         currentStage = Stage.ERROR
         proximityTargetMatched = false
